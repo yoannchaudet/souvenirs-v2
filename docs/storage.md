@@ -1,262 +1,135 @@
 # Storage and recovery
 
-`.souvenirs/operations.sqlite` holds the original registry and audit log.
-The registry records identity, expected content, and last confirmed location.
-The audit records operations and recovery evidence.
-Neither replaces [filesystem authority](catalog.md).
+Souvenirs keeps tool state in `.souvenirs/`.
+The durable record is the [catalog format](catalog.md): folders, filenames, and manifests.
+Tool state is either rebuildable or limited to unfinished work and optional history.
+
+| Path | Role | If lost |
+| --- | --- | --- |
+| `lock` | Exclusive writer lock. | Recreated on next write. |
+| `journal/` | One plain-text journal per operation. | Unfinished operations lose guided recovery. History is lost. |
+| `index.sqlite` | Rebuildable cache for search and duplicate lookup. | Rebuilt from manifests. |
+| `staging/` | Unverified copies in progress. | Nothing. Staged files are never authoritative. |
+
+The safety model relies on one fact: imports copy and never delete sources.
+Until an import finishes, its source is the backup.
+The worst outcome of an interruption is therefore a repeated or cancelled import.
 
 ## Write profile
 
-The first version supports copy-only imports, in-place admission, integrity checks, and same-filesystem organization renames.
-Souvenirs must not delete import sources.
-Collection-package transfers, direct transfers between catalogs, and historical undo are deferred.
+Writes require a local APFS volume on macOS.
+The catalog, staging area, and destinations must share one volume.
+Network shares and synchronized folders must be rejected before mutation.
 
-Writes require local APFS on macOS.
-The catalog, staging area, and managed destinations must share one volume and a rename-capable mount.
-Nested mounts, network shares, synchronized folders, and unvalidated storage configurations must be rejected before mutation.
-Read sources need not use APFS, but direct sources inside another managed catalog are unsupported.
+Reading, planning, and integrity checks work on any filesystem, including network storage and backups.
+Sources can live anywhere readable.
 
-Every writer connection must set and verify:
+Every published file, manifest, journal append, and directory change must persist with `F_FULLFSYNC`.
+A persistence failure stops the operation with a contextual error.
 
-```sql
-PRAGMA journal_mode = DELETE;
-PRAGMA synchronous = EXTRA;
-PRAGMA fullfsync = ON;
-```
+## Lock
 
-These settings protect SQLite writes, not media files.
-Copied files require their own persistence operations, including macOS `F_FULLFSYNC`.
-Creation, publication, rename, and temporary-file removal must persist affected directory updates.
-Unsupported operations or persistence failures must stop mutation with a contextual error.
-The implementation must validate this complete storage profile before enabling writes.
+Every mutation holds an operating-system-managed exclusive lock on `.souvenirs/lock`.
+Only one mutating operation per catalog runs at a time.
+Another writer must report busy.
+A stale lock file without a live lock holder must not block writes.
 
-## Original registry
+## Verified copies
 
-Every admitted original must have one durable record with these conceptual fields:
+Every copied file, including sidecars and exports, follows these steps:
 
-| Field | Meaning |
-| --- | --- |
-| Original ID | Stable catalog-local identity for one original file occurrence. |
-| Logical-item ID | Stable catalog-local identity shared by originals in one logical item. |
-| Role | The original's supported role in that item. |
-| SHA-256 and byte size | The accepted content baseline for the complete file. |
-| Relative path | The last confirmed catalog-relative path, stored without lossy conversion. |
-| Filesystem identity | Last-confirmed volume and file identifiers, including available creation or generation evidence. |
-| Observed size and modification time | Last-confirmed filesystem observations used to detect ordinary changes between operations. |
+1. Create a new file exclusively in `staging/`, named after the operation and step.
+2. Copy source bytes while computing SHA-256.
+3. Persist the staged file, then read it back and hash it again.
+4. Compare the two digests. A mismatch stops the step.
+5. Publish with `renamex_np(..., RENAME_EXCL)`, which never overwrites an existing entry.
+6. Persist the destination directory.
 
-A RAW+JPEG pair has two original IDs and two digests under one logical-item ID.
-A single original also has both an original ID and logical-item ID.
-Sidecars and opaque export contents have no original records or permanent baselines.
+Unverified bytes must never appear at a final path.
+Originals publish before their sidecars.
+After an item's originals publish, Souvenirs records them in the [manifest](#manifest-updates).
 
-IDs must not derive from paths or hashes.
-Organization renames and their guarded recovery reversal must preserve original IDs, logical-item IDs, and content baselines.
-Committed steps update affected paths and filesystem observations together.
-New occurrences receive new original IDs, even when reusing deleted paths.
-Deleted IDs must not be reassigned.
-IDs are not portable global identifiers.
+## Manifest updates
 
-Byte-identical originals may belong to different items or collections.
-The digest is not a uniqueness constraint.
-Hash equality must not automatically skip imports, merge records, infer ownership, or authorize deletion.
-This design adds no automatic deduplication.
+Souvenirs replaces a manifest atomically:
 
-Copy admission uses the verified transfer digest without an additional full-file pass.
-Explicit admission of in-place originals requires reading each complete file to establish its baseline.
-Externally added originals remain unregistered until explicit admission.
-Inventory must report them, not hide or silently register them.
+1. Read the current manifest and confirm it matches the version the plan read.
+2. Write the new manifest to `staging/`, then persist it.
+3. Rename it over `SHA256SUMS` and persist the directory.
 
-## Integrity and reconciliation
+A changed manifest at step 1 stops the operation for a new plan.
+New entries use the digest computed during verified copy, without another full read.
+Admitting an existing original in place requires reading the complete file once.
 
-Planning must compare current files with retained identity and stat evidence, not merely snapshot whatever occupies each recorded path.
-Execution must recheck that evidence before mutation.
-A discrepancy requires verification or explicit reconciliation.
-Insufficient identity evidence must not silently identify a replacement as the old original.
+A datetime change renames an original and then updates its manifest line.
+A folder rename changes no manifest, because manifests list only filenames.
 
-An integrity check reads selected originals and compares their digest and size with recorded baselines.
-It must report checked scope, mismatches, missing files, unreadable files, and absent baselines.
-Incomplete coverage must not appear as a successful full check.
-The check does not change media, organization, or accepted baselines.
-It detects changed bytes, not their cause, and cannot restore damaged content.
+## Journal
 
-Ordinary browsing and naming operations use [inexpensive preconditions](operations.md#preconditions), not full-file hashing.
-A stored digest does not verify current bytes without a new read.
-A detected content mismatch must block mutations affecting that original until explicit reconciliation.
-Souvenirs must not silently overwrite its bytes, replace its baseline, or treat it as a new admission.
-Edits belong in sidecars or exports.
-Intentionally changed originals need an [admission workflow that remains unspecified](operations.md#workflows-needing-further-definition).
+Each mutation writes `.souvenirs/journal/{yyyyMMdd-HHmmss}-{operation}.jsonl` before changing any file.
+The first line records the confirmed plan.
+Each completed step appends one persisted line.
+The last line records the outcome: `completed` or `cancelled`.
 
-A missing path can mean relocation, deletion, or unavailable storage.
-It must not automatically remove the record.
-Hashes help reconcile displaced originals only when evidence identifies the occurrence unambiguously.
-Multiple identical candidates require explicit resolution, not first-match selection.
-Stable IDs and hashes do not replace filesystem identity checks.
-Registry identity, path, or grouping changes require a confirmed, audited reconciliation plan.
+The plan line records:
 
-## Audit and write eligibility
+- Source paths and catalog-relative destinations.
+- Accepted datetimes with their source, interpretation, and any batch correction.
+- Explicit exclusions and reported duplicates.
+- Expected digests where known.
 
-The database contains three tables:
-
-| Table | Responsibility |
-| --- | --- |
-| `originals` | Original identity, grouping, baselines, paths, and retained filesystem evidence. |
-| `operations` | Confirmed plans, scope, progress, errors, and completed or abandoned outcomes. |
-| `steps` | Concrete actions, before/after paths, staging names, expected identity and digest evidence, and per-step state. |
-
-Ordinary mutations require a healthy registry and audit log.
-Initialization and explicitly approved rebuilding are controlled setup procedures, not permission to replace unknown state.
-Initialization creates the tables and durable setup intent before publishing catalog configuration.
-Interrupted initialization must recover or reconcile existing state rather than silently create another database.
-Ordinary catalog reading requires neither registry nor audit state.
-Persistent identity and integrity checks depend on registry records.
-
-Hold an operating-system-managed exclusive lock on `.souvenirs/lock` throughout mutation or recovery.
-The lock must not depend on the SQLite file being replaced during rebuilding.
-Only one operation per catalog can be active.
-Another writer must report busy; a stale marker file alone must not act as the lock.
-
-The audit must record confirmed intent before filesystem mutation.
-Over the operation's lifetime, it records:
-
-- Operation identity, time, scope, and outcome.
-- Original source names, old and new paths, affected original and logical-item IDs, and intended registry changes.
-- Datetime origin: metadata-derived, user-assigned, or existing-canonical, including explicit timezone interpretation.
-- Step progress, recovery identity evidence, staging ownership, verified digests, and copied, skipped, or unfinished files.
-
-Completed history is append-only through Souvenirs.
-Resolution and rename reversal append references to earlier steps.
-They must not erase failures or rewrite completed history.
-Registry updates describe current confirmed state without erasing earlier audit transitions.
-External filesystem edits are not automatically audited.
-The log is not tamper-proof.
-
-The database is durable state, not a disposable cache.
-Unresolved records and recovery artifacts must not be discarded.
-Completed history can be archived only when no recovery remains pending.
-Archiving must retain current original records and baselines.
-A corrupt database must not be silently replaced.
-
-An interrupted operation remains active and blocks unrelated mutations until recovery records a terminal outcome.
-`completed` means every planned change is durable.
-`abandoned` means unfinished work is explicitly stopped and retained results are recorded.
-Neither outcome may conceal unresolved publication or rename conflicts.
-
-## Staged copies
-
-Execute one filesystem step at a time.
-Imports complete target organization before publishing incoming files.
-Every copied regular file, including sidecars and export payload, uses these states:
-
-| State | Durable meaning |
-| --- | --- |
-| `planned` | Source, destination, unique staging path, and intended IDs are recorded before creating the temporary file. |
-| `ready` | The staged copy is persisted and read-back verified. Its digest, size, and filesystem identity are recorded. |
-| `done` | Publication and directory updates are persisted. Registration and completed progress commit together in SQLite. |
-
-Create staging files exclusively and retain evidence of their ownership.
-Compute SHA-256 while copying source bytes, persist the staged file and directory, then reopen and hash the complete staged file.
-The source and staged digests must match before recording `ready`.
-Any known source baseline must also match.
-
-Publish with `renamex_np(..., RENAME_EXCL)` or its directory-relative equivalent.
-It must not overwrite an occupied entry or fall back to another copy.
-Unverified files must not appear at final paths.
-The temporary file becomes the final file without another media copy.
-Read, write, identity, verification, or persistence failures leave the step unfinished and report a contextual error.
-
-For originals, the verified digest and size become the accepted baseline.
-Sidecars and exports receive transfer verification, not permanent baselines or original records.
-Process each item's originals before its sidecars.
-A sidecar must not publish before its required owners are present.
-
-Directory creation also requires recorded intent and persisted progress.
-In-place admission hashes stable files and commits their records without staging or rewriting media.
-Registry-only steps use `planned` and `done`.
+A journal without an outcome is unfinished.
+An unfinished journal blocks other mutations until recovery records an outcome.
+Completed journals are optional history and can be archived or deleted.
 
 ## Interruption and recovery
 
-Recovery first reconciles the unfinished step against actual files and durable evidence:
+Recovery moves forward.
+It reads the unfinished journal and checks each unfinished step against the files:
 
-| Observation | Allowed action |
+| Observation | Action |
 | --- | --- |
-| Only a temporary file exists | Resume an identified, owned file, or abandon. Retain artifacts with uncertain ownership. |
-| Neither temporary nor final file exists | Retry from the source or abandon the step. |
-| A final file matches a `ready` step's recorded identity and digest | Persist directory updates and complete registration under the same IDs. Do not copy it again. |
-| Paths or identities conflict with the record | Stop for explicit reconciliation. Do not overwrite, delete, or guess ownership. |
+| A staged file exists without a recorded verification. | Delete it and copy again from the source. |
+| A staged file has a recorded verification and matches its digest. | Publish it. |
+| A published original is missing from its manifest. | Hash it, compare with the journal digest, then add it. |
+| A rename's source path exists and its target is free. | Perform the rename. |
+| A rename's target exists with the expected digest. | Mark the step done. |
+| Anything else. | Stop and report. Never overwrite, delete, or guess. |
 
-A recorded `done` step is not reimported.
-A `ready` file can publish after its current identity and digest match the record, without reading the source again.
-Resume must retain planned IDs and counters.
-Missing or changed committed files are integrity findings, not permission to replay completed steps.
-An interrupted operation is not successful completion.
-Errors must identify completed files, unfinished work, and recovery paths.
+Recovery deletes only staging files that the journal names.
+If a source is unavailable, the user can cancel the remaining copy steps.
+Cancelling keeps published files, records them in manifests, removes owned staging files, and records `cancelled`.
+A later import of the remaining files needs a new plan.
 
-### Abandon a copy operation
+Renames cannot be cancelled halfway.
+Recovery must finish them or stop and report the conflict.
 
-Abandonment requires explicit confirmation but does not require every planned destination to exist.
-First reconcile any publication that occurs before its database update.
-Any unfinished target-organization change must finish or reverse before abandonment releases the gate.
-Keep completed files and stop unfinished work, even when the source drive is unavailable.
-Remove only identified, owned temporary files.
-Retain and report artifacts whose ownership is uncertain.
+## Index
 
-Record retained files, missing companions, skipped work, and residual artifacts before releasing the recovery gate.
-Abandonment must revoke future execution of unfinished steps, including publication of retained staging files.
-A new import requires a new plan.
-Abandoned operations must not resume.
+`index.sqlite` caches manifest digests, paths, items, and extracted metadata.
+It speeds up browsing, search, and [duplicate reporting](operations.md#duplicates).
+It holds no information that the catalog format cannot reproduce.
 
-A partly imported RAW+JPEG item can remain a valid single-original item under its existing logical-item ID.
-Missing companions must be reported rather than counted as transferred.
-Created empty collections and partial export subtrees may remain, but the outcome must not claim a complete transfer.
-Sources, original bytes already published, and accepted baselines remain unchanged.
+A missing, outdated, or corrupt index is deleted and rebuilt.
+Rebuilding reads manifests and filenames.
+It does not rehash media.
+Mutations must update the index after the matching manifest change.
 
-## Rename recovery
+## Integrity checks
 
-Same-filesystem organization changes use native no-replace renames, not media copies.
-Each step records before/after paths and expected object identity before execution.
-After directory persistence, commit the changed registry paths, observations, and `done` progress together.
-A folder rename must update every affected original path.
+An integrity check verifies selected collection directories against their manifests.
+It reports checked scope, missing originals, changed originals, unadmitted originals, and unreadable files.
+Partial coverage must not appear as a full check.
+A check changes nothing.
 
-Recovery checks whether the expected object remains at the before-path or has reached the after-path.
-Unexpected or ambiguous locations require explicit reconciliation.
-The user can finish the plan or approve guarded reversal of its completed steps.
-The recovery choice must be durable before executing it.
+Integrity checks work on any copy of the catalog, including backups and network storage.
+Recovering a changed original means restoring it from a backup that passes its manifest.
 
-Reversal appends inverse rename steps in reverse order without erasing forward history.
-Every inverse step requires matching identity and an unoccupied original path.
-Inverse steps use the same intent, persistence, and registry-update protocol.
-Reversal must preserve current bytes, original IDs, and baselines.
-Conflicts block reversal rather than permitting overwrites.
+## Moving and backing up
 
-Unfinished organization changes must not be silently abandoned with mixed old and new names.
-Successful reversal records the original operation as abandoned after all inverse steps are durable.
-This is recovery of unfinished work, not historical undo or restoration of deleted files or edits.
+A catalog is self-contained.
+Copying the whole folder while no operation runs produces a complete, verifiable catalog.
+Journals store catalog-relative destinations, so a moved catalog keeps its history.
+The index can be rebuilt at the new location.
 
-## Relocation, backup, and database loss
-
-The audit must store catalog-relative destinations separately from external source locations, preserving native path identity.
-Pending operations bind to the selected catalog root and its filesystem identity.
-Relocation, cloning, or detected database restoration requires explicit revalidation before mutation.
-Recovery must not silently use an earlier absolute root or resume old operations without revalidation.
-
-Catalog backup requires quiescent files and a closed, consistent backup of the complete SQLite database.
-A consistent rollback of both files and database cannot always be detected locally.
-
-A missing or corrupt database permits filesystem browsing but blocks ordinary mutations.
-Recovery restores a consistent backup or performs an explicitly approved fresh rebuild.
-Rebuilding must preserve prior database files, SQLite auxiliary files, and staging artifacts as recovery evidence.
-It must validate visible layout and resolve incomplete organization before restoring ordinary write eligibility.
-It hashes current originals and assigns new IDs and baselines without claiming earlier identity, contents, or history.
-
-Build the replacement database separately and persist it before installation.
-Preserve prior database state at exclusive recovery locations rather than overwrite it.
-An interrupted rebuild must not expose a partially populated replacement as ready for ordinary use.
-Old staging files must not be published automatically or treated as originals.
-Initialization and rebuilding use the same catalog lock and validated persistence profile.
-
-SQLite transactions do not make filesystem changes atomic or hide intermediate states from external tools.
-External tools must not edit or relocate affected files during mutation or recovery.
-Read-back can use caches and does not independently prove physical-media persistence.
-Before enabling writes, the implementation must exercise crashes around staging creation, publication, database commits, rename reversal, and rebuild installation.
-The database is not a backup.
-It stores no permanent media snapshots or hidden retention copies.
-This contract promises neither unconditional rollback nor recovery from lost media, destroyed journal state, or concurrent external writes.
+Before enabling writes, the implementation must test crashes around staging, publication, manifest replacement, and renames.

@@ -1,21 +1,23 @@
 # Catalog
 
-Folders and filenames define collection membership, labels, accepted datetimes, and supported compound relationships.
-Reading that organization does not require SQLite.
-The [original registry](storage.md#original-registry) records identity and expected content without overriding the filesystem.
+The catalog format is the durable part of Souvenirs.
+Folders, filenames, and checksum manifests define collections, accepted datetimes, relationships, and expected content.
+Reading and verifying that organization requires neither Souvenirs nor its database.
 
 | Term | Meaning |
 | --- | --- |
-| Catalog | A root directory containing collections, configuration, and operational state. |
-| Collection | A named group of media stored in one dated folder or in annual folders for an ongoing activity. Year folders organize browsing, not collection membership. |
-| Original, or asset | A recognized original photo or video. Its complete bytes, including embedded metadata, are immutable after admission. |
-| Logical item | One original or a supported two-original compound item, with its associated sidecars. |
-| Sidecar | A supported mutable metadata or edit-data file associated with an original or compound item. |
-| Export | Mutable content inside a collection's opaque `exports/` subtree. |
-| Canonical name | A name that follows this format. |
+| Catalog | A root directory containing collections, configuration, and tool state. |
+| Collection | A named group of media in one dated folder, or in annual folders for an ongoing activity. |
+| Collection directory | One dated collection folder or one annual part of an ongoing collection. |
+| Original | A recognized original photo or video. Its complete bytes, including embedded metadata, are immutable after admission. |
+| Logical item | One original, or a supported two-original compound item, with its sidecars. |
+| Sidecar | A supported mutable metadata or edit-data file associated with an item. |
+| Export | Mutable content inside a collection directory's `exports/` subtree. |
+| Manifest | The `SHA256SUMS` file listing the expected digest of every original in a collection directory. |
+| Admission | Recording an original in its directory's manifest. |
 
 Immutability is a content contract, not a filesystem permission guarantee.
-A file's role determines this contract: a JPEG in `exports/` is mutable export content.
+A file's location determines its role: a JPEG in `exports/` is mutable export content.
 
 ## Layout
 
@@ -24,25 +26,46 @@ A file's role determines this contract: a JPEG in `exports/` is mutable export c
   .souvenirs.yml
   .souvenirs/
     lock
-    operations.sqlite
+    journal/
+    index.sqlite
     staging/
   {yyyy}/
     {start-yyyy-MM-dd} [+Nd] {label}/
-      {item-yyyy-MM-dd} {HH-mm-ss} {label} {NNN}.{ext}
+      SHA256SUMS
+      {yyyy-MM-dd} {HH-mm-ss} {NNN}.{ext}
       exports/
     z {label}/
-      {item-yyyy-MM-dd} {HH-mm-ss} {label} {NNN}.{ext}
+      SHA256SUMS
+      {yyyy-MM-dd} {HH-mm-ss} {NNN}.{ext}
       exports/
 ```
 
+For example:
+
+```text
+2019/
+  2019-07-14 +6d Brittany/
+    SHA256SUMS
+    2019-07-14 15-30-12 001.cr3
+    2019-07-14 15-30-12 001.jpg
+    2019-07-14 15-30-12 001.jpg.xmp
+    2019-07-15 09-02-47 002.heic
+    2019-07-15 09-02-47 002.mov
+    exports/
+  z Kids/
+    SHA256SUMS
+    2019-03-02 10-11-05 001.heic
+```
+
 Square brackets mark an optional token, not literal characters.
-Originals and sidecars live directly in collection directories.
+Originals, sidecars, and the manifest live directly in collection directories.
 Photos and videos share folders.
 Extensions control recognition, not routing.
 
-`.souvenirs/` contains the registry, audit history, staging, SQLite auxiliary files, and recovery artifacts.
-These are not media or collection members.
-Repair must not quarantine this directory.
+`.souvenirs/` holds [tool state](storage.md): the lock, operation journals, the rebuildable index, and staging.
+It is not part of the durable format.
+Deleting it must not lose any accepted organization or expected content.
+It can lose unfinished-operation recovery and optional history.
 
 ### Dated collections
 
@@ -51,7 +74,6 @@ Its accepted range must contain every original item's calendar date.
 `+Nd` adds `N` days to the start.
 For example, `+2d` spans three calendar dates.
 A single-day collection omits the token.
-Original filenames use item datetimes, not the collection start date.
 
 Exports do not contribute dates.
 Removing items must not shrink the accepted range automatically.
@@ -64,79 +86,107 @@ Ranges may overlap, and start dates may match if complete folder names remain di
 An ongoing collection uses `z {label}` under each represented year.
 Each annual part contains originals accepted in that year.
 The `z` prefix sorts ongoing parts after dated collections.
-Annual parts limit directory size.
-The collection spans multiple physical folders.
 Empty annual parts remain valid.
 
 Matching labels across years identify the same ongoing collection under the [portable comparison rules](#portable-names).
 Dated and ongoing collections occupy separate namespaces and may share a label.
-[Creation and rename](operations.md#creation-and-continuation) must check ongoing labels across all years.
+
+Each original belongs to exactly one collection directory.
+Cross-collection albums are external tasks.
 
 ## Accepted datetimes
 
-Every original item requires a valid calendar date and 24-hour clock time at second precision.
+Every original item requires a calendar date and 24-hour clock time at second precision.
 This is an organizational wall-clock value, not a universal instant or proof of capture time.
-The user can explicitly assign any valid datetime.
+Wall-clock sorting does not guarantee chronological order across travel or daylight-saving transitions.
 
-Souvenirs proposes usable capture metadata from the primary original.
-Supported companion metadata can supply a value when the primary has none.
-Conflicting usable values require explicit resolution.
-Exact primary roles, usable capture fields, and metadata precedence remain unspecified.
-Unresolved choices must not become silent defaults.
+### Sources
+
+Souvenirs reads candidate datetimes from these sources, in precedence order:
+
+| Rank | Source | Kind |
+| --- | --- | --- |
+| 1 | EXIF `DateTimeOriginal` of the primary original. | Metadata |
+| 2 | EXIF `DateTimeDigitized` of the primary original. | Metadata |
+| 3 | QuickTime `com.apple.quicktime.creationdate`, which carries a local time and offset. | Metadata |
+| 4 | XMP `photoshop:DateCreated` or `exif:DateTimeOriginal` in an owned sidecar. | Metadata |
+| 5 | QuickTime or MP4 container creation time. | Ambiguous metadata |
+| 6 | Google Takeout JSON `photoTakenTime` for a matching file. | Proposal |
+| 7 | A recognized [filename pattern](#filename-patterns). | Proposal |
+
+The highest-ranked usable source supplies the candidate.
+Disagreement between sources is reported in the plan but does not block import.
+For a compound item, the still image is the primary original.
+
+Metadata candidates are accepted as part of the plan.
+Ambiguous metadata and proposals require batch confirmation before they become accepted datetimes.
+The plan groups items by source so one confirmation covers many files.
+
+Filesystem modification and creation times are never sources.
+Souvenirs must not silently assign epoch values, midnight, or other placeholders.
+
+### Interpretation
 
 | Source value | Required interpretation |
 | --- | --- |
-| Recorded local date and clock | Preserve those fields regardless of the importing machine's timezone. |
-| No timezone | Do not guess a conversion. |
-| Known UTC instant without capture-local context | Require explicit use of UTC clock values or conversion through a selected offset or timezone. |
-| Ambiguous UTC-versus-local timestamp | Require explicit interpretation, including MP4/MOV fields with an unknown convention. |
+| Local date and clock | Preserve those fields regardless of the importing machine's timezone. |
+| Local value with an offset | Use the local fields. Record the offset in the journal, not the filename. |
+| UTC instant without local context | Require a batch choice: use UTC clock values or convert through a selected timezone. |
+| Container time with unknown convention | Treat as ambiguous. Require a batch choice between UTC and local. |
 | Fractional seconds | Discard the fraction without rounding. |
-| Date without a clock, or no usable value | Require explicit assignment, metadata correction, or exclusion before admission. |
+| Date without a clock | Require an explicit batch clock, such as `12-00-00`. |
+| No usable value | Require explicit assignment or exclusion. |
 
-One interpretation can apply to a selected batch.
-The plan must show resulting datetimes.
-The audit must record their origin and interpretation.
-Source offsets and fractions remain in metadata, not additional filename fields.
-Wall-clock sorting does not guarantee chronological order across travel or daylight-saving transitions.
+### Batch corrections
 
-Filesystem modification time is not a capture-datetime substitute.
-Souvenirs must not silently assign epoch values, midnight, or other placeholders.
-Collection ranges do not assign item datetimes.
-There is no automatically populated undated collection.
+The plan groups items by camera make, model, and serial number when metadata provides them.
+The user can apply a clock offset to one group, such as `+1h 03m 20s` for a drifted camera.
+The user can also assign one datetime to a selected batch, such as scanned prints from one summer.
+Every correction must appear in the plan as resulting datetimes before confirmation.
 
-After admission, the canonical filename remains authoritative during repair or admission of externally copied canonical files.
-Metadata disagreement is a finding, not permission to replace the accepted value.
-Changing embedded metadata also changes immutable bytes and is subject to [integrity checks](storage.md#integrity-and-reconciliation).
+Approximate dates are explicit assignments.
+For a scan known only as "summer 1987", the user can assign `1987-07-01 12-00-00`.
+The journal records that the value is user-assigned.
+
+### Filename patterns
+
+Filename proposals cover common sources without capture metadata:
+
+| Pattern example | Proposal |
+| --- | --- |
+| `IMG_20190714_153012.jpg`, `VID_20190714_153012.mp4` | Date and clock. |
+| `PXL_20190714_153012345.jpg` | Date and clock. Treat as UTC unless confirmed as local. |
+| `IMG-20190714-WA0001.jpg` | Date only. Requires a batch clock. |
+| `Screenshot 2019-07-14 at 15.30.12.png` | Date and clock. |
+
+The exact pattern list is configurable and remains open for extension.
+A pattern match is a proposal, never an accepted value without confirmation.
+
+### After admission
+
+The canonical filename is authoritative after admission.
+Metadata disagreement is a finding, not permission to rename.
 
 ## Relationships and sidecars
 
-Inferred relationships require files in the same direct directory, during both source discovery and catalog scanning.
-Recursive scans keep those relationship namespaces separate.
+Relationships require files in the same direct directory.
 Basenames, timestamps, and hashes must not infer cross-directory ownership.
-Later imports must not infer ownership from existing destination files.
-
-Discovery must consider all recognized direct children, not only selected files, when evaluating ambiguity.
-Every attached member must appear in the confirmed transfer set.
-An unresolved relationship blocks execution unless the user resolves or explicitly excludes it.
-Excluded or orphan sidecars stay at source unless a separate action handles them.
+An unresolved relationship blocks only the affected items, which the user can resolve or exclude as a batch.
 
 | Relationship | Rule |
 | --- | --- |
-| Inferred RAW+JPEG | Require the same basename and an unambiguous supported combination. An arbitrary non-JPEG extension does not establish a RAW role. |
-| Still/motion compound | Require explicit association. Matching photo/video basenames must not pair automatically. |
-| Existing canonical compound | Recognize a shared complete canonical stem and unambiguous supported roles without database or attachment history. |
-| Sidecar | Require one unambiguous local owner. Traversal or sorted order must not choose among candidates. |
+| RAW+JPEG | Same basename and an unambiguous supported combination. |
+| Live Photo | A still and a video sharing one Apple content identifier, with exactly one match in the directory. |
+| Other still and video | Require explicit pairing. Matching basenames alone must not pair photos and videos. |
+| Existing canonical compound | A shared canonical stem and unambiguous supported roles. |
+| Sidecar | Exactly one possible local owner. Traversal or sorted order must not choose among candidates. |
+
+The Apple content identifier is `ContentIdentifier` in the still's maker notes and `com.apple.quicktime.content.identifier` in the video.
+Identifier matching applies across differing basenames.
 
 A basename or canonical stem is the filename without its asset extension.
 Compound originals share one stem, accepted datetime, and counter.
-Registry grouping must agree with these relationships.
-Automatic phone still/motion pairing is not required.
-Explicit pairing does not promise vendor-specific Live Photo playback or metadata rewriting.
-
-Sidecar recognition uses the [configured extensions](#configuration).
-An extension identifies a candidate, not its owner.
-Automatic association requires a supported filename rule for that format.
-Explicit owner selection must still produce a supported, unambiguous catalog-sidecar name.
+Pairing does not promise vendor-specific playback or metadata rewriting.
 
 Sidecar naming forms are:
 
@@ -147,124 +197,119 @@ Sidecar naming forms are:
 ```
 
 XMP supports all three forms.
-Other formats use only their declared naming forms, not every XMP rule automatically.
-Adding `xml` must not enable generic XML ownership inference.
-XML association requires a specific supported rule or explicit owner selection.
-One item can have multiple sidecars in different formats or supported versions.
+Other sidecar formats use only their declared naming forms.
+One item can have multiple sidecars.
 
-Sidecars follow their item through approved organization changes.
-Souvenirs must preserve their naming suffixes and current bytes.
-Souvenirs treats sidecar contents as opaque data without interpreting or rewriting them.
-External tools can edit them between operations.
-Byte preservation and filename association do not guarantee external editor compatibility.
-
-Initial sidecar support covers per-file metadata and edit data.
-Proxy/thumbnail associations (`.lrv`, `.thm`) and AVCHD directory interpretation are outside this scope.
-Such content can remain opaque payload in an explicitly selected export subtree.
-Adding extensions does not enable these vendor-specific relationships or package handling.
-Scans and plans must report [unhandled content](operations.md#unhandled-content), not silently imply ownership or successful attachment.
+Sidecars follow their item through approved renames with their suffixes and bytes preserved.
+Souvenirs never interprets or rewrites sidecar contents.
+External tools can edit them freely.
+Proxy files such as `.lrv` and `.thm`, and card structures such as AVCHD, are outside initial scope.
 
 ## Names and counters
 
-The asset pattern is `{item-yyyy-MM-dd} {HH-mm-ss} {label} {NNN}.{ext}`.
+The original filename pattern is `{yyyy-MM-dd} {HH-mm-ss} {NNN}.{ext}`.
+The collection label lives only in the folder name.
+Renaming a collection therefore renames one folder and leaves every file and manifest unchanged.
 Hyphens replace Windows-forbidden clock colons.
-Canonical validity requires a valid datetime, matching collection label, and positive counter.
-The date must fit the dated range or ongoing part's year.
-Noncanonical names, conflicting counters, or ambiguous compound roles require resolution.
 
-Each date in each physical collection directory has one counter namespace across all media.
+A canonical name requires a valid datetime and a positive counter.
+The date must fit the dated range or the ongoing part's year.
+
+Each date in each collection directory has one counter namespace across all media.
 Compound members and sidecars share a counter.
-Separate logical items must not share the same date and counter.
 New counters start at `001` and widen beyond three digits.
-Allocation sorts new items by accepted datetime, then source path.
-It must allocate above that date's highest existing counter without changing existing names, counter values, or widths.
+New items are allocated in accepted-datetime order, then source path order.
+Allocation continues above that date's highest existing counter.
 
-Gaps are valid and must not be filled automatically.
-For example, if `002` disappears while `001` and `003` remain, the next addition uses `004`.
+Gaps are valid and must not be filled.
 Counters represent allocation order, not shooting order.
-Later additions can therefore have earlier datetimes without renumbering existing items.
-
 A clock-only change preserves the counter.
-A calendar-date change preserves it if free in the new namespace.
-Otherwise, allocation continues above that date's highest counter.
-Other items must not be renumbered.
-Resequencing is a possible later explicit operation, not routine import, repair, or rename behavior.
+A date change preserves it if free in the new namespace, and otherwise allocates above the highest.
+Other items are never renumbered.
 
-Paths and counters are not permanent identifiers.
-Deleted counters are not reserved, so a deleted name can later identify different media.
-Approved path changes can break external references.
+Paths are not permanent identifiers.
+Approved renames can break external editor references.
+
+## Manifests
+
+Every collection directory containing originals has a `SHA256SUMS` manifest.
+It lists each admitted original in that directory and nothing else.
+Sidecars, exports, and the manifest itself are not listed.
+
+The format is the standard checksum text format:
+
+```text
+{64 lowercase hex digits}  {filename}
+```
+
+Lines use UTF-8 and LF endings, sorted by filename bytes.
+Filenames are direct children of the collection directory.
+Anyone can verify a directory with `shasum -a 256 -c SHA256SUMS` or `sha256sum -c SHA256SUMS`.
+
+The manifest is the durable integrity record.
+It survives copies to new disks, backups, and cloud storage alongside the media.
+A verified copy of a catalog therefore proves that its bytes still match their admission.
+
+| Observation | Finding |
+| --- | --- |
+| A listed file is missing | Missing original. |
+| A listed file's digest differs | Changed original. |
+| A recognized original is not listed | Unadmitted original. |
+| A manifest line is malformed or not canonical | Manifest error. |
+
+Findings never authorize automatic changes.
+Byte-identical originals may appear in many manifests.
+Souvenirs rewrites a manifest only through the [atomic replacement protocol](storage.md#manifest-updates).
 
 ## Exports
 
-Every dated collection or ongoing annual part can contain one real directory named exactly `exports`.
-It can hold arbitrary edited media, sidecars, documents, nested folders, unknown files, and empty directories.
-It requires no canonical names or accepted datetimes.
+Every collection directory can contain one real directory named exactly `exports`.
+It can hold edited media, sidecars, documents, nested folders, and unknown files.
+It requires no canonical names, datetimes, or manifest entries.
 
-Exports belong to the physical collection, not inferred original owners.
-Souvenirs must not rewrite their names, flatten their hierarchy, or automatically delete or separate them.
-They do not affect original pairing, counters, ranges, or year routing.
-They are not repair or quarantine candidates.
-Changing an individual original's name or datetime leaves exports in place.
-[Whole-folder organization renames](operations.md#organization-and-repair) carry them unchanged.
-
-Original scanning and integrity checks exclude export subtrees, even when the user selects the subtree itself.
-Inventory must distinguish intentional exclusion from unreadable original directories.
-This exclusion does not establish complete export coverage.
+Exports belong to the collection directory, not to individual originals.
+Souvenirs must not rename, flatten, or delete export content.
+Exports do not affect pairing, counters, ranges, or year routing.
+Folder renames carry them unchanged.
+Scans and integrity checks skip export subtrees.
 
 ## Portable names
 
 The format targets Windows, Linux, and macOS.
-These naming rules do not extend initial [write support](storage.md#write-profile) beyond macOS/APFS.
+Labels appear only in collection folder names.
 New labels use Unicode NFC normalization while retaining accepted spelling.
-Souvenirs must reject:
+Souvenirs must reject labels containing:
 
-- Empty labels, leading or trailing whitespace, trailing dots, control characters, NUL, and whitespace other than ordinary spaces.
-- `<`, `>`, `:`, `"`, `/`, `\`, `|`, `?`, and `*`.
-- `.` and `..`, plus Windows device names, including reserved forms with extensions.
-- A first space-delimited token matching `+[0-9]+d`, including when it is the entire label.
+- Empty values, leading or trailing whitespace, trailing dots, control characters, or non-space whitespace.
+- `<`, `>`, `:`, `"`, `/`, `\`, `|`, `?`, or `*`.
+- `.`, `..`, or Windows device names, including reserved forms with extensions.
+- A first space-delimited token matching `+[0-9]+d`.
 
-Thus `+2d` and `+2d Reunion` are invalid labels.
-Otherwise-valid date-looking labels remain permitted.
 Extension recognition is ASCII-case-insensitive.
-Import and rename must preserve extension spelling, including case.
-
-Each complete generated component must fit both 255 UTF-8 bytes and 255 UTF-16 code units.
-This includes asset names and sidecar suffixes, so permitted label length depends on the generated names.
+Import preserves extension spelling, including case.
+Each generated component must fit 255 UTF-8 bytes and 255 UTF-16 code units.
 Souvenirs must not truncate or silently substitute names.
 
-Collision checks must compare Unicode normalization and case-fold equivalents across planned, existing, and unmanaged entries.
+Collision checks compare Unicode normalization and case-fold equivalents.
 Case-only differences are conflicts.
 No entry wins by traversal order.
-Comparisons must preserve native path identity without lossy conversion.
-Repair must not silently normalize external names.
-
-Validation must also include the selected root and complete target path.
-Component limits do not guarantee full-path validity or Windows long-path support.
-An externally copied catalog requires path validation at its new location before managed mutation.
-The host can impose stricter limits.
 
 ## Configuration
 
 ```yaml
 format_version: 2
-media_extensions: [jpg, jpeg, heic, cr3, dng, mp4, mov]
-sidecar_extensions: [xmp, aae, dop, pp3, acr]
+media_extensions: [jpg, jpeg, heic, cr3, nef, arw, dng, mp4, mov]
+sidecar_extensions: [xmp, aae, dop, pp3]
 ```
 
 The extension lists are illustrative, not a finalized support matrix.
-Configuration must declare original-media and candidate-sidecar extensions separately.
-The lists must not overlap under ASCII-case-insensitive comparison.
-An overlap is a configuration error that blocks managed mutation.
-Sidecars are not original assets.
-Recognition does not establish an ownership rule or enable sidecar-content parsing.
-Additional format-specific naming rules and owner slots remain unspecified.
-The configuration has no routing groups.
-Original IDs and digests are not filename fields.
-
+The two lists must not overlap under ASCII-case-insensitive comparison.
+An overlap blocks mutation.
 An absent version denotes the legacy layout.
-Unsupported versions must refuse managed mutation.
-Repair must not adopt or convert catalogs implicitly.
-Legacy binaries must not mutate this format.
-The version marker cannot make them safe.
-Version 2 writes require the [registry and audit contract](storage.md#audit-and-write-eligibility).
-Legacy conversion follows the separate [migration constraints](operations.md#legacy-conversion).
+Unsupported versions must refuse mutation.
+
+## Open questions
+
+- Is `SHA256SUMS` the right manifest name, or should it be hidden as `.SHA256SUMS`?
+- Which filename patterns ship by default, and are they configurable per catalog?
+- Which RAW formats and sidecar formats form the initial support matrix?
