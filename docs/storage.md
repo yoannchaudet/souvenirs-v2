@@ -8,31 +8,38 @@ Tool state is either rebuildable or limited to unfinished work and optional hist
 | --- | --- | --- |
 | `lock` | Exclusive writer lock. | Recreated on next write. |
 | `journal/` | One plain-text journal per operation. | Unfinished operations lose guided recovery. History is lost. |
-| `index.sqlite` | Rebuildable cache for search and duplicate lookup. | Rebuilt from manifests. |
+| `index.sqlite` | Rebuildable cache for search and duplicate lookup. Kept on the local computer for a NAS catalog. | Rebuilt from manifests. |
 | `staging/` | Unverified copies in progress. | Nothing. Staged files are never authoritative. |
 
 The safety model relies on one fact: imports copy and never delete sources.
 Until an import finishes, its source is the backup.
 The worst outcome of an interruption is therefore a repeated or cancelled import.
 
-## Write profile
+## Supported storage
 
-Writes require a local APFS volume on macOS.
+| Storage | Writes | Notes |
+| --- | --- | --- |
+| Internal or attached drive | Yes | APFS, HFS+, or exFAT. |
+| NAS over SMB | Yes | Persistence is confirmed by the NAS, then checked by [verification](#verified-copies). |
+| Synchronized folders, such as iCloud Drive or Dropbox | No | They evict and rename files on their own. Reading is allowed. |
+
 The catalog, staging area, and destinations must share one volume.
-Network shares and synchronized folders must be rejected before mutation.
-
-Reading, planning, and integrity checks work on any filesystem, including network storage and backups.
 Sources can live anywhere readable.
+Reading and integrity checks work on any storage, including backups.
 
-Every published file, manifest, journal append, and directory change must persist with `F_FULLFSYNC`.
+Every published file, manifest, journal append, and directory change must be persisted before the next step.
+Souvenirs uses `F_FULLFSYNC` where the volume supports it, and `fsync` otherwise.
 A persistence failure stops the operation with a contextual error.
 
 ## Lock
 
-Every mutation holds an operating-system-managed exclusive lock on `.souvenirs/lock`.
-Only one mutating operation per catalog runs at a time.
-Another writer must report busy.
-A stale lock file without a live lock holder must not block writes.
+Every mutation holds `.souvenirs/lock`, a file created exclusively at the start and removed at the end.
+It records the host name, process ID, and start time.
+Only one mutating operation per catalog runs at a time, even across computers sharing a NAS.
+Another writer must report busy and show the recorded holder.
+
+A lock left by a crashed process on the same host is removed automatically.
+Any other existing lock requires explicit user confirmation before removal.
 
 ## Verified copies
 
@@ -40,9 +47,9 @@ Every copied file, including sidecars and exports, follows these steps:
 
 1. Create a new file exclusively in `staging/`, named after the operation and step.
 2. Copy source bytes while computing SHA-256.
-3. Persist the staged file, then read it back and hash it again.
+3. Persist the staged file, then read it back without the local cache (`F_NOCACHE`) and hash it again.
 4. Compare the two digests. A mismatch stops the step.
-5. Publish with `renamex_np(..., RENAME_EXCL)`, which never overwrites an existing entry.
+5. Publish by rename without overwriting. Use `renamex_np(..., RENAME_EXCL)` where supported. Otherwise, confirm the target is free under the [lock](#lock), then rename.
 6. Persist the destination directory.
 
 Unverified bytes must never appear at a final path.
@@ -109,6 +116,10 @@ Recovery must finish them or stop and report the conflict.
 `index.sqlite` caches manifest digests, paths, items, and extracted metadata.
 It speeds up browsing, search, and [duplicate reporting](operations.md#duplicates).
 It holds no information that the catalog format cannot reproduce.
+
+For a catalog on a NAS, the index lives in the local user cache instead of `.souvenirs/`.
+SQLite file locking is unreliable over network shares.
+Each computer keeps its own index and rebuilds it when it is missing or outdated.
 
 A missing, outdated, or corrupt index is deleted and rebuilt.
 Rebuilding reads manifests and filenames.

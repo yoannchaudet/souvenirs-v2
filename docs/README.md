@@ -33,7 +33,7 @@ Every requirement must serve one of these goals:
 - Backups. Souvenirs produces files that ordinary backup tools copy well.
 - Automatic deduplication or deletion. Souvenirs reports duplicates but never removes them on its own.
 - Rewriting embedded metadata, sidecar contents, or external editor references.
-- Multi-user editing, network catalogs, and historical undo.
+- Simultaneous writes from several computers, and historical undo.
 
 ## Review order
 
@@ -51,9 +51,10 @@ Links connect shared requirements.
 The specification must not grow far ahead of a working implementation.
 The first milestone is one thin, end-to-end slice:
 
-1. Import one memory card into a new dated collection on macOS/APFS.
+1. Import one memory card into a new dated collection on an attached drive and on a NAS.
 2. Write canonical names and the folder manifest.
 3. Verify the collection with `shasum -a 256 -c SHA256SUMS`.
-4. Run the slice on one real year of the backlog.
+4. Interrupt an import on the NAS, by disconnecting the network, and recover it.
+5. Run the slice on one real year of the backlog.
 
 Findings from that run must update this specification before further features are specified.
