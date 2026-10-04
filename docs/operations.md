@@ -1,203 +1,178 @@
 # Operations
 
-Every mutation requires a concrete plan, confirmation, and [write eligibility](storage.md#audit-and-write-eligibility).
-No operation may overwrite an occupied destination.
-Destination directories below the selected root must be real directories, not symlinks.
+Every mutation follows the same pattern: plan, review, confirm, execute.
+Execution writes a [journal](storage.md#journal) before changing files.
+No operation overwrites an occupied destination or deletes a source.
+Decisions apply to batches wherever possible, so large imports stay practical.
 
 ## Operation inventory
 
-These are proposed operations, not command names or implemented features.
-The linked contracts define their behavior and restrictions.
-Workflows with unresolved scope appear separately below.
+These are proposed operations, not command names.
 
-### Read and plan
+### Read
 
-| Operation | Purpose and contract |
+| Operation | Purpose |
 | --- | --- |
-| Read catalog | Inventory folders, logical items, and findings from the [filesystem](catalog.md), including unregistered originals. |
-| Inspect original records | Read recorded IDs, roles, paths, and content baselines from the [registry](storage.md#original-registry). |
-| Inspect operation history | Read recorded intent, progress, outcomes, and pending recovery from the [audit](storage.md#audit-and-write-eligibility). |
-| Prepare a plan | Scan selected sources and resolve dates, relationships, targets, and exclusions before proposing [changes](#plans-and-selection). |
-| Check original integrity | Compare selected original bytes with recorded baselines and report [coverage and discrepancies](storage.md#integrity-and-reconciliation). |
+| Browse catalog | List collections, items, and findings from the [filesystem](catalog.md). |
+| Check integrity | Verify collection directories against their [manifests](storage.md#integrity-checks). |
+| Report duplicates | List byte-identical originals inside the catalog or between a source and the catalog. |
+| Read history | Read completed and unfinished [journals](storage.md#journal). |
 
-These operations do not change media, organization, or accepted baselines.
-Confirmation and execution are shared stages of the mutating operations below.
+### Change
 
-### Create and change content
-
-| Operation | Purpose and contract |
+| Operation | Purpose |
 | --- | --- |
-| Initialize catalog | Create configuration, registry, and audit state in the required [initialization order](storage.md#audit-and-write-eligibility). |
-| Create dated collection | Declare a named occasion and its accepted [date range](catalog.md#dated-collections). |
-| Create ongoing collection | Declare a continuing group organized into [annual folders](catalog.md#ongoing-collections). |
-| Import originals | Copy selected originals into an explicitly [new or existing collection](#creation-and-continuation), leaving sources unchanged. |
-| Admit originals in place | Explicitly register existing originals and establish their [content baselines](storage.md#original-registry) without transferring them. |
-| Rename collection | Change the label of a dated collection or every annual part of an [ongoing collection](#organization-and-repair). |
-| Change accepted datetime | Change an admitted item's organizational date or time under the [placement and counter rules](#organization-and-repair). |
-| Change dated range | Change a dated collection's accepted range and affected folder placement through an [explicit plan](#organization-and-repair). |
-| Attach companion or sidecar | Add an incoming file to a selected item's [vacant supported role](#late-companions). |
-| Add exports | Copy a selected export file or subtree into an [explicit export destination](#exports). |
+| Initialize catalog | Create `.souvenirs.yml` and `.souvenirs/`. |
+| Create collection | Declare a dated collection with its range, or an ongoing collection. |
+| Import | Copy originals from a source into one selected collection. |
+| Organize backlog | Copy a large source tree into proposed collections. See [Organize backlog](#organize-backlog). |
+| Admit in place | Add existing canonical originals to their directory's manifest. |
+| Rename collection | Rename one dated folder, or every annual folder of an ongoing collection. |
+| Change dated range | Rename a dated folder, moving it to another year when the start year changes. |
+| Change datetime | Rename an item's originals and sidecars and update the manifest. |
+| Attach companion or sidecar | Add a file to a selected item's vacant supported role. |
+| Add exports | Copy a file or subtree into a collection's `exports/`. |
+| Convert legacy catalog | Organize a legacy Souvenirs catalog as a backlog source. See [Legacy conversion](#legacy-conversion). |
 
-Organization changes use same-filesystem renames under the [write profile](storage.md#write-profile).
-They do not authorize arbitrary collection reassignment.
+### Maintain
 
-### Maintain and recover
-
-| Operation | Purpose and contract |
+| Operation | Purpose |
 | --- | --- |
-| Reconcile original records | Resolve identity, path, or grouping disagreement through an [audited plan](storage.md#integrity-and-reconciliation). |
-| Recover or resume operation | Reconcile interrupted work and finish the matching operation without [reimporting completed transfers](storage.md#interruption-and-recovery). |
-| Abandon a copy operation | Retain completed files and stop unfinished work through [explicit abandonment](storage.md#abandon-a-copy-operation). |
-| Reverse an unfinished rename | Reverse completed steps under [identity and destination guards](storage.md#rename-recovery), not historical undo. |
-| Revalidate catalog | Revalidate identity and pending work after catalog [relocation, cloning, or database restoration](storage.md#relocation-backup-and-database-loss). |
-| Rebuild database | Explicitly establish new IDs and baselines while preserving [old state and recovery evidence](storage.md#relocation-backup-and-database-loss). |
-| Archive completed history | Archive eligible history without discarding current original records, baselines, or [pending recovery evidence](storage.md#audit-and-write-eligibility). |
+| Recover | Finish an unfinished operation from its [journal](storage.md#interruption-and-recovery). |
+| Cancel a copy | Keep published files and stop unfinished copy steps. |
+| Rebuild index | Recreate `index.sqlite` from manifests and filenames. |
 
-### Workflows needing further definition
+## Plans
 
-| Operation | Unresolved scope |
-| --- | --- |
-| Repair organization | The allowed corrections need definition. Read-only findings do not authorize automatic changes. |
-| Quarantine content | No explicit quarantine operation is defined yet. |
-| Admit a changed original | The workflow must distinguish a new occurrence from restoration of expected bytes while preserving earlier evidence. |
-| Convert legacy catalog | [Migration constraints](#legacy-conversion) exist, but the conversion algorithm is unspecified. |
+A plan lists sources, destinations, accepted datetimes, and every planned file and manifest change.
+It distinguishes transferred items, excluded items, and untouched source content.
+Excluded content stays at the source.
+Unknown content is never copied, renamed, or deleted implicitly.
 
-Unspecified recognition, metadata, or placement rules must not become silent defaults.
-Editing, culling, tags, and backups remain external tasks.
-General deletion, automatic deduplication, collection merging, and partial-year reassignment are not defined operations in this version.
-Counter resequencing is deferred rather than part of repair.
-Initial sidecar support excludes [proxy associations and directory-package interpretation](catalog.md#relationships-and-sidecars).
-Import moves, collection-package transfers, direct transfers between catalogs, and historical undo are outside the initial scope.
+Items with unresolved dates or relationships do not block the rest of the plan.
+The plan groups them, and the user resolves or excludes each group.
+Excluded groups stay at the source for a later import.
 
-Users can copy collection folders externally while catalogs are idle, then scan and explicitly admit valid originals.
-External copies have no Souvenirs verification, audit, or resume guarantee.
-Admission establishes new baselines; it does not prove that copied bytes match an earlier source.
-
-## Plans and selection
-
-A plan must identify selected sources, destinations, and intended filesystem and registry changes.
-For tracked originals, it must identify original IDs, logical-item IDs, and expected registry state.
-It must distinguish selected transfers, explicit exclusions, and untouched source content.
-Excluded content must stay at source and must not appear as transferred.
-Unknown content must not be copied, renamed, or deleted implicitly.
-
-Unresolved dates or relationships block an executable import plan.
-The user must resolve them or explicitly exclude the affected items.
-Import must not silently skip unresolved items, including in ongoing collections.
-Plans must warn when path changes require external relinking.
+Planning validates names, counters, ranges, destination namespaces, and the [write profile](storage.md#write-profile).
+Execution rechecks that destinations are still free and manifests are unchanged.
+Drift requires a new plan, never silent replanning.
+Naming and folder operations must not hash the media collection.
 
 ### Unhandled content
 
-Source scans, catalog inventory, and repair must distinguish these findings:
+Scans and plans report these findings without acting on them:
 
 | Finding | Meaning |
 | --- | --- |
-| Unknown content | An entry without a recognized media, sidecar, catalog-structure, or allowed-payload role. |
-| Orphan or unmatched sidecar | A recognized candidate has no matching owner or no supported naming rule. Report which condition applies. |
-| Ambiguous sidecar | More than one owner remains possible. Traversal order must not select one. |
+| Unknown content | A file with no recognized media, sidecar, or catalog role. |
+| Orphan sidecar | A sidecar with no matching owner. |
+| Ambiguous sidecar | A sidecar with more than one possible owner. |
 
-Rename and transfer plans must identify unhandled neighboring content and its disposition.
-Distinguish files retained at source from unchanged payload carried by an explicitly selected whole-folder operation.
-The plan must not imply that unhandled files follow an original's basename changes.
-These findings do not authorize automatic attachment, deletion, or quarantine.
+## Duplicates
 
-## Preconditions
+Souvenirs never removes duplicates automatically.
+It reports them so the user can decide in bulk.
 
-Planning must validate:
+A plan reports two kinds:
 
-- Object types, filesystem identity where available, size, and modification time.
-- Item roles, recognition settings, relationship rules, collection ranges, counters, and affected registry state.
-- Complete destination namespaces, including unmanaged content.
-- [Portable names and complete target paths](catalog.md#portable-names).
-- The [write profile](storage.md#write-profile), including mount boundaries between staging and every managed destination.
+| Kind | Default | Batch choice |
+| --- | --- | --- |
+| Source original already in the catalog | Import. | Skip all of them. |
+| Several identical originals within the source | Import all. | Import one copy per digest. |
 
-Execution must recheck relevant preconditions before mutation.
-Drift requires a new plan or explicit reconciliation, not silent replanning.
-Identity and content conflicts block mutation of the affected scope.
-These checks detect ordinary drift, not every same-size, same-mtime edit.
-They provide neither a byte snapshot nor isolation from external writers.
-Pure naming and folder operations must not copy or hash the whole media collection.
+Skipped files stay at the source.
+"One copy per digest" keeps the copy with the earliest accepted datetime, then the first source path in byte order.
+The journal records every skipped file and the catalog path it duplicates.
+Duplicate detection uses the [index](storage.md#index) for catalog content and the copy digest for sources.
 
-## Creation and continuation
+## Organize backlog
 
-Creation must declare a dated or ongoing collection and validate its names before mutation.
-Every import must explicitly create a collection or continue a selected existing collection.
-Matching labels, dates, or derived ranges must not select an existing target or merge directories automatically.
+This workflow turns a large, messy source tree into collections with few decisions.
+It is the primary path for the existing 10-year archive.
 
-A new dated collection proposes one range from all resolved original datetimes across media types.
-The user accepts it or supplies a wider range containing every selected original date.
-Continuation targets the existing collection rather than deriving another collection from the incoming batch.
-For example, a one-day contribution can join an existing week-long trip.
+1. Select a source tree. Souvenirs only reads it.
+2. Scan every directory. Each direct directory is its own [relationship](catalog.md#relationships-and-sidecars) namespace.
+3. Resolve datetimes by [source](catalog.md#sources). Group proposals and ambiguous values for batch confirmation.
+4. Report [duplicates](#duplicates) and accept batch choices.
+5. Propose collections, described below.
+6. Let the user adjust proposals: rename, merge, split, retarget to an existing collection, or exclude.
+7. Confirm and execute as one journaled operation.
 
-Dates inside the accepted range leave the directory unchanged.
-Outside dates require explicit range extension, datetime correction, or exclusion.
-An extension must contain the old range and newly accepted dates.
-An earlier start can move the entire directory to another year without changing existing original basenames or counters.
-An occupied destination requires conflict resolution, not merging.
+Souvenirs proposes collections by sorting resolved items by accepted datetime.
+A gap longer than the configured threshold starts a new proposed dated collection.
+The default threshold is 24 hours.
 
-Ongoing continuation routes by accepted year and creates missing annual parts of the selected collection.
-Ongoing creation and rename must scan the label namespace across all years.
-An incomplete scan blocks those operations.
-A label used by another ongoing collection is a semantic conflict even when destination paths are free.
+A proposal takes its label from the source folder name when all its items share one folder.
+Otherwise the label is empty and the user must supply one.
+A proposal that overlaps an existing collection's range is flagged, never merged automatically.
+The user can assign any proposal to an ongoing collection instead.
 
-## Organization and repair
+Unresolved items form their own group.
+They stay at the source until the user resolves or excludes them.
 
-Rename changes the selected collection label while preserving item datetimes and counters.
-An ongoing rename must change all annual parts, not only selected years.
-Partial-year reassignment and collection merging are unsupported.
-Import and repair must not split, merge, or reassign collections automatically.
+## Import
 
-Datetime and range changes require explicit plans addressing names, counters, placement, and registry paths.
-They must preserve unaffected names and reject namespace conflicts.
-Placement choices for admitted dates outside their existing collection remain unspecified.
-[Counter rules](catalog.md#names-and-counters) determine whether a changed date retains its counter.
-[Registry rules](storage.md#original-registry) preserve IDs and baselines through organization changes.
+Import copies selected originals into one explicitly selected collection.
+Matching labels or dates never select or merge a collection automatically.
 
-Whole-folder organization renames carry current exports and unknown contents unchanged.
-They must not reinterpret this payload or silently omit it.
-Interrupted renames require [completion or guarded reversal](storage.md#rename-recovery).
+For a new dated collection, the plan proposes a range covering every resolved datetime.
+The user accepts it or supplies a wider range.
 
-Repair reports inconsistencies while preserving accepted datetimes, ranges, gaps, exports, and empty collections.
-It must not silently normalize names, adopt external originals, replace baselines, or reconcile ambiguous identities.
-Permitted corrections and any explicit quarantine operation remain unspecified.
-Read-only [integrity checks](storage.md#integrity-and-reconciliation) compare bytes without changing accepted organization or baselines.
+For an existing dated collection, dates inside the range need no change.
+Outside dates require a range extension, a datetime correction, or exclusion.
+An earlier start date can move the folder to another year without renaming any file.
+
+For an ongoing collection, items route to annual parts by accepted year.
+Missing annual parts are created.
+Creating or renaming an ongoing collection checks its label across all years.
+
+## Organization changes
+
+Renaming a collection renames folders only.
+Files, manifests, and exports are unchanged.
+An ongoing rename covers every annual part.
+
+Changing a datetime renames the item's originals and sidecars, then updates the manifest.
+[Counter rules](catalog.md#names-and-counters) decide whether the counter is kept.
+Placement of a new date outside the collection's range remains an open question.
+
+Folder renames carry exports and unknown content unchanged.
+Plans warn that renames can break external editor references.
 
 ## Late companions
 
-Attachment requires explicit selection of an existing owner and every incoming companion or sidecar.
+Attachment requires explicit selection of an existing item and every incoming file.
 The role must be supported and vacant.
-The plan must validate conflicts and retain the owner's datetime, label, and counter.
-Attachment must not replace an occupied role or rewrite existing bytes.
-
-A late original receives a new original ID and baseline under the existing logical-item ID.
-Existing original IDs and baselines remain unchanged.
-A sidecar receives no original record.
-This is declared ownership, not cross-directory inference.
+The incoming file takes the item's stem.
+A late original is copied, verified, and added to the manifest.
+Existing files are never replaced or rewritten.
 
 ## Exports
 
-Adding originals does not silently include a source export tree.
-The plan must identify any such tree left behind.
-Explicit inclusion of a complete source export subtree requires an absent destination `exports` directory.
-An existing target requires separate explicit placement, not automatic merging.
-
-Further exports require an explicit destination inside `exports`.
-Existing directories can contain that destination, but selected directory payloads require absent destination directories.
-Occupied entry names remain conflicts.
-
-The operation must enumerate the complete export payload before mutation.
-Unsupported entries and target-invalid names require resolution.
-It must not follow symlink targets or silently omit unsupported entries.
-Transfers preserve bytes and relative paths, not universal cross-platform filesystem attributes.
-Export copies must preserve empty directories and must not register payload as originals.
-
-Every copied regular file follows the [staged-copy protocol](storage.md#staged-copies).
+Import never includes a source export tree implicitly.
+Adding exports requires an explicit destination inside `exports/`.
+Occupied names are conflicts, never merged.
+Export copies preserve bytes, relative paths, and empty directories.
+They do not follow symlinks.
+Every copied file follows the [verified-copy protocol](storage.md#verified-copies).
 
 ## Legacy conversion
 
-Conversion from the original Souvenirs requires a separate approved plan, not implicit repair.
-It must resolve conflicting counters from former media groups and account for legacy date uncertainty.
-Date-only names require explicit clock assignment when metadata provides no usable time.
-Conversion must preserve unknown content and establish records and baselines for admitted originals.
-Those baselines cannot prove earlier bytes.
-The conversion algorithm and command compatibility remain unspecified.
+A legacy Souvenirs catalog is a backlog source.
+Conversion uses the [Organize backlog](#organize-backlog) workflow with two additions:
+
+- Legacy folder names propose collection labels and ranges.
+- Legacy filenames propose datetimes, confirmed as a batch.
+
+Conversion copies into a new catalog and leaves the legacy catalog unchanged.
+Legacy-specific name parsing remains an open question until the legacy format is documented here.
+
+## Open questions
+
+- Should conversion also support in-place renaming, to avoid doubling disk usage for a large archive?
+- Should a move-items operation exist for moving originals between collections on the same volume?
+- Where does a changed datetime go when it falls outside its collection's range?
+- Should import optionally copy to a second destination, such as a backup drive?
+- Which repair corrections, if any, should be automated after explicit confirmation?
+- How does a user re-admit an intentionally changed original?
+- Should counter resequencing ever exist as an explicit operation?
