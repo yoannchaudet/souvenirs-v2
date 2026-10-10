@@ -296,14 +296,12 @@ pub struct ImportScanResult {
     pub unresolved_item_count: usize,
     pub datetime_sources: Vec<ImportDateSourceSummary>,
 }
-
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ImportDateSourceSummary {
     pub source: ImportDateSource,
     pub state: ImportDateState,
     pub item_count: usize,
 }
-
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportDateSource {
@@ -316,7 +314,6 @@ pub enum ImportDateSource {
     GoogleTakeoutPhotoTakenTime,
     FilenamePattern,
 }
-
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportDateState {

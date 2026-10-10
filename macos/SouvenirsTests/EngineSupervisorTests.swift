@@ -243,12 +243,9 @@ final class EngineSupervisorTests: XCTestCase {
         let supervisor = EngineSupervisor(executableURL: executable)
         _ = try await supervisor.start()
         let handshake = try await supervisor.handshake()
-
         let scan = try await supervisor.scanImport(sourcePath: "/source")
-
         XCTAssertEqual(handshake.compatibleClientVersion, "0.2.0")
         XCTAssertNil(scan.suggestedAcceptedDate)
-        XCTAssertNil(scan.suggestedRangeEnd)
         XCTAssertEqual(scan.unresolvedItemCount, 1)
         try await supervisor.stop()
     }

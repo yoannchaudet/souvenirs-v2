@@ -858,43 +858,51 @@ mod tests {
 
     #[test]
     fn operation_start_rejects_a_removed_or_replaced_reviewed_existing_collection() {
+        use std::os::unix::fs::symlink;
         let temporary = tempfile::tempdir().unwrap();
-        let catalog = temporary.path().join("catalog");
-        let source = temporary.path().join("source");
-        fs::create_dir(&catalog).unwrap();
-        fs::create_dir_all(&source).unwrap();
+        let [catalog, source] = ["catalog", "source"].map(|name| temporary.path().join(name));
+        for path in [&catalog, &source] {
+            fs::create_dir(path).unwrap();
+        }
         fs::write(source.join("IMG_20261010_101112.jpg"), b"photo").unwrap();
         CatalogService::create(&catalog, "Catalog").unwrap();
         let collection = catalog.join("2026/2026-10-10 Import");
         fs::create_dir_all(&collection).unwrap();
         let journal = catalog.join(".souvenirs/journal");
-        let review = ImportPlanningService::review(ImportReviewRequest {
+        let request = ImportReviewRequest {
             catalog_path: catalog.clone(),
-            source_path: source,
+            source_path: source.clone(),
             collection_name: "Import".to_owned(),
             destination_mode: DestinationMode::Existing,
             accepted_date: "2026-10-10".to_owned(),
             date_resolution: Some(DateResolution::AsShown),
-        })
-        .unwrap();
-        for replaced in [false, true] {
-            if replaced {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                fs::create_dir(&collection).unwrap();
-            } else {
+        };
+        fs::remove_dir(&collection).unwrap();
+        symlink(&source, &collection).unwrap();
+        assert!(ImportPlanningService::review(request.clone()).is_err());
+        fs::remove_file(&collection).unwrap();
+        fs::create_dir(&collection).unwrap();
+        let review = ImportPlanningService::review(request).unwrap();
+        for replacement in ["missing", "directory", "symlink"] {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if collection.exists() {
                 fs::remove_dir(&collection).unwrap();
             }
-            let input = format!(
-                "{}{}",
-                request("request-1", "handshake", json!({"client_version": "0.2.0"})),
-                request(
-                    "request-2",
-                    "operation.start",
-                    json!({"name": "import.execute", "reviewed_plan": review.reviewed_plan.as_ref().unwrap()})
-                )
-            );
-            let responses = run_lines(input);
-            assert_eq!(responses[1]["error"]["code"], "operation_conflict");
+            match replacement {
+                "directory" => fs::create_dir(&collection).unwrap(),
+                "symlink" => symlink(&source, &collection).unwrap(),
+                _ => {}
+            }
+            let response = match super::Connection::default().start_operation(
+                "request-2".to_owned(),
+                super::StartOperationParameters::ImportExecute {
+                    reviewed_plan: review.reviewed_plan.clone().unwrap(),
+                },
+            ) {
+                super::EngineAction::Message(message) => serde_json::to_value(message).unwrap(),
+                _ => panic!("operation was accepted"),
+            };
+            assert_eq!(response["error"]["code"], "operation_conflict");
             assert_eq!(fs::read_dir(&journal).unwrap().count(), 1);
         }
     }

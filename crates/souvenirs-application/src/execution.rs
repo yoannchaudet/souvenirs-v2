@@ -254,10 +254,8 @@ pub(crate) fn encode_reviewed_plan(
     })
     .map_err(|error| ImportExecutionError::Planning(error.to_string()))
 }
-
 const MANIFEST_CHANGED: &str =
     "The destination manifest changed after review. Review the import again.";
-
 fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionError> {
     CatalogService::open(&plan.catalog_path)
         .map_err(|error| ImportExecutionError::Catalog(error.to_string()))?;
@@ -266,8 +264,11 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
             "The source changed after review. Review the import again.".to_owned(),
         ));
     }
+    let layout = CatalogLayout::new(&plan.catalog_path);
     for directory in &plan.directories {
         let path = plan.catalog_path.join(&directory.path);
+        let contained = directory.create
+            || souvenirs_storage::validate_directory(&layout, &directory.path).is_ok();
         let matches = path.metadata().is_ok_and(|metadata| {
             metadata.is_dir()
                 && directory
@@ -275,7 +276,7 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
                     .as_ref()
                     .map_or(true, |identity| directory_identity(&metadata) == *identity)
         });
-        if (directory.create && path.exists()) || (!directory.create && !matches) {
+        if !contained || (directory.create && path.exists()) || (!directory.create && !matches) {
             return Err(ImportExecutionError::Conflict(
                 "The catalog changed after review. Review the import again.".to_owned(),
             ));
@@ -308,7 +309,6 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
     }
     Ok(())
 }
-
 fn source_snapshot(root: &Path) -> Result<Vec<SourceSnapshotEntry>, ImportExecutionError> {
     if !root.is_dir() {
         return Err(ImportExecutionError::InvalidSource(root.to_path_buf()));
@@ -333,7 +333,6 @@ fn source_snapshot(root: &Path) -> Result<Vec<SourceSnapshotEntry>, ImportExecut
         })
         .collect()
 }
-
 pub struct ImportRecoveryService;
 
 impl ImportRecoveryService {
@@ -1546,7 +1545,6 @@ mod tests {
             assert_eq!(import_journal_count(&fixture), 0);
         }
     }
-
     fn import_journal_count(fixture: &Fixture) -> usize {
         fs::read_dir(CatalogLayout::new(&fixture.catalog).journal_directory())
             .unwrap()

@@ -8,6 +8,7 @@ use souvenirs_domain::names::{CatalogLabel, PortableComponent};
 use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_domain::relationships::sidecar_suffix_for_item;
 use souvenirs_domain::source::SourceFile;
+use souvenirs_storage::{validate_directory, CatalogLayout};
 
 use crate::execution::{
     digest_bytes, digest_file, encode_manifest, encode_reviewed_plan, existing_counters,
@@ -138,6 +139,11 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
             return Err(ImportPlanningError::DestinationMissing(collection_path));
         }
         DestinationMode::Create | DestinationMode::Existing => {}
+    }
+    if request.destination_mode == DestinationMode::Existing {
+        let layout = CatalogLayout::new(&request.catalog_path);
+        validate_directory(&layout, &PathBuf::from(&year).join(&collection_directory))
+            .map_err(|error| ImportPlanningError::InvalidPlan(error.to_string()))?;
     }
 
     let dates = inspected
