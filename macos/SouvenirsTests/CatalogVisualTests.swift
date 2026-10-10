@@ -260,12 +260,17 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
     func startImportExecution(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> String { "visual-operation" }
     func inspectUnfinishedOperation(
         catalogPath: String
     ) async throws -> EngineSupervisor.UnfinishedOperation? { inspection }
-    func recoverOperation(operationID: String) async throws -> String { "visual-recovery" }
+    func recoverOperation(catalogPath: String, operationID: String) async throws -> String {
+        "visual-recovery"
+    }
     func cancel(
         operationID: String
     ) async throws -> EngineSupervisor.CancellationAccepted {

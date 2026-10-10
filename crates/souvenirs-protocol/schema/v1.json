@@ -899,40 +899,76 @@
       ]
     },
     "StartOperationParameters": {
-      "type": "object",
-      "required": [
-        "name"
-      ],
-      "properties": {
-        "catalog_path": {
-          "type": [
-            "string",
-            "null"
-          ]
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "accepted_date",
+            "catalog_path",
+            "collection_name",
+            "destination_mode",
+            "name",
+            "source_path"
+          ],
+          "properties": {
+            "accepted_date": {
+              "type": "string"
+            },
+            "catalog_path": {
+              "type": "string"
+            },
+            "collection_name": {
+              "type": "string"
+            },
+            "date_resolution": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImportDateResolution"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "destination_mode": {
+              "$ref": "#/definitions/ImportDestinationMode"
+            },
+            "name": {
+              "type": "string",
+              "enum": [
+                "import.execute"
+              ]
+            },
+            "source_path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         },
-        "collection_name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "type": "string"
-        },
-        "operation_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "source_path": {
-          "type": [
-            "string",
-            "null"
-          ]
+        {
+          "type": "object",
+          "required": [
+            "catalog_path",
+            "name",
+            "operation_id"
+          ],
+          "properties": {
+            "catalog_path": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string",
+              "enum": [
+                "operation.recover"
+              ]
+            },
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         }
-      },
-      "additionalProperties": false
+      ]
     },
     "UnfinishedOperationResult": {
       "type": "object",

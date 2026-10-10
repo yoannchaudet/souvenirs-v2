@@ -1,5 +1,11 @@
 //! Caller-independent application services for catalog and import workflows.
 
+mod execution;
+
+pub use execution::{
+    ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest, ImportExecutionService,
+    ImportRecoveryMode, ImportRecoveryService, OperationProgress, PreparedImport, RecoveryOutcome,
+};
 pub use souvenirs_domain as domain;
 
 use std::fmt;

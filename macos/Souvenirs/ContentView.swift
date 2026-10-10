@@ -1055,12 +1055,17 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
     func startImportExecution(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> String { "preview-operation" }
     func inspectUnfinishedOperation(
         catalogPath: String
     ) async throws -> EngineSupervisor.UnfinishedOperation? { nil }
-    func recoverOperation(operationID: String) async throws -> String { "preview-recovery" }
+    func recoverOperation(catalogPath: String, operationID: String) async throws -> String {
+        "preview-recovery"
+    }
     func cancel(
         operationID: String
     ) async throws -> EngineSupervisor.CancellationAccepted {
