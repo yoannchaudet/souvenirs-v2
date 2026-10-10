@@ -204,6 +204,78 @@ fn executes_inspects_and_verifies_without_parsing_human_output() {
 }
 
 #[test]
+fn executes_compound_item_with_sidecar_and_manifests_only_originals() {
+    let temporary = TempDir::new().unwrap();
+    let catalog = temporary.path().join("catalog");
+    let source = temporary.path().join("source");
+    let snapshot = temporary.path().join("scan.json");
+    let plan = temporary.path().join("plan.json");
+    fs::create_dir(&catalog).unwrap();
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("IMG_0001.CR3"), b"raw").unwrap();
+    fs::write(source.join("IMG_0001.JPG"), b"jpeg").unwrap();
+    fs::write(source.join("IMG_0001.JPG.xmp"), b"xmp").unwrap();
+    json_stdout(&run(&[
+        "catalog",
+        "initialize",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+    json_stdout(&run(&[
+        "import",
+        "plan",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--snapshot",
+        snapshot.to_str().unwrap(),
+        "--output",
+        plan.to_str().unwrap(),
+        "--collection",
+        "Compound",
+        "--destination-mode",
+        "create",
+        "--accepted-at",
+        "2026-10-10T12:34:56",
+        "--confirm",
+    ]));
+
+    let executed = json_stdout(&run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+    ]));
+    assert_eq!(executed["result"]["outcome"], "completed");
+
+    let collection = catalog.join("2026").join("2026-10-10 Compound");
+    assert!(collection.join("2026-10-10 12-34-56 001.CR3").is_file());
+    assert!(collection.join("2026-10-10 12-34-56 001.JPG").is_file());
+    assert!(collection.join("2026-10-10 12-34-56 001.JPG.xmp").is_file());
+    let manifest = fs::read_to_string(collection.join("SHA256SUMS")).unwrap();
+    assert_eq!(manifest.lines().count(), 2);
+    assert!(!manifest.contains(".xmp"));
+
+    let integrity = json_stdout(&run(&[
+        "integrity",
+        "check",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    assert_eq!(integrity["result"]["valid"], true);
+    assert_eq!(integrity["result"]["checked_files"], 2);
+}
+
+#[test]
 fn refuses_to_execute_an_unconfirmed_plan_without_mutating_the_catalog() {
     let temporary = TempDir::new().unwrap();
     let (catalog, _source, plan) = prepare_plan(&temporary, false);

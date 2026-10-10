@@ -139,6 +139,24 @@ pub fn resolve_directory_relationships(files: &[SourceFile]) -> RelationshipReso
     RelationshipResolution { items, findings }
 }
 
+pub fn sidecar_suffix_for_item<'a>(
+    sidecar: &SourceFile,
+    originals: impl IntoIterator<Item = &'a SourceFile>,
+) -> Option<String> {
+    let SourceFileKind::Sidecar { naming_forms } = &sidecar.kind else {
+        return None;
+    };
+    let suffixes: BTreeSet<_> = originals
+        .into_iter()
+        .filter_map(|original| sidecar_suffix_for_original(sidecar, original, naming_forms))
+        .collect();
+    if suffixes.len() == 1 {
+        suffixes.into_iter().next()
+    } else {
+        None
+    }
+}
+
 fn pair_raw_jpeg(
     originals: &[&SourceFile],
     assigned: &mut BTreeSet<SourceFileId>,
@@ -372,40 +390,58 @@ fn sidecar_matches_original(
     original: &SourceFile,
     forms: &[SidecarNamingForm],
 ) -> bool {
+    sidecar_suffix_for_original(sidecar, original, forms).is_some()
+}
+
+fn sidecar_suffix_for_original(
+    sidecar: &SourceFile,
+    original: &SourceFile,
+    forms: &[SidecarNamingForm],
+) -> Option<String> {
     if sidecar.path.directory() != original.path.directory() {
-        return false;
+        return None;
     }
 
     let sidecar_name = sidecar.path.filename();
-    let Some((without_sidecar_extension, actual_extension)) = sidecar_name.rsplit_once('.') else {
-        return false;
-    };
+    let (without_sidecar_extension, actual_extension) = sidecar_name.rsplit_once('.')?;
     if !actual_extension.eq_ignore_ascii_case(&sidecar.extension) {
-        return false;
+        return None;
     }
 
-    forms.iter().any(|form| match form {
-        SidecarNamingForm::Basename => {
-            without_sidecar_extension.eq_ignore_ascii_case(&original.basename)
-        }
-        SidecarNamingForm::AssetFilename => {
-            without_sidecar_extension.eq_ignore_ascii_case(original.path.filename())
-        }
+    forms.iter().find_map(|form| match form {
+        SidecarNamingForm::Basename => without_sidecar_extension
+            .eq_ignore_ascii_case(&original.basename)
+            .then(|| {
+                sidecar_name
+                    .get(original.basename.len()..)
+                    .map(str::to_owned)
+            })
+            .flatten(),
+        SidecarNamingForm::AssetFilename => without_sidecar_extension
+            .eq_ignore_ascii_case(original.path.filename())
+            .then(|| {
+                sidecar_name
+                    .get(original.basename.len()..)
+                    .map(str::to_owned)
+            })
+            .flatten(),
         SidecarNamingForm::NumberedAssetFilename => {
-            let Some((numbered_basename, asset_extension)) =
-                without_sidecar_extension.rsplit_once('.')
-            else {
-                return false;
-            };
+            let (numbered_basename, asset_extension) =
+                without_sidecar_extension.rsplit_once('.')?;
             if !asset_extension.eq_ignore_ascii_case(&original.extension) {
-                return false;
+                return None;
             }
             numbered_basename
                 .rsplit_once('_')
-                .is_some_and(|(basename, number)| {
+                .filter(|(basename, number)| {
                     basename.eq_ignore_ascii_case(&original.basename)
                         && number.len() == 2
                         && number.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .and_then(|_| {
+                    sidecar_name
+                        .get(original.basename.len()..)
+                        .map(str::to_owned)
                 })
         }
     })
@@ -665,7 +701,7 @@ mod tests {
         );
         sidecar.path = SourcePath::new(["other", "image.xmp"]).unwrap();
 
-        let resolution = resolve_directory_relationships(&[original, sidecar]);
+        let resolution = resolve_directory_relationships(&[original.clone(), sidecar.clone()]);
 
         assert!(matches!(
             resolution.findings.as_slice(),
@@ -694,12 +730,16 @@ mod tests {
             None,
         );
 
-        let resolution = resolve_directory_relationships(&[original, sidecar]);
+        let resolution = resolve_directory_relationships(&[original.clone(), sidecar.clone()]);
 
         assert!(resolution.findings.is_empty());
         assert_eq!(
             resolution.items[0].sidecars,
             [SourceFileId::new("sidecar").unwrap()]
+        );
+        assert_eq!(
+            sidecar_suffix_for_item(&sidecar, [&original]),
+            Some("_01.JPG.XMP".to_owned())
         );
     }
 

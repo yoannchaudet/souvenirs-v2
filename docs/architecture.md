@@ -308,6 +308,11 @@ Version 1 preserves null values and uses the serializer's string, number, and es
 Changes to fields, member order, enum representation, normalization, encoding, or digest algorithm require a new plan schema version.
 Readers must not reinterpret version 1 data with a later digest contract.
 
+Version 2 adds the `ambiguous_sidecar` item finding.
+Version 2 keeps the version 1 field order, normalization, JSON encoding, and digest algorithm.
+Readers validate each document against its declared version.
+Readers continue to verify version 1 digests with the version 1 contract.
+
 The saved-plan `confirmed` field is not part of the digest.
 Execution must reject the plan unless this field is `true`.
 
@@ -316,8 +321,8 @@ Initial import execution resolves planned source paths below this root.
 Initial import execution must compare each transferred or excluded item file with its planned size and digest.
 Changing the root is valid only when these planned files still match.
 
-Run `just import-plan-schema` to regenerate `crates/souvenirs-cli/schema/import-plan/v1.json`.
-The committed schema describes the complete saved-plan envelope.
+Run `just import-plan-schema` to regenerate every schema in `crates/souvenirs-cli/schema/import-plan/`.
+Each committed schema describes one complete saved-plan envelope version.
 
 The CLI can save a plan to a file.
 Execution accepts the exact saved plan.

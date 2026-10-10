@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "confirmed": true,
+  "source_root": "/Volumes/Card \"A\"",
+  "import_plan": {
+    "document": {
+      "schema_version": 2,
+      "plan_id": "plan-\"café\"",
+      "created_at": {
+        "unix_seconds": -1,
+        "nanosecond": 0
+      },
+      "catalog": {
+        "catalog_id": "catalog-雪",
+        "manifests": []
+      },
+      "source": {
+        "source_id": "source-card",
+        "fingerprint": "41637c7875947b50775c0ab2bb30a28b292be748376a5713eb8f527d9953433c"
+      },
+      "items": [
+        {
+          "item_id": "item-1",
+          "files": [
+            {
+              "source_file_id": "file-1",
+              "source_path": [
+                "DCIM",
+                "café \"one\".jpg"
+              ],
+              "digest": "3b9c358f36f0a31b6ad3e14f309c7cf198ac9246e8316f9ce543d5b19ac02b80",
+              "size_bytes": 1,
+              "role": "primary"
+            }
+          ],
+          "accepted_datetime": null,
+          "disposition": {
+            "kind": "unresolved",
+            "finding": "ambiguous_sidecar"
+          }
+        }
+      ],
+      "unhandled_content": [],
+      "steps": [],
+      "required_space_bytes": 0
+    },
+    "digest": "a75a1e5fcf00ab741cb7d0b883f6754edfc624b28056c50b4f139943f39d3c62"
+  }
+}

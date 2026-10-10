@@ -13,21 +13,29 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use souvenirs_domain::catalog::{
     allocate_collection_counters, year_directory, CanonicalFilename, CanonicalStem,
-    DatedCollectionRange, NewItemCounterRequest, SourcePathOrderKey,
+    DatedCollectionRange, NewItemCounterRequest,
 };
 use souvenirs_domain::names::CatalogLabel;
 use souvenirs_domain::plan::{
-    CatalogSnapshot, ContentDigest, ImportPlan, ManifestFingerprint, PlanDateTime,
-    PlanDateTimeProvenance, PlanDocument, PlanFile, PlanFileRole, PlanId, PlanItem,
-    PlanItemDisposition, PlanStep, PlanStepKind, PlanTimestamp, SourceSnapshot, UnhandledContent,
-    UnhandledContentFinding, IMPORT_PLAN_SCHEMA_VERSION,
+    constrain_import_plan_schema, CatalogSnapshot, ContentDigest, ImportPlan, ManifestFingerprint,
+    PlanDateTime, PlanDateTimeProvenance, PlanDocument, PlanFile, PlanFileRole, PlanId, PlanItem,
+    PlanItemDisposition, PlanItemFinding, PlanStep, PlanStepKind, PlanTimestamp, SourceSnapshot,
+    UnhandledContent, UnhandledContentFinding, IMPORT_PLAN_SCHEMA_VERSION,
+};
+use souvenirs_domain::relationships::{
+    resolve_directory_relationships, sidecar_suffix_for_item, RelationshipFinding,
+    RelationshipStatus,
+};
+use souvenirs_domain::source::{
+    CameraIdentity, OriginalRole, SourceFile, SourceFileId, SourceFileKind, SourceMetadata,
+    SourcePath,
 };
 use souvenirs_storage::{
     CatalogConfig, CatalogLayout, CatalogLock, ManifestReplacementRequest, OperationJournal,
     OperationOutcome, OperationRecord, RecoveryCopy, RecoveryDirectory, RecoveryManifest,
     RecoveryMode, RecoveryOutcome, RecoveryRequest, FORMAT_VERSION,
 };
-use time::{Date, PrimitiveDateTime};
+use time::{Date, Month, PrimitiveDateTime, Time};
 
 pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
@@ -227,7 +235,7 @@ pub enum ScannedFileKind {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredPlan {
-    #[schemars(range(min = 1, max = 1))]
+    #[schemars(range(min = 1, max = 2))]
     pub schema_version: u32,
     pub confirmed: bool,
     #[schemars(with = "String")]
@@ -236,7 +244,26 @@ pub struct StoredPlan {
 }
 
 pub fn stored_plan_schema() -> RootSchema {
-    schema_for!(StoredPlan)
+    stored_plan_schema_for_version(IMPORT_PLAN_SCHEMA_VERSION)
+        .expect("current stored plan schema version is supported")
+}
+
+pub fn stored_plan_schema_for_version(version: u32) -> Result<RootSchema, String> {
+    let mut schema = schema_for!(StoredPlan);
+    constrain_import_plan_schema(&mut schema, version).map_err(|error| error.to_string())?;
+    let number = schema
+        .schema
+        .object
+        .as_mut()
+        .and_then(|object| object.properties.get_mut("schema_version"))
+        .and_then(|schema| match schema {
+            schemars::schema::Schema::Object(schema) => schema.number.as_mut(),
+            schemars::schema::Schema::Bool(_) => None,
+        })
+        .ok_or_else(|| "stored plan schema version field is missing".to_owned())?;
+    number.minimum = Some(f64::from(version));
+    number.maximum = Some(f64::from(version));
+    Ok(schema)
 }
 
 #[derive(Debug, Serialize)]
@@ -634,25 +661,109 @@ fn import_plan(
         validate_existing_collection(&collection_path)?;
     }
     let existing_counters = existing_counters(&collection_path, accepted_at.date())?;
-    let media: Vec<_> = scan
+    let source_files = scan
         .files
         .iter()
-        .filter(|file| file.kind == ScannedFileKind::Media)
+        .map(scanned_source_file)
+        .collect::<Result<Vec<_>, _>>()?;
+    let source_by_id: BTreeMap<_, _> = source_files
+        .iter()
+        .map(|file| (file.id.clone(), file))
         .collect();
-    if media.is_empty() {
+    let scanned_by_id: BTreeMap<_, _> = scan
+        .files
+        .iter()
+        .map(|file| {
+            SourceFileId::new(file.id.clone())
+                .map(|id| (id, file))
+                .map_err(|error| CliError::invalid_data(error.to_string()))
+        })
+        .collect::<Result<_, _>>()?;
+    let relationships = resolve_directory_relationships(&source_files);
+    if relationships.items.is_empty() {
         return Err(CliError::invalid_data(
             "source scan contains no supported media files",
         ));
     }
+    let mut unresolved_items = BTreeMap::new();
+    let mut unhandled_content = Vec::new();
+    for finding in &relationships.findings {
+        match finding {
+            RelationshipFinding::AmbiguousRawJpeg(files) => {
+                record_item_findings(
+                    &mut unresolved_items,
+                    files,
+                    PlanItemFinding::AmbiguousRawJpeg,
+                );
+            }
+            RelationshipFinding::AmbiguousLivePhoto { files, .. } => {
+                record_item_findings(
+                    &mut unresolved_items,
+                    files,
+                    PlanItemFinding::AmbiguousLivePhoto,
+                );
+            }
+            RelationshipFinding::AmbiguousCanonicalCompound(files) => {
+                record_item_findings(
+                    &mut unresolved_items,
+                    files,
+                    PlanItemFinding::AmbiguousCanonicalCompound,
+                );
+            }
+            RelationshipFinding::ConflictingCompound(files) => {
+                record_item_findings(
+                    &mut unresolved_items,
+                    files,
+                    PlanItemFinding::ConflictingCompound,
+                );
+            }
+            RelationshipFinding::OrphanSidecar(file) => {
+                unhandled_content.push(unhandled_file(
+                    scanned_by_id[file],
+                    UnhandledContentFinding::OrphanSidecar,
+                ));
+            }
+            RelationshipFinding::AmbiguousSidecar {
+                sidecar,
+                candidate_items,
+            } => {
+                record_item_findings(
+                    &mut unresolved_items,
+                    candidate_items,
+                    PlanItemFinding::AmbiguousSidecar,
+                );
+                unhandled_content.push(unhandled_file(
+                    scanned_by_id[sidecar],
+                    UnhandledContentFinding::AmbiguousSidecar {
+                        candidate_item_ids: candidate_items
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                    },
+                ));
+            }
+            RelationshipFinding::UnknownContent(file) => {
+                unhandled_content.push(unhandled_file(
+                    scanned_by_id[file],
+                    UnhandledContentFinding::UnknownContent,
+                ));
+            }
+        }
+    }
     let allocations = allocate_collection_counters(
         &BTreeMap::from([(accepted_at.date(), existing_counters)]),
-        media.iter().map(|file| NewItemCounterRequest {
-            item_id: file.id.clone(),
-            source_path_order_key: SourcePathOrderKey::new(file.path.clone()),
-            accepted_datetime: accepted_at,
-        }),
+        relationships
+            .items
+            .iter()
+            .filter(|item| item.status == RelationshipStatus::Resolved)
+            .map(|item| NewItemCounterRequest {
+                item_id: item.primary.as_str().to_owned(),
+                source_path_order_key: source_by_id[&item.primary].path.order_key(),
+                accepted_datetime: accepted_at,
+            }),
     )
     .map_err(|error| CliError::invalid_data(error.to_string()))?;
+    let has_transfers = !allocations.is_empty();
     let counters: BTreeMap<_, _> = allocations
         .into_iter()
         .map(|allocation| (allocation.item_id, allocation.counter))
@@ -660,7 +771,7 @@ fn import_plan(
 
     let mut steps = Vec::new();
     let mut sequence = 1_u32;
-    if !layout.root().join(&year_directory).exists() {
+    if has_transfers && !layout.root().join(&year_directory).exists() {
         steps.push(PlanStep {
             sequence,
             action: PlanStepKind::CreateDirectory {
@@ -669,7 +780,7 @@ fn import_plan(
         });
         sequence += 1;
     }
-    if destination_mode == DestinationMode::Create {
+    if has_transfers && destination_mode == DestinationMode::Create {
         steps.push(PlanStep {
             sequence,
             action: PlanStepKind::CreateDirectory {
@@ -680,22 +791,6 @@ fn import_plan(
     }
 
     let mut items = Vec::new();
-    let unhandled_content = scan
-        .files
-        .iter()
-        .filter(|file| file.kind != ScannedFileKind::Media)
-        .map(|file| UnhandledContent {
-            source_file_id: file.id.clone(),
-            source_path: file.path.clone(),
-            digest: file.digest.clone(),
-            size_bytes: file.size_bytes,
-            finding: match file.kind {
-                ScannedFileKind::Sidecar => UnhandledContentFinding::OrphanSidecar,
-                ScannedFileKind::Unknown => UnhandledContentFinding::UnknownContent,
-                ScannedFileKind::Media => unreachable!("media files are filtered out"),
-            },
-        })
-        .collect::<Vec<_>>();
     let mut manifest_lines = existing_manifest_lines(&collection_path.join("SHA256SUMS"))?;
     let previous_manifest = manifest_fingerprint(
         layout.root(),
@@ -706,66 +801,112 @@ fn import_plan(
         ],
     )?;
     let mut required_space_bytes = 0_u64;
-    for file in media {
-        let extension = Path::new(file.path.last().expect("scanned file has a filename"))
-            .extension()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| CliError::invalid_data("media file has no UTF-8 extension"))?;
-        let stem = CanonicalStem::new(accepted_at, counters[&file.id])
-            .map_err(|error| CliError::invalid_data(error.to_string()))?;
-        let filename = CanonicalFilename::new(&stem, extension)
-            .map_err(|error| CliError::invalid_data(error.to_string()))?
-            .to_string();
-        let destination = vec![
-            year_directory.clone(),
-            collection_directory.clone(),
-            filename.clone(),
-        ];
-        manifest_lines.insert(filename, file.digest.as_str().to_owned());
-        steps.push(PlanStep {
-            sequence,
-            action: PlanStepKind::CopyFile {
-                source_file_id: file.id.clone(),
-                destination,
-                expected_digest: file.digest.clone(),
-                size_bytes: file.size_bytes,
+    for item in relationships.items {
+        let disposition = match item.status {
+            RelationshipStatus::Resolved => PlanItemDisposition::Transfer,
+            RelationshipStatus::NeedsDecision => PlanItemDisposition::Unresolved {
+                finding: item_relationship_finding(&item, &unresolved_items).ok_or_else(|| {
+                    CliError::invalid_data(format!(
+                        "logical item '{}' needs a relationship decision without a finding",
+                        item.primary.as_str()
+                    ))
+                })?,
             },
-        });
-        sequence += 1;
-        required_space_bytes = required_space_bytes
-            .checked_add(file.size_bytes)
-            .ok_or_else(|| CliError::invalid_data("planned size exceeds supported range"))?;
+        };
+        let mut files = Vec::new();
+        let originals = std::iter::once((&item.primary, PlanFileRole::Primary))
+            .chain(
+                item.companion
+                    .iter()
+                    .map(|id| (id, PlanFileRole::Companion)),
+            )
+            .collect::<Vec<_>>();
+        let stem = counters
+            .get(item.primary.as_str())
+            .map(|counter| {
+                CanonicalStem::new(accepted_at, *counter)
+                    .map_err(|error| CliError::invalid_data(error.to_string()))
+            })
+            .transpose()?;
+        for (file_id, role) in originals {
+            let source = source_by_id[file_id];
+            let scanned = scanned_by_id[file_id];
+            files.push(plan_file(scanned, role));
+            if let Some(stem) = &stem {
+                let filename = CanonicalFilename::new(stem, &source.extension)
+                    .map_err(|error| CliError::invalid_data(error.to_string()))?
+                    .to_string();
+                manifest_lines.insert(filename.clone(), scanned.digest.as_str().to_owned());
+                push_copy_step(
+                    &mut steps,
+                    &mut sequence,
+                    &mut required_space_bytes,
+                    scanned,
+                    vec![
+                        year_directory.clone(),
+                        collection_directory.clone(),
+                        filename,
+                    ],
+                )?;
+            }
+        }
+        for sidecar_id in &item.sidecars {
+            let source = source_by_id[sidecar_id];
+            let scanned = scanned_by_id[sidecar_id];
+            files.push(plan_file(scanned, PlanFileRole::Sidecar));
+            if let Some(stem) = &stem {
+                let suffix = sidecar_suffix_for_item(
+                    source,
+                    std::iter::once(&item.primary)
+                        .chain(item.companion.iter())
+                        .map(|id| source_by_id[id]),
+                )
+                .ok_or_else(|| {
+                    CliError::invalid_data(format!(
+                        "resolved sidecar has no unambiguous preserved suffix: {}",
+                        source.path
+                    ))
+                })?;
+                push_copy_step(
+                    &mut steps,
+                    &mut sequence,
+                    &mut required_space_bytes,
+                    scanned,
+                    vec![
+                        year_directory.clone(),
+                        collection_directory.clone(),
+                        format!("{stem}{suffix}"),
+                    ],
+                )?;
+            }
+        }
         items.push(PlanItem {
-            item_id: file.id.clone(),
-            files: vec![PlanFile {
-                source_file_id: file.id.clone(),
-                source_path: file.path.clone(),
-                digest: file.digest.clone(),
-                size_bytes: file.size_bytes,
-                role: PlanFileRole::Primary,
-            }],
+            item_id: item.primary.as_str().to_owned(),
+            files,
             accepted_datetime: Some(plan_datetime(accepted_at)),
-            disposition: PlanItemDisposition::Transfer,
+            disposition,
         });
     }
-    let manifest_contents = encode_manifest(&manifest_lines);
-    let manifest_digest = ContentDigest::from_bytes(&manifest_contents);
-    required_space_bytes = required_space_bytes
-        .checked_add(manifest_contents.len() as u64)
-        .ok_or_else(|| CliError::invalid_data("planned size exceeds supported range"))?;
-    steps.push(PlanStep {
-        sequence,
-        action: PlanStepKind::WriteManifest {
-            path: vec![
-                year_directory,
-                collection_directory,
-                "SHA256SUMS".to_owned(),
-            ],
-            previous_digest: previous_manifest.as_ref().map(|entry| entry.digest.clone()),
-            resulting_digest: manifest_digest,
-            resulting_size_bytes: manifest_contents.len() as u64,
-        },
-    });
+    if has_transfers {
+        let manifest_contents = encode_manifest(&manifest_lines);
+        let manifest_digest = ContentDigest::from_bytes(&manifest_contents);
+        required_space_bytes = required_space_bytes
+            .checked_add(manifest_contents.len() as u64)
+            .ok_or_else(|| CliError::invalid_data("planned size exceeds supported range"))?;
+        steps.push(PlanStep {
+            sequence,
+            action: PlanStepKind::WriteManifest {
+                path: vec![
+                    year_directory,
+                    collection_directory,
+                    "SHA256SUMS".to_owned(),
+                ],
+                previous_digest: previous_manifest.as_ref().map(|entry| entry.digest.clone()),
+                resulting_digest: manifest_digest,
+                resulting_size_bytes: manifest_contents.len() as u64,
+            },
+        });
+    }
 
     let created_at = system_timestamp()?;
     let plan_id = PlanId::new(format!(
@@ -794,7 +935,7 @@ fn import_plan(
     })
     .map_err(|error| CliError::invalid_data(error.to_string()))?;
     let stored = StoredPlan {
-        schema_version: 1,
+        schema_version: IMPORT_PLAN_SCHEMA_VERSION,
         confirmed,
         source_root: scan.source_root,
         import_plan: plan,
@@ -1067,25 +1208,7 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
         }
         checked_manifests += 1;
         let manifest = existing_manifest_lines(&manifest_path)?;
-        let mut actual_files = BTreeSet::new();
-        for entry in fs::read_dir(&collection)
-            .map_err(|error| CliError::io(format!("read collection: {error}")))?
-        {
-            let entry = entry.map_err(|error| CliError::io(error.to_string()))?;
-            if entry
-                .file_type()
-                .map_err(|error| CliError::io(error.to_string()))?
-                .is_file()
-                && entry.file_name() != "SHA256SUMS"
-            {
-                actual_files.insert(
-                    entry
-                        .file_name()
-                        .into_string()
-                        .map_err(|_| CliError::invalid_data("catalog filename is not UTF-8"))?,
-                );
-            }
-        }
+        let files = inspect_collection_files(&collection)?;
         for (filename, expected) in &manifest {
             let path = collection.join(filename);
             if !path.is_file() {
@@ -1104,9 +1227,15 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
                 });
             }
         }
-        for filename in actual_files.difference(&manifest.keys().cloned().collect()) {
+        let mut unexpected = files
+            .originals
+            .difference(&manifest.keys().cloned().collect())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        unexpected.extend(files.unowned_or_unsupported);
+        for filename in unexpected {
             findings.push(IntegrityFinding::UnexpectedFile {
-                path: relative_to(layout.root(), &collection.join(filename))?,
+                path: relative_to(layout.root(), &collection.join(&filename))?,
             });
         }
     }
@@ -1124,11 +1253,16 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
 
 fn read_stored_plan(path: &Path) -> Result<StoredPlan, CliError> {
     let stored: StoredPlan = read_json(path)?;
-    if stored.schema_version != 1 {
+    if !(1..=IMPORT_PLAN_SCHEMA_VERSION).contains(&stored.schema_version) {
         return Err(CliError::invalid_data(format!(
             "unsupported stored plan schema version {}",
             stored.schema_version
         )));
+    }
+    if stored.schema_version != stored.import_plan.document().schema_version {
+        return Err(CliError::invalid_data(
+            "stored plan envelope and import plan schema versions differ",
+        ));
     }
     Ok(stored)
 }
@@ -1197,12 +1331,15 @@ fn manifest_contents_for_step(
     let parent = &manifest_path[..manifest_path.len() - 1];
     for step in &plan.document().steps {
         if let PlanStepKind::CopyFile {
+            source_file_id,
             destination,
             expected_digest,
             ..
         } = &step.action
         {
-            if destination[..destination.len() - 1] == *parent {
+            if destination[..destination.len() - 1] == *parent
+                && plan_file_role(plan, source_file_id) != Some(PlanFileRole::Sidecar)
+            {
                 lines.insert(
                     destination
                         .last()
@@ -1300,6 +1437,7 @@ fn manifest_contents_for_recovery(
     let copy_states = journal_copy_states(records);
     for step in &plan.document().steps {
         if let PlanStepKind::CopyFile {
+            source_file_id,
             destination,
             expected_digest,
             size_bytes,
@@ -1349,16 +1487,27 @@ fn manifest_contents_for_recovery(
             )? {
                 continue;
             }
-            lines.insert(
-                destination
-                    .last()
-                    .expect("copy destination has filename")
-                    .clone(),
-                journal_digest.to_owned(),
-            );
+            if plan_file_role(plan, source_file_id) != Some(PlanFileRole::Sidecar) {
+                lines.insert(
+                    destination
+                        .last()
+                        .expect("copy destination has filename")
+                        .clone(),
+                    journal_digest.to_owned(),
+                );
+            }
         }
     }
     Ok(encode_manifest(&lines))
+}
+
+fn plan_file_role(plan: &ImportPlan, source_file_id: &str) -> Option<PlanFileRole> {
+    plan.document()
+        .items
+        .iter()
+        .flat_map(|item| &item.files)
+        .find(|file| file.source_file_id == source_file_id)
+        .map(|file| file.role)
 }
 
 #[derive(Default)]
@@ -1821,6 +1970,124 @@ fn classify_path(path: &Path) -> ScannedFileKind {
     }
 }
 
+fn scanned_source_file(file: &ScannedFile) -> Result<SourceFile, CliError> {
+    source_file(
+        SourceFileId::new(file.id.clone())
+            .map_err(|error| CliError::invalid_data(error.to_string()))?,
+        SourcePath::new(file.path.clone())
+            .map_err(|error| CliError::invalid_data(error.to_string()))?,
+    )
+}
+
+fn source_file(id: SourceFileId, path: SourcePath) -> Result<SourceFile, CliError> {
+    let filename = path.filename();
+    let (basename, extension) = filename
+        .rsplit_once('.')
+        .map_or((filename, ""), |(basename, extension)| {
+            (basename, extension)
+        });
+    let basename = basename.to_owned();
+    let extension = extension.to_owned();
+    let kind = souvenirs_metadata::classify_extension(&extension).source_file_kind();
+    Ok(SourceFile {
+        id,
+        path,
+        basename,
+        extension,
+        kind,
+        metadata: SourceMetadata {
+            datetime_candidates: Vec::new(),
+            camera: CameraIdentity {
+                make: None,
+                model: None,
+                serial_number: None,
+            },
+            apple_content_identifier: None,
+        },
+    })
+}
+
+fn record_item_findings(
+    output: &mut BTreeMap<SourceFileId, PlanItemFinding>,
+    files: &[SourceFileId],
+    finding: PlanItemFinding,
+) {
+    for file in files {
+        output
+            .entry(file.clone())
+            .and_modify(|existing| {
+                if relationship_finding_priority(&finding) < relationship_finding_priority(existing)
+                {
+                    *existing = finding.clone();
+                }
+            })
+            .or_insert_with(|| finding.clone());
+    }
+}
+
+fn relationship_finding_priority(finding: &PlanItemFinding) -> u8 {
+    match finding {
+        PlanItemFinding::AmbiguousRawJpeg => 0,
+        PlanItemFinding::AmbiguousLivePhoto => 1,
+        PlanItemFinding::AmbiguousCanonicalCompound => 2,
+        PlanItemFinding::ConflictingCompound => 3,
+        PlanItemFinding::AmbiguousSidecar => 4,
+        PlanItemFinding::MissingDate | PlanItemFinding::PendingDateConfirmation => 5,
+    }
+}
+
+fn item_relationship_finding(
+    item: &souvenirs_domain::relationships::LogicalItem,
+    findings: &BTreeMap<SourceFileId, PlanItemFinding>,
+) -> Option<PlanItemFinding> {
+    std::iter::once(&item.primary)
+        .chain(item.companion.iter())
+        .find_map(|id| findings.get(id).cloned())
+}
+
+fn unhandled_file(file: &ScannedFile, finding: UnhandledContentFinding) -> UnhandledContent {
+    UnhandledContent {
+        source_file_id: file.id.clone(),
+        source_path: file.path.clone(),
+        digest: file.digest.clone(),
+        size_bytes: file.size_bytes,
+        finding,
+    }
+}
+
+fn plan_file(file: &ScannedFile, role: PlanFileRole) -> PlanFile {
+    PlanFile {
+        source_file_id: file.id.clone(),
+        source_path: file.path.clone(),
+        digest: file.digest.clone(),
+        size_bytes: file.size_bytes,
+        role,
+    }
+}
+
+fn push_copy_step(
+    steps: &mut Vec<PlanStep>,
+    sequence: &mut u32,
+    required_space_bytes: &mut u64,
+    file: &ScannedFile,
+    destination: Vec<String>,
+) -> Result<(), CliError> {
+    steps.push(PlanStep {
+        sequence: *sequence,
+        action: PlanStepKind::CopyFile {
+            source_file_id: file.id.clone(),
+            destination,
+            expected_digest: file.digest.clone(),
+            size_bytes: file.size_bytes,
+        },
+    });
+    *sequence += 1;
+    *required_space_bytes = required_space_bytes
+        .checked_add(file.size_bytes)
+        .ok_or_else(|| CliError::invalid_data("planned size exceeds supported range"))?;
+    Ok(())
+}
+
 fn scan_fingerprint(files: &[ScannedFile]) -> Result<ContentDigest, CliError> {
     serde_json::to_vec(files)
         .map(|bytes| ContentDigest::from_bytes(&bytes))
@@ -1884,7 +2151,31 @@ fn existing_manifest_lines(path: &Path) -> Result<BTreeMap<String, String>, CliE
 
 fn validate_existing_collection(path: &Path) -> Result<(), CliError> {
     let manifest = existing_manifest_lines(&path.join("SHA256SUMS"))?;
-    let mut disk_files = BTreeSet::new();
+    let files = inspect_collection_files(path)?;
+    if files.originals != manifest.keys().cloned().collect() {
+        return Err(CliError::conflict(
+            "existing collection originals do not exactly match SHA256SUMS",
+        ));
+    }
+    if files.has_relationship_findings || !files.unowned_or_unsupported.is_empty() {
+        return Err(CliError::conflict(
+            "existing collection contains unresolved or unsupported direct files",
+        ));
+    }
+    Ok(())
+}
+
+struct InspectedCollectionFiles {
+    originals: BTreeSet<String>,
+    unowned_or_unsupported: BTreeSet<String>,
+    has_relationship_findings: bool,
+}
+
+fn inspect_collection_files(path: &Path) -> Result<InspectedCollectionFiles, CliError> {
+    let mut original_files = BTreeSet::new();
+    let mut sidecar_files = BTreeSet::new();
+    let mut unsupported_files = BTreeSet::new();
+    let mut source_files = Vec::new();
     for entry in fs::read_dir(path)
         .map_err(|error| CliError::io(format!("read existing collection: {error}")))?
     {
@@ -1900,14 +2191,127 @@ fn validate_existing_collection(path: &Path) -> Result<(), CliError> {
             .file_name()
             .into_string()
             .map_err(|_| CliError::invalid_data("collection filename is not valid UTF-8"))?;
-        disk_files.insert(filename);
+        let file = source_file(
+            SourceFileId::new(filename.clone())
+                .map_err(|error| CliError::invalid_data(error.to_string()))?,
+            SourcePath::new([filename.clone()])
+                .map_err(|error| CliError::invalid_data(error.to_string()))?,
+        )?;
+        match file.kind {
+            SourceFileKind::Original(_) => {
+                original_files.insert(filename);
+            }
+            SourceFileKind::Sidecar { .. } => {
+                sidecar_files.insert(filename);
+            }
+            SourceFileKind::Unknown => {
+                unsupported_files.insert(filename);
+            }
+        }
+        source_files.push(file);
     }
-    if disk_files != manifest.keys().cloned().collect() {
-        return Err(CliError::conflict(
-            "existing collection files do not exactly match SHA256SUMS",
-        ));
+    mark_existing_canonical_compounds(&mut source_files);
+    let relationships = resolve_directory_relationships(&source_files);
+    let owned_sidecars = relationships
+        .items
+        .iter()
+        .flat_map(|item| &item.sidecars)
+        .map(|id| id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    for sidecar in sidecar_files.difference(&owned_sidecars) {
+        unsupported_files.insert(sidecar.clone());
     }
-    Ok(())
+    Ok(InspectedCollectionFiles {
+        originals: original_files,
+        unowned_or_unsupported: unsupported_files,
+        has_relationship_findings: !relationships.findings.is_empty(),
+    })
+}
+
+fn mark_existing_canonical_compounds(files: &mut [SourceFile]) {
+    let mut by_stem = BTreeMap::<String, Vec<usize>>::new();
+    for (index, file) in files.iter().enumerate() {
+        if matches!(file.kind, SourceFileKind::Original(_)) && is_canonical_stem(&file.basename) {
+            by_stem
+                .entry(file.basename.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+    for indices in by_stem.into_values() {
+        if indices.len() != 2 {
+            continue;
+        }
+        let roles = indices
+            .iter()
+            .filter_map(|index| match files[*index].kind {
+                SourceFileKind::Original(role) => Some(role),
+                SourceFileKind::Sidecar { .. } | SourceFileKind::Unknown => None,
+            })
+            .collect::<Vec<_>>();
+        if roles.iter().filter(|role| role.is_still()).count() == 1
+            && roles.iter().filter(|role| role.is_video()).count() == 1
+        {
+            for index in indices {
+                let SourceFileKind::Original(role) = files[index].kind else {
+                    continue;
+                };
+                files[index].kind = SourceFileKind::Original(if role.is_still() {
+                    OriginalRole::CanonicalStill
+                } else {
+                    OriginalRole::CanonicalVideo
+                });
+            }
+        }
+    }
+}
+
+fn is_canonical_stem(stem: &str) -> bool {
+    let mut parts = stem.split(' ');
+    let (Some(date), Some(clock), Some(counter), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    if date.len() != 10 || clock.len() != 8 {
+        return false;
+    }
+    let date = date.split('-').collect::<Vec<_>>();
+    if date.len() != 3 {
+        return false;
+    }
+    let (Ok(year), Ok(month), Ok(day)) = (
+        date[0].parse::<i32>(),
+        date[1].parse::<u8>(),
+        date[2].parse::<u8>(),
+    ) else {
+        return false;
+    };
+    let Some(month) = Month::try_from(month).ok() else {
+        return false;
+    };
+    if Date::from_calendar_date(year, month, day).is_err() {
+        return false;
+    }
+    let clock = clock.split('-').collect::<Vec<_>>();
+    if clock.len() != 3 {
+        return false;
+    }
+    let (Ok(hour), Ok(minute), Ok(second)) = (
+        clock[0].parse::<u8>(),
+        clock[1].parse::<u8>(),
+        clock[2].parse::<u8>(),
+    ) else {
+        return false;
+    };
+    Time::from_hms(hour, minute, second).is_ok()
+        && counter.len() >= 3
+        && counter.bytes().all(|byte| byte.is_ascii_digit())
+        && counter
+            .parse::<u32>()
+            .ok()
+            .and_then(NonZeroU32::new)
+            .is_some()
 }
 
 fn encode_manifest(lines: &BTreeMap<String, String>) -> Vec<u8> {
@@ -2175,17 +2579,23 @@ mod tests {
     }
 
     #[test]
-    fn committed_import_plan_schema_matches_generated_schema() {
-        let expected = serde_json::to_string_pretty(&stored_plan_schema()).unwrap() + "\n";
-        let actual = fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v1.json"),
-        )
-        .expect("committed import plan schema should be readable");
+    fn committed_import_plan_schemas_match_generated_schemas() {
+        for version in 1..=IMPORT_PLAN_SCHEMA_VERSION {
+            let expected =
+                serde_json::to_string_pretty(&stored_plan_schema_for_version(version).unwrap())
+                    .unwrap()
+                    + "\n";
+            let actual = fs::read_to_string(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("schema/import-plan/v{version}.json")),
+            )
+            .expect("committed import plan schema should be readable");
 
-        assert_eq!(
-            actual, expected,
-            "regenerate the committed import plan schema"
-        );
+            assert_eq!(
+                actual, expected,
+                "regenerate the committed import plan schemas"
+            );
+        }
     }
 
     #[test]
@@ -2218,6 +2628,24 @@ mod tests {
             confirmed.import_plan.digest(),
             unconfirmed.import_plan.digest()
         );
+
+        let schema_value: serde_json::Value = serde_json::from_slice(
+            &fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v2.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let validator = JSONSchema::compile(&schema_value).expect("schema should compile");
+        let version_two = fixture_path("confirmed-v2.json");
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&version_two).unwrap()).unwrap();
+        assert!(validator.is_valid(&value));
+        let version_two = read_stored_plan(&version_two).unwrap();
+        assert!(matches!(
+            version_two.import_plan.document().items[0].disposition,
+            PlanItemDisposition::Unresolved {
+                finding: PlanItemFinding::AmbiguousSidecar
+            }
+        ));
     }
 
     #[test]
@@ -2236,6 +2664,10 @@ mod tests {
         value["schema_version"] = serde_json::json!(1);
         value["import_plan"]["document"]["schema_version"] = serde_json::json!(2);
         assert!(!validator.is_valid(&value));
+        value["import_plan"]["document"]["schema_version"] = serde_json::json!(1);
+        value["import_plan"]["document"]["items"][0]["disposition"] =
+            serde_json::json!({"kind": "unresolved", "finding": "ambiguous_sidecar"});
+        assert!(!validator.is_valid(&value));
     }
 
     #[test]
@@ -2245,7 +2677,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
 
         let mut unsupported = fixture.clone();
-        unsupported["schema_version"] = serde_json::json!(2);
+        unsupported["schema_version"] = serde_json::json!(IMPORT_PLAN_SCHEMA_VERSION + 1);
         let unsupported_path = temporary.path().join("unsupported.json");
         fs::write(&unsupported_path, serde_json::to_vec(&unsupported).unwrap()).unwrap();
         assert!(read_stored_plan(&unsupported_path).is_err());
@@ -2255,6 +2687,13 @@ mod tests {
         let unknown_path = temporary.path().join("unknown.json");
         fs::write(&unknown_path, serde_json::to_vec(&unknown).unwrap()).unwrap();
         assert!(read_stored_plan(&unknown_path).is_err());
+
+        let mut mismatched: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture_path("confirmed-v1.json")).unwrap()).unwrap();
+        mismatched["schema_version"] = serde_json::json!(2);
+        let mismatched_path = temporary.path().join("mismatched.json");
+        fs::write(&mismatched_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        assert!(read_stored_plan(&mismatched_path).is_err());
     }
 
     fn fixture_path(name: &str) -> PathBuf {

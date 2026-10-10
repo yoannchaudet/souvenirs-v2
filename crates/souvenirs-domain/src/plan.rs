@@ -12,8 +12,8 @@ use time::Date;
 use crate::names::{PathCollisionKey, PortableRelativePath};
 use crate::source::SourcePath;
 
-/// Version 1 hashes the normalized `PlanDocument` compact JSON representation.
-pub const IMPORT_PLAN_SCHEMA_VERSION: u32 = 1;
+/// Versions 1 and 2 hash the normalized `PlanDocument` compact JSON representation.
+pub const IMPORT_PLAN_SCHEMA_VERSION: u32 = 2;
 
 #[derive(
     Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema,
@@ -228,6 +228,7 @@ pub enum PlanItemFinding {
     AmbiguousLivePhoto,
     AmbiguousCanonicalCompound,
     ConflictingCompound,
+    AmbiguousSidecar,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
@@ -467,7 +468,36 @@ pub enum DriftFinding {
 }
 
 pub fn import_plan_schema() -> RootSchema {
-    schema_for!(ImportPlan)
+    import_plan_schema_for_version(IMPORT_PLAN_SCHEMA_VERSION)
+        .expect("current import plan schema version is supported")
+}
+
+pub fn import_plan_schema_for_version(version: u32) -> Result<RootSchema, PlanError> {
+    let mut schema = schema_for!(ImportPlan);
+    constrain_import_plan_schema(&mut schema, version)?;
+    Ok(schema)
+}
+
+pub fn constrain_import_plan_schema(
+    schema: &mut RootSchema,
+    version: u32,
+) -> Result<(), PlanError> {
+    if !(1..=IMPORT_PLAN_SCHEMA_VERSION).contains(&version) {
+        return Err(PlanError::UnsupportedSchemaVersion(version));
+    }
+    let mut value = serde_json::to_value(&*schema)?;
+    value["definitions"]["PlanDocument"]["properties"]["schema_version"]["minimum"] =
+        serde_json::json!(f64::from(version));
+    value["definitions"]["PlanDocument"]["properties"]["schema_version"]["maximum"] =
+        serde_json::json!(f64::from(version));
+    if version == 1 {
+        let values = value["definitions"]["PlanItemFinding"]["enum"]
+            .as_array_mut()
+            .expect("plan item finding schema has enum values");
+        values.retain(|value| value != "ambiguous_sidecar");
+    }
+    *schema = serde_json::from_value(value)?;
+    Ok(())
 }
 
 fn normalize_document(document: &mut PlanDocument) {
@@ -498,7 +528,7 @@ fn normalize_document(document: &mut PlanDocument) {
 }
 
 fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
-    if document.schema_version != IMPORT_PLAN_SCHEMA_VERSION {
+    if !(1..=IMPORT_PLAN_SCHEMA_VERSION).contains(&document.schema_version) {
         return Err(PlanError::UnsupportedSchemaVersion(document.schema_version));
     }
     if document.catalog.catalog_id.is_empty() {
@@ -562,6 +592,20 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
             && item.accepted_datetime.is_none()
         {
             return Err(PlanError::TransferWithoutDate(item.item_id.clone()));
+        }
+        if document.schema_version == 1
+            && matches!(
+                item.disposition,
+                PlanItemDisposition::Unresolved {
+                    finding: PlanItemFinding::AmbiguousSidecar
+                }
+            )
+        {
+            return Err(PlanError::FindingRequiresSchemaVersion {
+                item_id: item.item_id.clone(),
+                finding: "ambiguous_sidecar",
+                minimum_version: 2,
+            });
         }
         for file in &item.files {
             if file.source_file_id.is_empty() {
@@ -824,6 +868,11 @@ pub enum PlanError {
         item_id: String,
         count: usize,
     },
+    FindingRequiresSchemaVersion {
+        item_id: String,
+        finding: &'static str,
+        minimum_version: u32,
+    },
     TransferWithoutDate(String),
     SourceFileNotTransferable(String),
     DuplicateCopyStep(String),
@@ -874,6 +923,14 @@ impl fmt::Display for PlanError {
             Self::InvalidPrimaryCount { item_id, count } => {
                 write!(formatter, "plan item '{item_id}' has {count} primary files")
             }
+            Self::FindingRequiresSchemaVersion {
+                item_id,
+                finding,
+                minimum_version,
+            } => write!(
+                formatter,
+                "plan item '{item_id}' finding '{finding}' requires schema version {minimum_version}"
+            ),
             Self::TransferWithoutDate(id) => {
                 write!(formatter, "transferred plan item '{id}' has no accepted datetime")
             }
@@ -1202,6 +1259,7 @@ mod tests {
     #[test]
     fn version_one_canonical_bytes_cover_json_encoding_rules() {
         let mut document = document();
+        document.schema_version = 1;
         document.plan_id = PlanId::new("plan-\"café\"").unwrap();
         document.created_at = PlanTimestamp::new(-1, 0).unwrap();
         document.catalog.catalog_id = "catalog-雪".into();
@@ -1252,7 +1310,9 @@ mod tests {
 
     #[test]
     fn version_one_rich_document_digest_is_stable() {
-        let plan = ImportPlan::new(document()).unwrap();
+        let mut document = document();
+        document.schema_version = 1;
+        let plan = ImportPlan::new(document).unwrap();
 
         assert_eq!(
             plan.digest().as_str(),
