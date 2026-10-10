@@ -1,0 +1,25 @@
+name: Swift
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: >-
+          xcodebuild test
+          -project macos/Souvenirs.xcodeproj
+          -scheme Souvenirs
+          -configuration Debug
+          -destination 'platform=macOS'
+          -derivedDataPath "$RUNNER_TEMP/SouvenirsDerivedData"
+          CODE_SIGNING_ALLOWED=NO
