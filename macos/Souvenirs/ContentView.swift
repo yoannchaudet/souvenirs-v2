@@ -31,6 +31,7 @@ struct ContentView: View {
         } message: {
             Text(model.presentedError ?? "")
         }
+        .accessibilityHidden(model.importPlanning != nil)
         .overlay {
             if let planning = model.importPlanning {
                 ZStack {
@@ -515,7 +516,6 @@ private struct ImportPlanningSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.28), radius: 34, y: 18)
         .accessibilityElement(children: .contain)
-        .accessibilityAddTraits(.isModal)
         .accessibilityIdentifier("import-review-sheet")
     }
 
