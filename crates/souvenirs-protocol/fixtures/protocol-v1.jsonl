@@ -2,9 +2,10 @@
 {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":["operation.cancel"]}}
 {"id":"request-2","protocol_version":1,"method":"operation.cancel","params":{"operation_id":"operation-1"}}
 {"kind":"response","id":"request-2","protocol_version":1,"status":"success","result":{"type":"cancellation_accepted","operation_id":"operation-1"}}
-{"id":"request-3","protocol_version":1,"method":"operation.start","params":{"name":"import.scan"}}
+{"id":"request-3","protocol_version":1,"method":"operation.start","params":{"name":"import.execute","catalog_path":"/Volumes/photos/Family Catalog","source_path":"/Volumes/camera/EOS_DIGITAL","collection_name":"Dolomites","destination_mode":"create","accepted_date":"2026-10-10","date_resolution":"as_shown"}}
 {"kind":"response","id":"request-3","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}
 {"id":"request-4","protocol_version":1,"method":"operation.inspect","params":{"path":"/Volumes/photos/Family Catalog"}}
+{"id":"request-4b","protocol_version":1,"method":"operation.start","params":{"name":"operation.recover","catalog_path":"/Volumes/photos/Family Catalog","operation_id":"operation-1"}}
 {"kind":"response","id":"request-4","protocol_version":1,"status":"success","result":{"type":"operation_inspection","operation":{"operation_id":"operation-1","collection_name":"Dolomites","source_name":"EOS_DIGITAL","copied_count":7,"total_count":12,"source_available":false}}}
 {"kind":"response","id":"request-5","protocol_version":1,"status":"error","error":{"code":"operation_not_found","message":"The operation was not found.","data":{"operation_id":"operation-missing"}}}
 {"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"import.scan"}

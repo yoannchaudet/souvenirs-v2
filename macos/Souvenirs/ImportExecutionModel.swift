@@ -5,11 +5,14 @@ protocol ImportExecutionEngine: AnyObject {
     func startImportExecution(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> String
     func inspectUnfinishedOperation(catalogPath: String) async throws
         -> EngineSupervisor.UnfinishedOperation?
-    func recoverOperation(operationID: String) async throws -> String
+    func recoverOperation(catalogPath: String, operationID: String) async throws -> String
     func cancel(operationID: String) async throws -> EngineSupervisor.CancellationAccepted
     func events(
         for operationID: String
@@ -20,16 +23,21 @@ extension EngineAppModel: ImportExecutionEngine {
     func startImportExecution(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> String {
         try await supervisor.requestOperation(
             method: "operation.start",
-            parameters: [
-                "name": "import.execute",
-                "catalog_path": catalogPath,
-                "source_path": sourcePath,
-                "collection_name": collectionName
-            ]
+            parameters: StartImportParameters(
+                catalogPath: catalogPath,
+                sourcePath: sourcePath,
+                collectionName: collectionName,
+                destinationMode: destinationMode,
+                acceptedDate: acceptedDate,
+                dateResolution: dateResolution
+            )
         )
     }
 
@@ -39,13 +47,13 @@ extension EngineAppModel: ImportExecutionEngine {
         try await supervisor.inspectUnfinishedOperation(catalogPath: catalogPath)
     }
 
-    func recoverOperation(operationID: String) async throws -> String {
+    func recoverOperation(catalogPath: String, operationID: String) async throws -> String {
         try await supervisor.requestOperation(
             method: "operation.start",
-            parameters: [
-                "name": "operation.recover",
-                "operation_id": operationID
-            ]
+            parameters: RecoverOperationParameters(
+                catalogPath: catalogPath,
+                operationID: operationID
+            )
         )
     }
 
@@ -133,7 +141,10 @@ final class ImportExecutionCoordinator: ObservableObject {
                 let operationID = try await engine.startImportExecution(
                     catalogPath: catalog.path,
                     sourcePath: review.scan.sourcePath,
-                    collectionName: review.collectionName
+                    collectionName: review.collectionName,
+                    destinationMode: review.destinationMode,
+                    acceptedDate: review.acceptedDate,
+                    dateResolution: review.dateResolution
                 )
                 self.operationID = operationID
                 try await consume(operationID: operationID, recovering: false)
@@ -175,7 +186,9 @@ final class ImportExecutionCoordinator: ObservableObject {
         operationTask = Task {
             do {
                 guard let recovery else { return }
+                guard let catalog else { return }
                 let operationID = try await engine.recoverOperation(
+                    catalogPath: catalog.path,
                     operationID: recovery.operationID
                 )
                 self.operationID = operationID
@@ -198,6 +211,12 @@ final class ImportExecutionCoordinator: ObservableObject {
             do {
                 _ = try await engine.cancel(operationID: operationID)
             } catch {
+                if case .completed = phase {
+                    return
+                }
+                if case .stopping = phase {
+                    return
+                }
                 phase = failurePhase(error)
             }
         }
@@ -291,5 +310,37 @@ final class ImportExecutionCoordinator: ObservableObject {
             return message
         }
         return error.localizedDescription
+    }
+}
+
+private struct StartImportParameters: Encodable, Sendable {
+    let name = "import.execute"
+    let catalogPath: String
+    let sourcePath: String
+    let collectionName: String
+    let destinationMode: EngineSupervisor.ImportDestinationMode
+    let acceptedDate: String
+    let dateResolution: EngineSupervisor.ImportDateResolution?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case catalogPath = "catalog_path"
+        case sourcePath = "source_path"
+        case collectionName = "collection_name"
+        case destinationMode = "destination_mode"
+        case acceptedDate = "accepted_date"
+        case dateResolution = "date_resolution"
+    }
+}
+
+private struct RecoverOperationParameters: Encodable, Sendable {
+    let name = "operation.recover"
+    let catalogPath: String
+    let operationID: String
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case catalogPath = "catalog_path"
+        case operationID = "operation_id"
     }
 }

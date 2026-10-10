@@ -61,17 +61,22 @@ pub struct CancelOperationParameters {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct StartOperationParameters {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub catalog_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collection_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<String>,
+#[serde(deny_unknown_fields, tag = "name")]
+pub enum StartOperationParameters {
+    #[serde(rename = "import.execute")]
+    ImportExecute {
+        catalog_path: String,
+        source_path: String,
+        collection_name: String,
+        destination_mode: ImportDestinationMode,
+        accepted_date: String,
+        date_resolution: Option<ImportDateResolution>,
+    },
+    #[serde(rename = "operation.recover")]
+    Recover {
+        catalog_path: String,
+        operation_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -475,7 +480,7 @@ mod tests {
                 request_count += 1;
             }
         }
-        assert_eq!(request_count, 4);
+        assert_eq!(request_count, 5);
         assert_eq!(engine_message_count, 10);
 
         let schema_value =

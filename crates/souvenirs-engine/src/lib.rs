@@ -1,19 +1,23 @@
 //! Newline-delimited JSON process lifecycle for the supervised engine.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
 use souvenirs_application::{
     CatalogIntent as ApplicationIntent, CatalogService, DateResolution, DestinationMode,
-    ImportPlanningService, ImportReviewRequest, OperationInspectionService,
+    ImportExecutionRequest, ImportExecutionService, ImportPlanningService, ImportRecoveryMode,
+    ImportRecoveryService, ImportReviewRequest, OperationInspectionService, OperationProgress,
+    PreparedImport, RecoveryOutcome,
 };
 use souvenirs_protocol::{
     CatalogIntent, CatalogResult, EngineMessage, HandshakeResult, ImportDateResolution,
-    ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationInspectionResult,
-    ProtocolError, Request, RequestPayload, ResponseResult, UnfinishedOperationResult,
-    CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD,
-    COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, OPERATION_INSPECT_METHOD,
-    PROTOCOL_VERSION,
+    ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent,
+    OperationEventPayload, OperationInspectionResult, ProtocolError, Request, RequestPayload,
+    ResponseResult, StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
+    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION,
+    IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
+    START_OPERATION_METHOD,
 };
 
 pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -26,10 +30,76 @@ pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result
             break;
         }
         trim_line_ending(&mut line);
-        let response = connection.handle_line(&line);
-        serde_json::to_writer(&mut output, &response).map_err(io::Error::other)?;
-        output.write_all(b"\n")?;
-        output.flush()?;
+        match connection.handle_line(&line) {
+            EngineAction::Message(message) => write_message(&mut output, &message)?,
+            EngineAction::Execute {
+                request_id,
+                prepared,
+            } => {
+                let operation_id = prepared.operation_id().to_owned();
+                connection
+                    .operation_catalogs
+                    .insert(operation_id.clone(), prepared_catalog(&prepared));
+                write_message(
+                    &mut output,
+                    &EngineMessage::success(
+                        request_id,
+                        ResponseResult::OperationAccepted(OperationAccepted {
+                            operation_id: operation_id.clone(),
+                        }),
+                    ),
+                )?;
+                write_operation_event(
+                    &mut output,
+                    &operation_id,
+                    0,
+                    OperationEventPayload::Started {
+                        name: "import.execute".to_owned(),
+                    },
+                )?;
+                let mut sequence = 1_u64;
+                let result = ImportExecutionService::execute(*prepared, |progress| {
+                    let _ = write_progress(&mut output, &operation_id, &mut sequence, progress);
+                });
+                write_execution_result(&mut output, &operation_id, sequence, result)?;
+            }
+            EngineAction::Recover {
+                request_id,
+                catalog_path,
+                operation_id,
+            } => {
+                connection
+                    .operation_catalogs
+                    .insert(operation_id.clone(), catalog_path.clone());
+                write_message(
+                    &mut output,
+                    &EngineMessage::success(
+                        request_id,
+                        ResponseResult::OperationAccepted(OperationAccepted {
+                            operation_id: operation_id.clone(),
+                        }),
+                    ),
+                )?;
+                write_operation_event(
+                    &mut output,
+                    &operation_id,
+                    0,
+                    OperationEventPayload::Started {
+                        name: "operation.recover".to_owned(),
+                    },
+                )?;
+                let mut sequence = 1_u64;
+                let result = ImportRecoveryService::recover(
+                    catalog_path,
+                    &operation_id,
+                    ImportRecoveryMode::Resume,
+                    |progress| {
+                        let _ = write_progress(&mut output, &operation_id, &mut sequence, progress);
+                    },
+                );
+                write_recovery_result(&mut output, &operation_id, sequence, result)?;
+            }
+        }
     }
 
     Ok(())
@@ -38,61 +108,64 @@ pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result
 #[derive(Default)]
 struct Connection {
     handshake_complete: bool,
+    operation_catalogs: HashMap<String, String>,
 }
 
 impl Connection {
-    fn handle_line(&mut self, line: &[u8]) -> EngineMessage {
+    fn handle_line(&mut self, line: &[u8]) -> EngineAction {
         let (request_id, protocol_version) = match request_envelope(line) {
             Ok(envelope) => envelope,
-            Err(error) => return EngineMessage::error(request_id(line), error),
+            Err(error) => {
+                return EngineAction::Message(EngineMessage::error(request_id(line), error))
+            }
         };
         if protocol_version != PROTOCOL_VERSION {
-            return incompatible_protocol(request_id, protocol_version);
+            return EngineAction::Message(incompatible_protocol(request_id, protocol_version));
         }
 
         let request = match serde_json::from_slice::<Request>(line) {
             Ok(request) => request,
             Err(error) => {
-                return EngineMessage::error(
+                return EngineAction::Message(EngineMessage::error(
                     request_id,
                     ProtocolError::new(
                         "invalid_request",
                         "request does not match protocol version 1",
                     )
                     .with_data(json!({"detail": error.to_string()})),
-                );
+                ));
             }
         };
 
         if !self.handshake_complete && !matches!(request.payload, RequestPayload::Handshake(_)) {
-            return EngineMessage::error(
+            return EngineAction::Message(EngineMessage::error(
                 Some(request.id),
                 ProtocolError::new(
                     "handshake_required",
                     "the first request must be a handshake",
                 ),
-            );
+            ));
         }
 
-        match request.payload {
+        EngineAction::Message(match request.payload {
             RequestPayload::Handshake(parameters) => {
                 if self.handshake_complete {
-                    return EngineMessage::error(
+                    return EngineAction::Message(EngineMessage::error(
                         Some(request.id),
                         ProtocolError::new(
                             "handshake_already_completed",
                             "the connection handshake has already completed",
                         ),
-                    );
+                    ));
                 }
                 if parameters.client_version.trim().is_empty() {
-                    return EngineMessage::error(
+                    return EngineAction::Message(EngineMessage::error(
                         Some(request.id),
                         ProtocolError::new(
                             "invalid_client_version",
                             "client version must not be empty",
                         ),
-                    );
+                    ));
                 }
                 self.handshake_complete = true;
                 EngineMessage::success(
@@ -109,26 +182,46 @@ impl Connection {
                             IMPORT_SCAN_METHOD.to_owned(),
                             IMPORT_REVIEW_METHOD.to_owned(),
                             OPERATION_INSPECT_METHOD.to_owned(),
+                            START_OPERATION_METHOD.to_owned(),
                         ],
                     }),
                 )
             }
-            RequestPayload::StartOperation(parameters) => EngineMessage::error(
-                Some(request.id),
-                ProtocolError::new(
-                    "unsupported_operation",
-                    format!("operation {:?} is not implemented", parameters.name),
-                ),
-            ),
-
-            RequestPayload::CancelOperation(parameters) => EngineMessage::error(
-                Some(request.id),
-                ProtocolError::new(
-                    "operation_not_found",
-                    format!("operation {:?} was not found", parameters.operation_id),
-                )
-                .with_data(json!({"operation_id": parameters.operation_id})),
-            ),
+            RequestPayload::StartOperation(parameters) => {
+                return self.start_operation(request.id, parameters);
+            }
+            RequestPayload::CancelOperation(parameters) => {
+                let Some(catalog_path) = self.operation_catalogs.get(&parameters.operation_id)
+                else {
+                    return EngineAction::Message(EngineMessage::error(
+                        Some(request.id),
+                        ProtocolError::new(
+                            "operation_not_found",
+                            format!("operation {:?} was not found", parameters.operation_id),
+                        )
+                        .with_data(json!({"operation_id": parameters.operation_id})),
+                    ));
+                };
+                match ImportRecoveryService::recover(
+                    catalog_path,
+                    &parameters.operation_id,
+                    ImportRecoveryMode::Cancel,
+                    |_| {},
+                ) {
+                    Ok(_) => EngineMessage::success(
+                        request.id,
+                        ResponseResult::CancellationAccepted(
+                            souvenirs_protocol::CancellationAccepted {
+                                operation_id: parameters.operation_id,
+                            },
+                        ),
+                    ),
+                    Err(error) => EngineMessage::error(
+                        Some(request.id),
+                        ProtocolError::new(error.code(), error.to_string()),
+                    ),
+                }
+            }
             RequestPayload::ValidateCatalog(parameters) => catalog_response(
                 request.id,
                 CatalogService::validate(
@@ -170,27 +263,207 @@ impl Connection {
                 }),
             ),
             RequestPayload::InspectOperation(parameters) => {
-                match OperationInspectionService::unfinished(parameters.path) {
-                    Ok(operation) => EngineMessage::success(
-                        request.id,
-                        ResponseResult::OperationInspection(OperationInspectionResult {
-                            operation: operation.map(|operation| UnfinishedOperationResult {
-                                operation_id: operation.operation_id,
-                                collection_name: operation.collection_name,
-                                source_name: operation.source_name,
-                                copied_count: operation.copied_count,
-                                total_count: operation.total_count,
-                                source_available: operation.source_available,
+                match OperationInspectionService::unfinished(&parameters.path) {
+                    Ok(operation) => {
+                        if let Some(operation) = &operation {
+                            self.operation_catalogs
+                                .insert(operation.operation_id.clone(), parameters.path.clone());
+                        }
+                        EngineMessage::success(
+                            request.id,
+                            ResponseResult::OperationInspection(OperationInspectionResult {
+                                operation: operation.map(|operation| UnfinishedOperationResult {
+                                    operation_id: operation.operation_id,
+                                    collection_name: operation.collection_name,
+                                    source_name: operation.source_name,
+                                    copied_count: operation.copied_count,
+                                    total_count: operation.total_count,
+                                    source_available: operation.source_available,
+                                }),
                             }),
-                        }),
-                    ),
+                        )
+                    }
                     Err(error) => EngineMessage::error(
                         Some(request.id),
                         ProtocolError::new(error.code(), error.to_string()),
                     ),
                 }
             }
+        })
+    }
+
+    fn start_operation(
+        &self,
+        request_id: String,
+        parameters: StartOperationParameters,
+    ) -> EngineAction {
+        match parameters {
+            StartOperationParameters::ImportExecute {
+                catalog_path,
+                source_path,
+                collection_name,
+                destination_mode,
+                accepted_date,
+                date_resolution,
+            } => match ImportExecutionService::prepare(ImportExecutionRequest {
+                catalog_path: catalog_path.into(),
+                source_path: source_path.into(),
+                collection_name,
+                destination_mode: match destination_mode {
+                    ImportDestinationMode::Create => DestinationMode::Create,
+                    ImportDestinationMode::Existing => DestinationMode::Existing,
+                },
+                accepted_date,
+                date_resolution: date_resolution.map(|resolution| match resolution {
+                    ImportDateResolution::AsShown => DateResolution::AsShown,
+                    ImportDateResolution::ConvertFromUtc => DateResolution::ConvertFromUtc,
+                }),
+            }) {
+                Ok(prepared) => EngineAction::Execute {
+                    request_id,
+                    prepared: Box::new(prepared),
+                },
+                Err(error) => EngineAction::Message(EngineMessage::error(
+                    Some(request_id),
+                    ProtocolError::new(error.code(), error.to_string()),
+                )),
+            },
+            StartOperationParameters::Recover {
+                catalog_path,
+                operation_id,
+            } => EngineAction::Recover {
+                request_id,
+                catalog_path,
+                operation_id,
+            },
         }
+    }
+}
+
+enum EngineAction {
+    Message(EngineMessage),
+    Execute {
+        request_id: String,
+        prepared: Box<PreparedImport>,
+    },
+    Recover {
+        request_id: String,
+        catalog_path: String,
+        operation_id: String,
+    },
+}
+
+fn prepared_catalog(prepared: &PreparedImport) -> String {
+    prepared.catalog_path().to_string_lossy().into_owned()
+}
+
+fn write_message(output: &mut impl Write, message: &EngineMessage) -> io::Result<()> {
+    serde_json::to_writer(&mut *output, message).map_err(io::Error::other)?;
+    output.write_all(b"\n")?;
+    output.flush()
+}
+
+fn write_operation_event(
+    output: &mut impl Write,
+    operation_id: &str,
+    sequence: u64,
+    payload: OperationEventPayload,
+) -> io::Result<()> {
+    write_message(
+        output,
+        &EngineMessage::event(OperationEvent {
+            protocol_version: PROTOCOL_VERSION,
+            operation_id: operation_id.to_owned(),
+            sequence,
+            payload,
+        }),
+    )
+}
+
+fn write_progress(
+    output: &mut impl Write,
+    operation_id: &str,
+    sequence: &mut u64,
+    progress: OperationProgress,
+) -> io::Result<()> {
+    let result = write_operation_event(
+        output,
+        operation_id,
+        *sequence,
+        OperationEventPayload::Progress {
+            completed_units: progress.completed_units,
+            total_units: Some(progress.total_units),
+            message: Some(progress.message),
+        },
+    );
+    *sequence += 1;
+    result
+}
+
+fn write_execution_result(
+    output: &mut impl Write,
+    operation_id: &str,
+    sequence: u64,
+    result: Result<
+        souvenirs_application::ImportExecutionOutcome,
+        souvenirs_application::ImportExecutionError,
+    >,
+) -> io::Result<()> {
+    match result {
+        Ok(outcome) => write_operation_event(
+            output,
+            operation_id,
+            sequence,
+            OperationEventPayload::Completed {
+                result: serde_json::to_value(outcome).map_err(io::Error::other)?,
+            },
+        ),
+        Err(error) => write_operation_event(
+            output,
+            operation_id,
+            sequence,
+            OperationEventPayload::Failed {
+                error: ProtocolError::new(error.code(), error.to_string()),
+            },
+        ),
+    }
+}
+
+fn write_recovery_result(
+    output: &mut impl Write,
+    operation_id: &str,
+    sequence: u64,
+    result: Result<
+        (
+            RecoveryOutcome,
+            souvenirs_application::ImportExecutionOutcome,
+        ),
+        souvenirs_application::ImportExecutionError,
+    >,
+) -> io::Result<()> {
+    match result {
+        Ok((RecoveryOutcome::Completed, outcome)) => write_operation_event(
+            output,
+            operation_id,
+            sequence,
+            OperationEventPayload::Completed {
+                result: serde_json::to_value(outcome).map_err(io::Error::other)?,
+            },
+        ),
+        Ok((RecoveryOutcome::Cancelled, _)) => write_operation_event(
+            output,
+            operation_id,
+            sequence,
+            OperationEventPayload::Cancelled,
+        ),
+        Err(error) => write_operation_event(
+            output,
+            operation_id,
+            sequence,
+            OperationEventPayload::Failed {
+                error: ProtocolError::new(error.code(), error.to_string()),
+            },
+        ),
     }
 }
 
@@ -375,7 +648,8 @@ mod tests {
                     "catalog.open",
                     "import.scan",
                     "import.review",
-                    "operation.inspect"
+                    "operation.inspect",
+                    "operation.start"
                 ]
             })
         );
@@ -544,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_operation_is_structured() {
+    fn operation_start_requires_typed_parameters() {
         let input = format!(
             "{}{}",
             request("request-1", "handshake", json!({"client_version": "0.1.0"})),
@@ -557,7 +831,7 @@ mod tests {
 
         let responses = run_lines(input);
 
-        assert_eq!(responses[1]["error"]["code"], "unsupported_operation");
+        assert_eq!(responses[1]["error"]["code"], "invalid_request");
         assert_eq!(responses[1]["id"], "request-2");
     }
 

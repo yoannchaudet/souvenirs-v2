@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 souvenirs-domain = { path = "../souvenirs-domain" }
 souvenirs-metadata = { path = "../souvenirs-metadata" }
 souvenirs-storage = { path = "../souvenirs-storage" }

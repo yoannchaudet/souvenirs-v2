@@ -270,7 +270,10 @@ private final class FakeImportExecutionEngine: ImportExecutionEngine {
     func startImportExecution(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> String {
         "operation-1"
     }
@@ -285,7 +288,7 @@ private final class FakeImportExecutionEngine: ImportExecutionEngine {
         return inspection
     }
 
-    func recoverOperation(operationID: String) async throws -> String {
+    func recoverOperation(catalogPath: String, operationID: String) async throws -> String {
         recoveryStartCount += 1
         return "operation-1"
     }

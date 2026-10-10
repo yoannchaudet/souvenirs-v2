@@ -361,9 +361,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::ReviewImport(parameters) => {
                         import_review(&mut output, request.id, parameters)?;
                     }
-                    RequestPayload::StartOperation(parameters)
-                        if parameters.name == "import.execute" =>
-                    {
+                    RequestPayload::StartOperation(
+                        souvenirs_protocol::StartOperationParameters::ImportExecute { .. },
+                    ) => {
                         accept_operation(&mut output, request.id)?;
                         write_event(
                             &mut output,
@@ -421,9 +421,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             source_available: matches!(scenario, Scenario::ImportRecovery),
                         }),
                     )?,
-                    RequestPayload::StartOperation(parameters)
-                        if parameters.name == "operation.recover" =>
-                    {
+                    RequestPayload::StartOperation(
+                        souvenirs_protocol::StartOperationParameters::Recover { .. },
+                    ) => {
                         accept_operation(&mut output, request.id)?;
                         write_event(
                             &mut output,
@@ -525,7 +525,12 @@ fn reject_request(output: &mut impl Write, request: Request) -> io::Result<()> {
             "unsupported_operation",
             &format!(
                 "Operation {:?} is not supported in this scenario.",
-                parameters.name
+                match parameters {
+                    souvenirs_protocol::StartOperationParameters::ImportExecute { .. } =>
+                        "import.execute",
+                    souvenirs_protocol::StartOperationParameters::Recover { .. } =>
+                        "operation.recover",
+                }
             ),
         ),
         RequestPayload::CancelOperation(parameters) => write_protocol_error(

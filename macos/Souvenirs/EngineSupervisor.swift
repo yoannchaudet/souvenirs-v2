@@ -484,10 +484,13 @@ public actor EngineSupervisor {
         method: String,
         parameters: Parameters
     ) async throws -> String {
+        let timeout: Duration = method == "operation.start"
+            ? .seconds(600)
+            : requestTimeout
         let result: OperationAcceptedResult = try await sendRequest(
             method: method,
             parameters: parameters,
-            timeout: requestTimeout
+            timeout: timeout
         )
         guard result.type == "operation_accepted" else {
             throw SupervisorError.malformedResponse(

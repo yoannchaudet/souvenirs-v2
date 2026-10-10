@@ -6,17 +6,7 @@ use souvenirs_protocol::PROTOCOL_VERSION;
 
 #[test]
 fn ready_scenario_rejects_requests_and_exits_cleanly_on_eof() {
-    let output = run(
-        "ready",
-        &[
-            handshake(),
-            request(
-                "request-2",
-                "operation.start",
-                json!({"name": "import.scan"}),
-            ),
-        ],
-    );
+    let output = run("ready", &[handshake(), start_request()]);
 
     assert!(output.status.success());
     let messages = messages(&output);
@@ -25,17 +15,7 @@ fn ready_scenario_rejects_requests_and_exits_cleanly_on_eof() {
 
 #[test]
 fn successful_operation_emits_ordered_terminal_events() {
-    let output = run(
-        "successful-operation",
-        &[
-            handshake(),
-            request(
-                "request-2",
-                "operation.start",
-                json!({"name": "import.scan"}),
-            ),
-        ],
-    );
+    let output = run("successful-operation", &[handshake(), start_request()]);
 
     assert!(output.status.success());
     let messages = messages(&output);
@@ -52,17 +32,7 @@ fn successful_operation_emits_ordered_terminal_events() {
 
 #[test]
 fn failed_operation_is_deterministic() {
-    let output = run(
-        "failed-operation",
-        &[
-            handshake(),
-            request(
-                "request-2",
-                "operation.start",
-                json!({"name": "import.scan"}),
-            ),
-        ],
-    );
+    let output = run("failed-operation", &[handshake(), start_request()]);
 
     assert!(output.status.success());
     let messages = messages(&output);
@@ -76,11 +46,7 @@ fn cancellation_race_always_completes_before_acknowledgement() {
         "cancellation-race",
         &[
             handshake(),
-            request(
-                "request-2",
-                "operation.start",
-                json!({"name": "import.scan"}),
-            ),
+            start_request(),
             request(
                 "request-3",
                 "operation.cancel",
@@ -97,17 +63,7 @@ fn cancellation_race_always_completes_before_acknowledgement() {
 
 #[test]
 fn unexpected_termination_uses_stable_exit_status() {
-    let output = run(
-        "unexpected-termination",
-        &[
-            handshake(),
-            request(
-                "request-2",
-                "operation.start",
-                json!({"name": "import.scan"}),
-            ),
-        ],
-    );
+    let output = run("unexpected-termination", &[handshake(), start_request()]);
 
     assert_eq!(output.status.code(), Some(42));
     assert_eq!(messages(&output).len(), 1);
@@ -115,17 +71,7 @@ fn unexpected_termination_uses_stable_exit_status() {
 
 #[test]
 fn malformed_response_scenario_is_reproducible() {
-    let output = run(
-        "malformed-response",
-        &[
-            handshake(),
-            request(
-                "request-2",
-                "operation.start",
-                json!({"name": "import.scan"}),
-            ),
-        ],
-    );
+    let output = run("malformed-response", &[handshake(), start_request()]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
@@ -226,6 +172,22 @@ fn handshake() -> Value {
         "macos-handshake-1",
         "handshake",
         json!({"client_version": "0.1.0"}),
+    )
+}
+
+fn start_request() -> Value {
+    request(
+        "request-2",
+        "operation.start",
+        json!({
+            "name": "import.execute",
+            "catalog_path": "/Volumes/photos/Family Catalog",
+            "source_path": "/Volumes/camera/EOS_DIGITAL",
+            "collection_name": "Dolomites",
+            "destination_mode": "create",
+            "accepted_date": "2026-10-10",
+            "date_resolution": "as_shown"
+        }),
     )
 }
 
