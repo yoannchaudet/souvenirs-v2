@@ -2,6 +2,8 @@
 
 mod execution;
 mod planning;
+#[allow(dead_code)] // Foundation for the versioned review-to-execution handoff in issue #42.
+mod source_datetime;
 
 pub use execution::{
     ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest, ImportExecutionService,
@@ -9,28 +11,18 @@ pub use execution::{
 };
 pub use souvenirs_domain as domain;
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use souvenirs_domain::catalog::{year_directory, DatedCollectionRange};
-use souvenirs_domain::datetime::{
-    confirm_candidate, resolve_datetime, AcceptedDateTime, AcceptedDateTimeSource,
-    ConfirmationDecision, ConfirmationReason, DateTimeResolution, DateTimeSource,
-};
 use souvenirs_domain::names::CatalogLabel;
-use souvenirs_domain::relationships::{
-    resolve_directory_relationships, RelationshipFinding, RelationshipStatus,
-};
-use souvenirs_domain::source::{SourceFile, SourceFileId, SourcePath};
 use souvenirs_storage::{
     read_operation_records, CatalogConfig, CatalogInitializationError, CatalogLayout,
     DurableTransition, OperationRecord, StorageCapabilities, StorageCapabilityError,
     WriteSuitability, FORMAT_VERSION,
 };
-use time::{Date, UtcOffset};
+use time::{macros::format_description, OffsetDateTime};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogIntent {
@@ -133,38 +125,7 @@ pub struct ImportScanSummary {
     pub uncertain_time_count: usize,
     pub total_bytes: u64,
     pub suggested_collection_name: String,
-    pub suggested_accepted_date: Option<String>,
-    pub suggested_range_end: Option<String>,
-    pub pending_item_count: usize,
-    pub unresolved_item_count: usize,
-    pub datetime_sources: Vec<ImportDateSourceSummary>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportDateSource {
-    ExifDateTimeOriginal,
-    ExifDateTimeDigitized,
-    QuickTimeCreationDate,
-    XmpDateCreated,
-    XmpExifDateTimeOriginal,
-    ContainerCreationTime,
-    GoogleTakeoutPhotoTakenTime,
-    FilenamePattern,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportDateState {
-    Accepted,
-    NeedsConfirmation,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ImportDateSourceSummary {
-    pub source: ImportDateSource,
-    pub state: ImportDateState,
-    pub item_count: usize,
+    pub suggested_accepted_date: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -302,8 +263,58 @@ impl OperationInspectionService {
 impl ImportPlanningService {
     pub fn scan(source: impl AsRef<Path>) -> Result<ImportScanSummary, ImportPlanningError> {
         let source = source.as_ref();
-        let inspected = inspect_source(source, None)?;
-        scan_summary(source, &inspected)
+        if !source.is_dir() {
+            return Err(ImportPlanningError::SourceUnavailable(source.to_path_buf()));
+        }
+
+        let mut files = Vec::new();
+        collect_source_files(source, &mut files)?;
+        files.sort();
+
+        let mut total_bytes = 0_u64;
+        let mut photo_count = 0;
+        let mut video_count = 0;
+        let mut unsupported_count = 0;
+        for path in &files {
+            total_bytes = total_bytes
+                .checked_add(
+                    fs::metadata(path)
+                        .map_err(|source| ImportPlanningError::Io {
+                            path: path.clone(),
+                            source,
+                        })?
+                        .len(),
+                )
+                .ok_or(ImportPlanningError::SourceTooLarge)?;
+            match media_kind(path) {
+                Some(MediaKind::Photo) => photo_count += 1,
+                Some(MediaKind::Video) => video_count += 1,
+                Some(MediaKind::Sidecar) => {}
+                None => unsupported_count += 1,
+            }
+        }
+        let source_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Import")
+            .to_owned();
+        Ok(ImportScanSummary {
+            source_path: source.to_path_buf(),
+            source_name: source_name.clone(),
+            file_count: files.len(),
+            media_count: photo_count + video_count,
+            photo_count,
+            video_count,
+            unsupported_count,
+            uncertain_time_count: video_count,
+            total_bytes,
+            suggested_collection_name: title_case_source_name(&source_name),
+            suggested_accepted_date: OffsetDateTime::now_utc()
+                .date()
+                .format(format_description!("[year]-[month]-[day]"))
+                .map_err(|error| ImportPlanningError::InvalidDate(error.to_string()))?,
+        })
     }
 
     pub fn review(request: ImportReviewRequest) -> Result<ImportReview, ImportPlanningError> {
@@ -311,270 +322,11 @@ impl ImportPlanningService {
     }
 }
 
-fn scan_summary(
-    source: &Path,
-    inspected: &InspectedSource,
-) -> Result<ImportScanSummary, ImportPlanningError> {
-    let source_name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Import")
-        .to_owned();
-    Ok(ImportScanSummary {
-        source_path: source.to_path_buf(),
-        source_name: source_name.clone(),
-        file_count: inspected.file_count,
-        media_count: inspected.photo_count + inspected.video_count,
-        photo_count: inspected.photo_count,
-        video_count: inspected.video_count,
-        unsupported_count: inspected.unsupported_count,
-        uncertain_time_count: inspected.pending_item_count,
-        total_bytes: inspected.total_bytes,
-        suggested_collection_name: title_case_source_name(&source_name),
-        suggested_accepted_date: inspected.range_start.map(|date| date.to_string()),
-        suggested_range_end: inspected.range_end.map(|date| date.to_string()),
-        pending_item_count: inspected.pending_item_count,
-        unresolved_item_count: inspected.unresolved_item_count,
-        datetime_sources: inspected.datetime_sources.clone(),
-    })
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PlannedSourceItem {
-    pub primary: SourceFile,
-    pub companion: Option<SourceFile>,
-    pub sidecars: Vec<SourceFile>,
-    pub accepted: AcceptedDateTime,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct InspectedSource {
-    file_count: usize,
-    photo_count: usize,
-    video_count: usize,
-    unsupported_count: usize,
-    total_bytes: u64,
-    pending_item_count: usize,
-    unresolved_item_count: usize,
-    transfer_media_count: usize,
-    transfer_file_count: usize,
-    excluded_file_count: usize,
-    transfer_bytes: u64,
-    range_start: Option<Date>,
-    range_end: Option<Date>,
-    datetime_sources: Vec<ImportDateSourceSummary>,
-    pub items: Vec<PlannedSourceItem>,
-}
-
-pub(crate) fn inspect_source(
-    source: &Path,
-    decision: Option<DateResolution>,
-) -> Result<InspectedSource, ImportPlanningError> {
-    if !source.is_dir() {
-        return Err(ImportPlanningError::SourceUnavailable(source.to_path_buf()));
-    }
-    let mut paths = Vec::new();
-    collect_source_files(source, &mut paths)?;
-    paths.sort();
-
-    let mut source_files = Vec::new();
-    let mut sizes = BTreeMap::new();
-    let mut total_bytes = 0_u64;
-    let mut photo_count = 0;
-    let mut video_count = 0;
-    for path in &paths {
-        let size = fs::metadata(path)
-            .map_err(|error| ImportPlanningError::Io {
-                path: path.clone(),
-                source: error,
-            })?
-            .len();
-        total_bytes = total_bytes
-            .checked_add(size)
-            .ok_or(ImportPlanningError::SourceTooLarge)?;
-        let relative = path
-            .strip_prefix(source)
-            .expect("collected paths are below the source");
-        let components = relative
-            .components()
-            .map(|component| {
-                component
-                    .as_os_str()
-                    .to_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        ImportPlanningError::InvalidSource(
-                            "source path is not valid UTF-8".to_owned(),
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let source_path = SourcePath::new(components)
-            .map_err(|error| ImportPlanningError::InvalidSource(error.to_string()))?;
-        let id = SourceFileId::new(source_path.to_string())
-            .map_err(|error| ImportPlanningError::InvalidSource(error.to_string()))?;
-        let kind = souvenirs_metadata::classify_path(path);
-        match kind {
-            souvenirs_metadata::AssetKind::Original {
-                media: souvenirs_metadata::MediaKind::Photo,
-                ..
-            } => photo_count += 1,
-            souvenirs_metadata::AssetKind::Original {
-                media: souvenirs_metadata::MediaKind::Video,
-                ..
-            } => video_count += 1,
-            souvenirs_metadata::AssetKind::Sidecar { .. }
-            | souvenirs_metadata::AssetKind::Unsupported => {}
-        }
-        let filename = source_path.filename();
-        let extension = Path::new(filename)
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_owned();
-        let basename = filename
-            .strip_suffix(&format!(".{extension}"))
-            .unwrap_or(filename)
-            .to_owned();
-        sizes.insert(id.clone(), size);
-        source_files.push(SourceFile {
-            id,
-            path: source_path,
-            basename,
-            extension,
-            kind: kind.source_file_kind(),
-            metadata: souvenirs_metadata::normalized_metadata(path)
-                .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?,
-        });
-    }
-
-    let by_id = source_files
-        .iter()
-        .map(|file| (file.id.clone(), file))
-        .collect::<BTreeMap<_, _>>();
-    let relationships = resolve_directory_relationships(&source_files);
-    let unhandled_ids = relationships
-        .findings
-        .iter()
-        .filter_map(unhandled_file_id)
-        .collect::<BTreeSet<_>>();
-    let unsupported_count = relationships
-        .findings
-        .iter()
-        .filter(|finding| matches!(finding, RelationshipFinding::UnknownContent(_)))
-        .count();
-    let mut pending_item_count = 0;
-    let mut unresolved_item_count = 0;
-    let mut excluded_file_count = 0;
-    let mut transfer_bytes = 0_u64;
-    let mut source_counts = BTreeMap::new();
-    let mut items = Vec::new();
-
-    for item in relationships.items {
-        let item_files = 1 + usize::from(item.companion.is_some()) + item.sidecars.len();
-        if item.status == RelationshipStatus::NeedsDecision {
-            unresolved_item_count += 1;
-            excluded_file_count += item_files;
-            continue;
-        }
-        let candidates = std::iter::once(&item.primary)
-            .chain(item.sidecars.iter())
-            .flat_map(|id| by_id[id].metadata.datetime_candidates.iter().cloned());
-        let resolution = resolve_datetime(candidates);
-        let accepted = match resolution {
-            DateTimeResolution::Accepted { accepted, .. } => {
-                let source = accepted_source(&accepted.source);
-                *source_counts
-                    .entry((source, ImportDateState::Accepted))
-                    .or_insert(0) += 1;
-                Some(accepted)
-            }
-            DateTimeResolution::NeedsConfirmation(pending) => {
-                let source = import_date_source(pending.candidate.source);
-                if decision.is_some() {
-                    let accepted = confirm_pending(pending).ok();
-                    if accepted.is_some() {
-                        *source_counts
-                            .entry((source, ImportDateState::Accepted))
-                            .or_insert(0) += 1;
-                    }
-                    accepted
-                } else {
-                    pending_item_count += 1;
-                    *source_counts
-                        .entry((source, ImportDateState::NeedsConfirmation))
-                        .or_insert(0) += 1;
-                    None
-                }
-            }
-            DateTimeResolution::Missing => {
-                if decision.is_none() {
-                    unresolved_item_count += 1;
-                }
-                None
-            }
-        };
-        let Some(accepted) = accepted else {
-            excluded_file_count += item_files;
-            continue;
-        };
-        for id in std::iter::once(&item.primary)
-            .chain(item.companion.iter())
-            .chain(item.sidecars.iter())
-        {
-            transfer_bytes = transfer_bytes
-                .checked_add(sizes[id])
-                .ok_or(ImportPlanningError::SourceTooLarge)?;
-        }
-        items.push(PlannedSourceItem {
-            primary: by_id[&item.primary].clone(),
-            companion: item.companion.as_ref().map(|id| by_id[id].clone()),
-            sidecars: item.sidecars.iter().map(|id| by_id[id].clone()).collect(),
-            accepted,
-        });
-    }
-
-    let range_start = items
-        .iter()
-        .map(|item| item.accepted.wall_clock.date())
-        .min();
-    let range_end = items
-        .iter()
-        .map(|item| item.accepted.wall_clock.date())
-        .max();
-    let transfer_file_count = items
-        .iter()
-        .map(|item| 1 + usize::from(item.companion.is_some()) + item.sidecars.len())
-        .sum();
-    let transfer_media_count = items
-        .iter()
-        .map(|item| 1 + usize::from(item.companion.is_some()))
-        .sum();
-    Ok(InspectedSource {
-        file_count: paths.len(),
-        photo_count,
-        video_count,
-        unsupported_count,
-        total_bytes,
-        pending_item_count,
-        unresolved_item_count,
-        transfer_media_count,
-        transfer_file_count,
-        excluded_file_count: excluded_file_count + unhandled_ids.len(),
-        transfer_bytes,
-        range_start,
-        range_end,
-        datetime_sources: source_counts
-            .into_iter()
-            .map(|((source, state), item_count)| ImportDateSourceSummary {
-                source,
-                state,
-                item_count,
-            })
-            .collect(),
-        items,
-    })
+#[derive(Clone, Copy)]
+enum MediaKind {
+    Photo,
+    Video,
+    Sidecar,
 }
 
 fn collect_source_files(
@@ -608,74 +360,19 @@ fn collect_source_files(
     Ok(())
 }
 
-fn unhandled_file_id(finding: &RelationshipFinding) -> Option<&SourceFileId> {
-    match finding {
-        RelationshipFinding::OrphanSidecar(file) | RelationshipFinding::UnknownContent(file) => {
-            Some(file)
-        }
-        RelationshipFinding::AmbiguousSidecar { sidecar, .. } => Some(sidecar),
-        RelationshipFinding::AmbiguousRawJpeg(_)
-        | RelationshipFinding::AmbiguousLivePhoto { .. }
-        | RelationshipFinding::AmbiguousCanonicalCompound(_)
-        | RelationshipFinding::ConflictingCompound(_) => None,
+fn media_kind(path: &Path) -> Option<MediaKind> {
+    match souvenirs_metadata::classify_path(path) {
+        souvenirs_metadata::AssetKind::Original {
+            media: souvenirs_metadata::MediaKind::Photo,
+            ..
+        } => Some(MediaKind::Photo),
+        souvenirs_metadata::AssetKind::Original {
+            media: souvenirs_metadata::MediaKind::Video,
+            ..
+        } => Some(MediaKind::Video),
+        souvenirs_metadata::AssetKind::Sidecar { .. } => Some(MediaKind::Sidecar),
+        souvenirs_metadata::AssetKind::Unsupported => None,
     }
-}
-
-fn confirm_pending(
-    pending: souvenirs_domain::datetime::PendingDateTime,
-) -> Result<AcceptedDateTime, souvenirs_domain::datetime::DateTimeError> {
-    let decision = match pending.reason {
-        ConfirmationReason::UtcInterpretation => ConfirmationDecision::InterpretUtc(UtcOffset::UTC),
-        ConfirmationReason::MissingClock => {
-            return Err(souvenirs_domain::datetime::DateTimeError::InvalidConfirmation)
-        }
-        ConfirmationReason::AmbiguousMetadata | ConfirmationReason::Proposal => {
-            ConfirmationDecision::AcceptCandidate
-        }
-    };
-    confirm_candidate(pending, decision)
-}
-
-fn accepted_source(source: &AcceptedDateTimeSource) -> ImportDateSource {
-    match source {
-        AcceptedDateTimeSource::Metadata(source) | AcceptedDateTimeSource::Confirmed(source) => {
-            import_date_source(*source)
-        }
-        AcceptedDateTimeSource::Corrected { original, .. } => accepted_source(original),
-        AcceptedDateTimeSource::UserAssigned => {
-            unreachable!("scan planning does not assign datetimes")
-        }
-    }
-}
-
-fn import_date_source(source: DateTimeSource) -> ImportDateSource {
-    match source {
-        DateTimeSource::ExifDateTimeOriginal => ImportDateSource::ExifDateTimeOriginal,
-        DateTimeSource::ExifDateTimeDigitized => ImportDateSource::ExifDateTimeDigitized,
-        DateTimeSource::QuickTimeCreationDate => ImportDateSource::QuickTimeCreationDate,
-        DateTimeSource::XmpDateCreated => ImportDateSource::XmpDateCreated,
-        DateTimeSource::XmpExifDateTimeOriginal => ImportDateSource::XmpExifDateTimeOriginal,
-        DateTimeSource::ContainerCreationTime => ImportDateSource::ContainerCreationTime,
-        DateTimeSource::GoogleTakeoutPhotoTakenTime => {
-            ImportDateSource::GoogleTakeoutPhotoTakenTime
-        }
-        DateTimeSource::FilenamePattern => ImportDateSource::FilenamePattern,
-    }
-}
-
-pub(crate) fn dated_collection_components(
-    start: Date,
-    end: Date,
-    label: &CatalogLabel,
-) -> Result<(String, String), ImportPlanningError> {
-    let range = DatedCollectionRange::new(start, end)
-        .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?;
-    let year = year_directory(start)
-        .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?;
-    let folder = range
-        .folder_name(label)
-        .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?;
-    Ok((year.to_string(), folder.to_string()))
 }
 
 fn title_case_source_name(value: &str) -> String {
@@ -704,8 +401,6 @@ pub enum ImportPlanningError {
     DestinationMissing(PathBuf),
     InvalidCollection(String),
     InvalidDate(String),
-    InvalidMetadata(String),
-    InvalidSource(String),
     InvalidPlan(String),
     Io {
         path: PathBuf,
@@ -714,7 +409,6 @@ pub enum ImportPlanningError {
     NoSupportedMedia,
     SourceTooLarge,
     SourceUnavailable(PathBuf),
-    UnsupportedDateResolution,
 }
 
 impl ImportPlanningError {
@@ -725,14 +419,11 @@ impl ImportPlanningError {
             Self::DestinationMissing(_) => "destination_missing",
             Self::InvalidCollection(_) => "invalid_collection",
             Self::InvalidDate(_) => "invalid_date",
-            Self::InvalidMetadata(_) => "invalid_metadata",
-            Self::InvalidSource(_) => "invalid_source",
             Self::InvalidPlan(_) => "invalid_plan",
             Self::Io { .. } => "source_io",
             Self::NoSupportedMedia => "no_supported_media",
             Self::SourceTooLarge => "source_too_large",
             Self::SourceUnavailable(_) => "source_unavailable",
-            Self::UnsupportedDateResolution => "unsupported_date_resolution",
         }
     }
 }
@@ -757,10 +448,6 @@ impl fmt::Display for ImportPlanningError {
             Self::InvalidDate(value) => {
                 write!(formatter, "{value:?} is not a valid YYYY-MM-DD date.")
             }
-            Self::InvalidMetadata(message) => {
-                write!(formatter, "Could not read media metadata: {message}")
-            }
-            Self::InvalidSource(message) => write!(formatter, "Invalid source file: {message}"),
             Self::InvalidPlan(message) => formatter.write_str(message),
             Self::Io { path, source } => {
                 write!(formatter, "Could not scan {}: {source}", path.display())
@@ -771,9 +458,6 @@ impl fmt::Display for ImportPlanningError {
             Self::SourceTooLarge => formatter.write_str("The source is too large to summarize."),
             Self::SourceUnavailable(_) => formatter
                 .write_str("The source is no longer available. Reconnect it and try again."),
-            Self::UnsupportedDateResolution => formatter.write_str(
-                "UTC conversion needs an explicit timezone and is not available in this review.",
-            ),
         }
     }
 }
@@ -1023,15 +707,14 @@ mod tests {
         let source = temporary.path().join("EOS_DIGITAL");
         fs::create_dir(&catalog).unwrap();
         fs::create_dir(&source).unwrap();
-        fs::write(source.join("IMG_20241010_101112.jpg"), b"photo").unwrap();
-        fs::write(source.join("VID_20241011_121314.mov"), b"video").unwrap();
-        fs::write(source.join("undated.jpg"), b"undated").unwrap();
+        fs::write(source.join("photo.jpg"), b"photo").unwrap();
+        fs::write(source.join("clip.mov"), b"video").unwrap();
         fs::write(source.join("notes.txt"), b"notes").unwrap();
         CatalogService::create(&catalog, "Family").unwrap();
 
         let scan = ImportPlanningService::scan(&source).unwrap();
-        assert_eq!(scan.uncertain_time_count, 2);
-        assert_eq!(scan.unresolved_item_count, 1);
+        assert_eq!(scan.media_count, 2);
+        assert_eq!(scan.uncertain_time_count, 1);
         assert_eq!(scan.unsupported_count, 1);
 
         let unresolved = ImportPlanningService::review(ImportReviewRequest {
@@ -1044,7 +727,7 @@ mod tests {
         })
         .unwrap();
         assert!(!unresolved.can_start);
-        assert_eq!(unresolved.required_decision_count, 3);
+        assert_eq!(unresolved.required_decision_count, 1);
 
         let resolved = ImportPlanningService::review(ImportReviewRequest {
             catalog_path: catalog.clone(),
@@ -1057,12 +740,8 @@ mod tests {
         .unwrap();
         assert!(resolved.can_start);
         assert_eq!(resolved.transfer_count, 2);
-        assert_eq!(resolved.left_on_source_count, 2);
-        assert!(resolved
-            .destination_path
-            .ends_with("2024-10-10 +1d Dolomites"));
         assert!(!resolved.destination_path.exists());
-        assert!(source.join("IMG_20241010_101112.jpg").exists());
+        assert!(source.join("photo.jpg").exists());
     }
 
     #[test]
@@ -1077,9 +756,9 @@ mod tests {
         let source = temporary.path().join("source");
         fs::create_dir(&catalog).unwrap();
         fs::create_dir(&source).unwrap();
-        fs::write(source.join("IMG_20241010_101112.jpg"), b"photo").unwrap();
+        fs::write(source.join("photo.jpg"), b"photo").unwrap();
         CatalogService::create(&catalog, "Family").unwrap();
-        fs::create_dir_all(catalog.join("2024").join("2024-10-10 Dolomites")).unwrap();
+        fs::create_dir_all(catalog.join("2026").join("2026-10-10 Dolomites")).unwrap();
 
         assert!(matches!(
             ImportPlanningService::review(ImportReviewRequest {

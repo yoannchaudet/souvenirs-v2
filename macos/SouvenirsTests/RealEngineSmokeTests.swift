@@ -266,7 +266,7 @@ final class RealEngineSmokeTests: XCTestCase {
             )
             try contents.write(
                 to: source.appendingPathComponent(
-                    String(format: "IMG_20261010_1011%02d.jpg", index)
+                    String(format: "IMG_%04d.jpg", index + 1)
                 )
             )
         }
@@ -295,13 +295,13 @@ final class RealEngineSmokeTests: XCTestCase {
             withIntermediateDirectories: true
         )
         try Data("raw bytes".utf8).write(
-            to: source.appendingPathComponent("IMG_20261010_120000.CR3")
+            to: source.appendingPathComponent("IMG_0001.CR3")
         )
         try Data("jpeg bytes".utf8).write(
-            to: source.appendingPathComponent("IMG_20261010_120000.JPG")
+            to: source.appendingPathComponent("IMG_0001.JPG")
         )
         try Data("xmp bytes".utf8).write(
-            to: source.appendingPathComponent("IMG_20261010_120000.JPG.xmp")
+            to: source.appendingPathComponent("IMG_0001.JPG.xmp")
         )
         temporaryDirectories.append(root)
         return Fixture(

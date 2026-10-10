@@ -12,10 +12,9 @@ use souvenirs_application::{
 };
 use souvenirs_protocol::{
     CatalogIntent, CatalogResult, EngineMessage, HandshakeResult, ImportDateResolution,
-    ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportDestinationMode,
-    ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
-    OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
-    StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
+    ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent,
+    OperationEventPayload, OperationInspectionResult, ProtocolError, Request, RequestPayload,
+    ResponseResult, StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
     CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION,
     IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
     START_OPERATION_METHOD,
@@ -505,48 +504,6 @@ fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportS
         total_bytes: scan.total_bytes,
         suggested_collection_name: scan.suggested_collection_name,
         suggested_accepted_date: scan.suggested_accepted_date,
-        suggested_range_end: scan.suggested_range_end,
-        pending_item_count: scan.pending_item_count,
-        unresolved_item_count: scan.unresolved_item_count,
-        datetime_sources: scan
-            .datetime_sources
-            .into_iter()
-            .map(|summary| ImportDateSourceSummary {
-                source: match summary.source {
-                    souvenirs_application::ImportDateSource::ExifDateTimeOriginal => {
-                        ImportDateSource::ExifDateTimeOriginal
-                    }
-                    souvenirs_application::ImportDateSource::ExifDateTimeDigitized => {
-                        ImportDateSource::ExifDateTimeDigitized
-                    }
-                    souvenirs_application::ImportDateSource::QuickTimeCreationDate => {
-                        ImportDateSource::QuickTimeCreationDate
-                    }
-                    souvenirs_application::ImportDateSource::XmpDateCreated => {
-                        ImportDateSource::XmpDateCreated
-                    }
-                    souvenirs_application::ImportDateSource::XmpExifDateTimeOriginal => {
-                        ImportDateSource::XmpExifDateTimeOriginal
-                    }
-                    souvenirs_application::ImportDateSource::ContainerCreationTime => {
-                        ImportDateSource::ContainerCreationTime
-                    }
-                    souvenirs_application::ImportDateSource::GoogleTakeoutPhotoTakenTime => {
-                        ImportDateSource::GoogleTakeoutPhotoTakenTime
-                    }
-                    souvenirs_application::ImportDateSource::FilenamePattern => {
-                        ImportDateSource::FilenamePattern
-                    }
-                },
-                state: match summary.state {
-                    souvenirs_application::ImportDateState::Accepted => ImportDateState::Accepted,
-                    souvenirs_application::ImportDateState::NeedsConfirmation => {
-                        ImportDateState::NeedsConfirmation
-                    }
-                },
-                item_count: summary.item_count,
-            })
-            .collect(),
     }
 }
 
@@ -560,7 +517,7 @@ fn import_scan_response(
     match result {
         Ok(scan) => EngineMessage::success(
             request_id,
-            ResponseResult::ImportScan(Box::new(import_scan_result(scan))),
+            ResponseResult::ImportScan(import_scan_result(scan)),
         ),
         Err(error) => EngineMessage::error(
             Some(request_id),

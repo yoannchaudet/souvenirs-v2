@@ -45,34 +45,6 @@ public actor EngineSupervisor {
         case convertFromUTC = "convert_from_utc"
     }
 
-    public enum ImportDateSource: String, Codable, Equatable, Sendable {
-        case exifDateTimeOriginal = "exif_date_time_original"
-        case exifDateTimeDigitized = "exif_date_time_digitized"
-        case quickTimeCreationDate = "quick_time_creation_date"
-        case xmpDateCreated = "xmp_date_created"
-        case xmpExifDateTimeOriginal = "xmp_exif_date_time_original"
-        case containerCreationTime = "container_creation_time"
-        case googleTakeoutPhotoTakenTime = "google_takeout_photo_taken_time"
-        case filenamePattern = "filename_pattern"
-    }
-
-    public enum ImportDateState: String, Codable, Equatable, Sendable {
-        case accepted
-        case needsConfirmation = "needs_confirmation"
-    }
-
-    public struct ImportDateSourceSummary: Codable, Equatable, Sendable {
-        public let source: ImportDateSource
-        public let state: ImportDateState
-        public let itemCount: Int
-
-        enum CodingKeys: String, CodingKey {
-            case source
-            case state
-            case itemCount = "item_count"
-        }
-    }
-
     public struct ImportScan: Codable, Equatable, Sendable {
         public let sourcePath: String
         public let sourceName: String
@@ -84,11 +56,7 @@ public actor EngineSupervisor {
         public let uncertainTimeCount: Int
         public let totalBytes: UInt64
         public let suggestedCollectionName: String
-        public let suggestedAcceptedDate: String?
-        public let suggestedRangeEnd: String?
-        public let pendingItemCount: Int
-        public let unresolvedItemCount: Int
-        public let datetimeSources: [ImportDateSourceSummary]
+        public let suggestedAcceptedDate: String
 
         enum CodingKeys: String, CodingKey {
             case sourcePath = "source_path"
@@ -102,10 +70,6 @@ public actor EngineSupervisor {
             case totalBytes = "total_bytes"
             case suggestedCollectionName = "suggested_collection_name"
             case suggestedAcceptedDate = "suggested_accepted_date"
-            case suggestedRangeEnd = "suggested_range_end"
-            case pendingItemCount = "pending_item_count"
-            case unresolvedItemCount = "unresolved_item_count"
-            case datetimeSources = "datetime_sources"
         }
     }
 
@@ -1741,11 +1705,7 @@ private struct ImportScanResult: Decodable, Sendable {
     let uncertainTimeCount: Int
     let totalBytes: UInt64
     let suggestedCollectionName: String
-    let suggestedAcceptedDate: String?
-    let suggestedRangeEnd: String?
-    let pendingItemCount: Int
-    let unresolvedItemCount: Int
-    let datetimeSources: [EngineSupervisor.ImportDateSourceSummary]
+    let suggestedAcceptedDate: String
 
     var scan: EngineSupervisor.ImportScan {
         .init(
@@ -1759,11 +1719,7 @@ private struct ImportScanResult: Decodable, Sendable {
             uncertainTimeCount: uncertainTimeCount,
             totalBytes: totalBytes,
             suggestedCollectionName: suggestedCollectionName,
-            suggestedAcceptedDate: suggestedAcceptedDate,
-            suggestedRangeEnd: suggestedRangeEnd,
-            pendingItemCount: pendingItemCount,
-            unresolvedItemCount: unresolvedItemCount,
-            datetimeSources: datetimeSources
+            suggestedAcceptedDate: suggestedAcceptedDate
         )
     }
 
@@ -1780,10 +1736,6 @@ private struct ImportScanResult: Decodable, Sendable {
         case totalBytes = "total_bytes"
         case suggestedCollectionName = "suggested_collection_name"
         case suggestedAcceptedDate = "suggested_accepted_date"
-        case suggestedRangeEnd = "suggested_range_end"
-        case pendingItemCount = "pending_item_count"
-        case unresolvedItemCount = "unresolved_item_count"
-        case datetimeSources = "datetime_sources"
     }
 }
 

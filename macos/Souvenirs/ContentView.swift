@@ -726,7 +726,7 @@ private struct ImportPlanningSheet: View {
 
                     if let scan = model.scan {
                         destinationCard
-                        if scan.pendingItemCount + scan.unresolvedItemCount > 0 {
+                        if scan.uncertainTimeCount > 0 {
                             dateDecision(scan)
                         }
                         summary(scan)
@@ -812,7 +812,7 @@ private struct ImportPlanningSheet: View {
                     }
                     .accessibilityIdentifier("import-destination-mode")
                 }
-                Text("\(model.dateRangeSummary) · \(model.dateSourceSummary)")
+                Text("\(model.acceptedDate) · from the dates in your photos")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -837,16 +837,15 @@ private struct ImportPlanningSheet: View {
                     .frame(width: 22, height: 22)
                     .background(.orange.opacity(0.15), in: Circle())
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(
-                        "\(scan.pendingItemCount + scan.unresolvedItemCount) items need a date decision"
-                    )
+                    Text("\(scan.uncertainTimeCount) videos have an uncertain time")
                         .font(.callout.bold())
-                    Text(
-                        "Confirm metadata and filename proposals. Items without a usable date stay on the source."
-                    )
+                    Text("The camera didn’t say which time zone it used.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    decisionButton("Use proposed dates", value: .asShown)
+                    HStack {
+                        decisionButton("As shown", value: .asShown)
+                        decisionButton("Convert from UTC", value: .convertFromUTC)
+                    }
                 }
             }
         }
@@ -885,10 +884,9 @@ private struct ImportPlanningSheet: View {
                 systemImage: "square.and.arrow.down"
             )
             .accessibilityIdentifier("import-operation-summary")
-            let leftOnSource = model.review?.leftOnSourceCount ?? scan.unsupportedCount
-            if leftOnSource > 0 {
+            if scan.unsupportedCount > 0 {
                 Label(
-                    "\(leftOnSource) unsupported or unresolved files will stay on the source.",
+                    "\(scan.unsupportedCount) unsupported files will stay on the source.",
                     systemImage: "externaldrive"
                 )
             }
@@ -1024,14 +1022,7 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
             uncertainTimeCount: 4,
             totalBytes: 41_000_000_000,
             suggestedCollectionName: "Dolomites",
-            suggestedAcceptedDate: "2026-10-10",
-            suggestedRangeEnd: "2026-10-12",
-            pendingItemCount: 4,
-            unresolvedItemCount: 0,
-            datetimeSources: [
-                .init(source: .exifDateTimeOriginal, state: .accepted, itemCount: 8),
-                .init(source: .containerCreationTime, state: .needsConfirmation, itemCount: 4)
-            ]
+            suggestedAcceptedDate: "2026-10-10"
         )
     }
 

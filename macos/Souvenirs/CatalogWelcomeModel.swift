@@ -275,46 +275,12 @@ final class ImportPlanningModel: ObservableObject {
 
     var title: String {
         guard let scan else { return "Reading this source…" }
-        guard let review else {
-            return "Reviewing \(scan.mediaCount) photos and videos for \(destinationDescription)"
-        }
-        let count = review.transferCount
-        return "\(count) new photos and videos will be copied into \(destinationDescription)"
+        return "\(scan.mediaCount) new photos and videos will be copied into \(destinationDescription)"
     }
 
     var destinationDescription: String {
         if collectionName.isEmpty { return "a new collection" }
         return "“\(collectionName)”"
-    }
-
-    var dateRangeSummary: String {
-        guard let start = scan?.suggestedAcceptedDate else {
-            return "No accepted media date yet"
-        }
-        guard let end = scan?.suggestedRangeEnd, end != start else {
-            return start
-        }
-        return "\(start)–\(end)"
-    }
-
-    var dateSourceSummary: String {
-        guard let scan, !scan.datetimeSources.isEmpty else {
-            return "No supported media date found"
-        }
-        return scan.datetimeSources.map { summary in
-            let source = switch summary.source {
-            case .exifDateTimeOriginal: "EXIF DateTimeOriginal"
-            case .exifDateTimeDigitized: "EXIF DateTimeDigitized"
-            case .quickTimeCreationDate: "QuickTime creation date"
-            case .xmpDateCreated: "XMP DateCreated"
-            case .xmpExifDateTimeOriginal: "XMP DateTimeOriginal"
-            case .containerCreationTime: "container creation time"
-            case .googleTakeoutPhotoTakenTime: "Google Takeout proposal"
-            case .filenamePattern: "filename proposal"
-            }
-            let state = summary.state == .accepted ? "accepted" : "needs confirmation"
-            return "\(summary.itemCount) \(source) \(state)"
-        }.joined(separator: " · ")
     }
 
     func load() async {
@@ -324,7 +290,7 @@ final class ImportPlanningModel: ObservableObject {
             let scan = try await engine.scanImport(sourcePath: sourcePath)
             self.scan = scan
             collectionName = scan.suggestedCollectionName
-            acceptedDate = scan.suggestedAcceptedDate ?? ""
+            acceptedDate = scan.suggestedAcceptedDate
             await refreshReview()
         } catch {
             isLoading = false
@@ -338,7 +304,7 @@ final class ImportPlanningModel: ObservableObject {
         let generation = reviewGeneration
         let collectionName = collectionName
         let destinationMode = destinationMode
-        let requestedAcceptedDate = acceptedDate
+        let acceptedDate = acceptedDate
         let dateResolution = dateResolution
         isLoading = true
         errorMessage = nil
@@ -349,15 +315,11 @@ final class ImportPlanningModel: ObservableObject {
                 sourcePath: sourcePath,
                 collectionName: collectionName,
                 destinationMode: destinationMode,
-                acceptedDate: requestedAcceptedDate,
+                acceptedDate: acceptedDate,
                 dateResolution: dateResolution
             )
             guard generation == reviewGeneration else { return }
             review = result
-            scan = result.scan
-            if !result.acceptedDate.isEmpty {
-                acceptedDate = result.acceptedDate
-            }
         } catch {
             guard generation == reviewGeneration else { return }
             review = nil

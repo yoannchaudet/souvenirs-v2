@@ -768,8 +768,8 @@ mod tests {
             .join("2026-10-10 Recovery Import");
         let manifest = fs::read_to_string(collection.join("SHA256SUMS")).unwrap();
         assert_eq!(manifest.lines().count(), 2);
-        assert!(manifest.contains("2026-10-10 10-11-12 001.jpg"));
-        assert!(manifest.contains("2026-10-10 10-11-13 002.jpg"));
+        assert!(manifest.contains("2026-10-10 12-00-00 001.jpg"));
+        assert!(manifest.contains("2026-10-10 12-00-00 002.jpg"));
 
         let mut existing_request = fixture.request();
         existing_request.destination_mode = DestinationMode::Existing;
@@ -777,8 +777,8 @@ mod tests {
         ImportExecutionService::execute(prepared, |_| {}).unwrap();
         let manifest = fs::read_to_string(collection.join("SHA256SUMS")).unwrap();
         assert_eq!(manifest.lines().count(), 4);
-        assert!(manifest.contains("2026-10-10 10-11-12 003.jpg"));
-        assert!(manifest.contains("2026-10-10 10-11-13 004.jpg"));
+        assert!(manifest.contains("2026-10-10 12-00-00 003.jpg"));
+        assert!(manifest.contains("2026-10-10 12-00-00 004.jpg"));
     }
 
     #[test]
@@ -897,11 +897,7 @@ mod tests {
             .find(|copy| !copy.manifested)
             .unwrap();
         let sidecar_destination = fixture.catalog.join(&sidecar.destination);
-        fs::write(
-            fixture.source.join("IMG_20261010_120000.JPG.xmp"),
-            b"changed",
-        )
-        .unwrap();
+        fs::write(fixture.source.join("IMG_0001.JPG.xmp"), b"changed").unwrap();
 
         let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
 
@@ -1069,7 +1065,7 @@ mod tests {
             .unwrap();
         drop(journal);
         lock.release().unwrap();
-        fs::write(fixture.source.join("IMG_20261010_101112.jpg"), b"changed").unwrap();
+        fs::write(fixture.source.join("one.jpg"), b"changed").unwrap();
 
         let error = ImportRecoveryService::recover(
             &fixture.catalog,
@@ -1088,11 +1084,7 @@ mod tests {
         let prepared = ImportExecutionService::prepare(fixture.request()).unwrap();
         let operation_id = prepared.operation_id().to_owned();
         let destination = fixture.catalog.join(&prepared.plan.copies[0].destination);
-        fs::write(
-            fixture.source.join("IMG_20261010_101112.jpg"),
-            b"changed after planning",
-        )
-        .unwrap();
+        fs::write(fixture.source.join("one.jpg"), b"changed after planning").unwrap();
 
         let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
 
@@ -1429,8 +1421,8 @@ mod tests {
         let source = temporary.path().join("source");
         fs::create_dir(&catalog).unwrap();
         fs::create_dir(&source).unwrap();
-        fs::write(source.join("IMG_20261010_101112.jpg"), b"one").unwrap();
-        fs::write(source.join("IMG_20261010_101113.jpg"), b"two").unwrap();
+        fs::write(source.join("one.jpg"), b"one").unwrap();
+        fs::write(source.join("two.jpg"), b"two").unwrap();
         CatalogService::create(&catalog, "Test Catalog").unwrap();
         Fixture {
             _temporary: temporary,
@@ -1445,9 +1437,9 @@ mod tests {
         let source = temporary.path().join("source");
         fs::create_dir(&catalog).unwrap();
         fs::create_dir(&source).unwrap();
-        fs::write(source.join("IMG_20261010_120000.CR3"), b"raw").unwrap();
-        fs::write(source.join("IMG_20261010_120000.JPG"), b"jpeg").unwrap();
-        fs::write(source.join("IMG_20261010_120000.JPG.xmp"), b"xmp").unwrap();
+        fs::write(source.join("IMG_0001.CR3"), b"raw").unwrap();
+        fs::write(source.join("IMG_0001.JPG"), b"jpeg").unwrap();
+        fs::write(source.join("IMG_0001.JPG.xmp"), b"xmp").unwrap();
         CatalogService::create(&catalog, "Test Catalog").unwrap();
         Fixture {
             _temporary: temporary,
