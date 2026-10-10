@@ -228,6 +228,7 @@ souvenirs operation status
 souvenirs operation recover
 souvenirs operation cancel
 souvenirs integrity check
+souvenirs index rebuild
 souvenirs protocol schema
 ```
 
@@ -277,13 +278,8 @@ It rejects source or catalog drift.
 
 ## Index
 
-SQLite remains a rebuildable cache.
-It is not an authoritative source.
-
-The index stores manifest digests, paths, normalized metadata, and search fields.
-The engine updates it after the matching durable catalog change.
-
-The engine can delete and rebuild a missing, outdated, or corrupt index.
+The engine owns the rebuildable index described in [Storage and recovery](storage.md#index).
+It updates the index after the matching durable catalog change.
 
 ## Test architecture
 
@@ -333,7 +329,7 @@ Storage tests run at different frequencies.
 
 | Environment | Frequency |
 | --- | --- |
-| Local temporary directory | Every pull request |
+| Local temporary directory | Targeted tests on every pull request; full suite on the main branch |
 | APFS attached volume | Before release |
 | exFAT attached volume | Before release |
 | SMB test server | Nightly and before release |
@@ -384,7 +380,7 @@ It covers startup, catalog creation, import planning, execution, progress, and r
 
 ## Development commands
 
-The repository provides stable commands through one task runner.
+The repository uses `just` to provide stable development commands.
 
 ```text
 just test-core
@@ -415,7 +411,7 @@ Pull requests run:
 - Swift state tests.
 - A small fake-engine UI suite.
 
-The main branch also runs local filesystem integration tests, real-engine UI smoke tests, and failpoint recovery tests.
+The main branch also runs the full local filesystem integration suite, real-engine UI smoke tests, and failpoint recovery tests.
 
 Nightly jobs also run SMB tests, large fixture tests, repeated interruption tests, metadata corpus tests, and performance tests.
 
@@ -456,5 +452,4 @@ Tests and generated files count toward review cost even when line-count tools ex
 - Which macOS version is the minimum deployment target?
 - Which media formats and source devices are required for the first milestone?
 - Which Rust libraries satisfy the metadata corpus?
-- Which task runner provides the repository commands?
 - Does a sandboxed child process retain access to every required security-scoped location?
