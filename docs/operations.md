@@ -58,6 +58,12 @@ Execution rechecks that destinations are still free and manifests are unchanged.
 Drift requires a new plan, never silent replanning.
 Naming and folder operations must not hash the media collection.
 
+A saved source scan uses a versioned snapshot.
+Version 1 records file identity, classification, size, and digest.
+Version 2 also records normalized relationship metadata.
+Planning rescans the source with the saved snapshot version.
+This rule preserves version 1 fingerprint semantics.
+
 A saved import plan uses one versioned envelope.
 The envelope contains its version, confirmation state, source location metadata, and the digested import plan.
 The import plan digest protects every field in the normalized plan document.

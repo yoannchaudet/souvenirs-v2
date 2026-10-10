@@ -13,6 +13,7 @@ souvenirs-domain = { path = "../souvenirs-domain" }
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tempfile.workspace = true
 time = { workspace = true, features = ["parsing"] }
 
 [lints]

@@ -37,6 +37,8 @@ use souvenirs_storage::{
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
+const SOURCE_SCAN_SCHEMA_VERSION: u32 = 2;
+
 pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
 pub const EXIT_NOT_FOUND: u8 = 3;
@@ -222,6 +224,21 @@ pub struct ScannedFile {
     pub digest: ContentDigest,
     pub size_bytes: u64,
     pub kind: ScannedFileKind,
+    #[serde(default, skip_serializing_if = "ScannedMetadata::is_empty")]
+    pub metadata: ScannedMetadata,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScannedMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_content_identifier: Option<String>,
+}
+
+impl ScannedMetadata {
+    fn is_empty(&self) -> bool {
+        self.apple_content_identifier.is_none()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -562,20 +579,12 @@ fn import_scan(source: &Path, output: &Path) -> Result<(), CliError> {
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
         let absolute = join_components(&source_root, &path);
-        let (digest, size_bytes) = digest_file(&absolute)?;
-        let id = digest_text(&path.join("/"));
-        files.push(ScannedFile {
-            id,
-            path,
-            digest,
-            size_bytes,
-            kind: classify_path(&absolute),
-        });
+        files.push(scan_file(&absolute, path, SOURCE_SCAN_SCHEMA_VERSION)?);
     }
     let fingerprint = scan_fingerprint(&files)?;
     let source_id = digest_text(&source_root.to_string_lossy());
     let scan = SourceScan {
-        schema_version: 1,
+        schema_version: SOURCE_SCAN_SCHEMA_VERSION,
         source_root,
         source_id: source_id.clone(),
         fingerprint: fingerprint.clone(),
@@ -624,7 +633,7 @@ fn import_plan(
         .map_err(|error| CliError::invalid_data(format!("invalid collection: {error}")))?;
     let scan: SourceScan = read_json(snapshot)?;
     validate_scan(&scan)?;
-    let current_scan = scan_source(&scan.source_root)?;
+    let current_scan = scan_source(&scan.source_root, scan.schema_version)?;
     if current_scan.fingerprint != scan.fingerprint {
         return Err(CliError::conflict(
             "source contents changed after the saved scan",
@@ -1856,7 +1865,7 @@ fn require_catalog(path: &Path) -> Result<CatalogLayout, CliError> {
 }
 
 fn validate_scan(scan: &SourceScan) -> Result<(), CliError> {
-    if scan.schema_version != 1 {
+    if !(1..=SOURCE_SCAN_SCHEMA_VERSION).contains(&scan.schema_version) {
         return Err(CliError::invalid_data(format!(
             "unsupported source scan schema version {}",
             scan.schema_version
@@ -1891,7 +1900,7 @@ fn validate_scan(scan: &SourceScan) -> Result<(), CliError> {
     Ok(())
 }
 
-fn scan_source(source: &Path) -> Result<SourceScan, CliError> {
+fn scan_source(source: &Path, schema_version: u32) -> Result<SourceScan, CliError> {
     let source_root = canonical_path(source)?;
     let mut paths = Vec::new();
     collect_files(&source_root, &source_root, &mut paths)?;
@@ -1899,21 +1908,39 @@ fn scan_source(source: &Path) -> Result<SourceScan, CliError> {
     let mut files = Vec::new();
     for path in paths {
         let absolute = join_components(&source_root, &path);
-        let (digest, size_bytes) = digest_file(&absolute)?;
-        files.push(ScannedFile {
-            id: digest_text(&path.join("/")),
-            path,
-            digest,
-            size_bytes,
-            kind: classify_path(&absolute),
-        });
+        files.push(scan_file(&absolute, path, schema_version)?);
     }
     Ok(SourceScan {
-        schema_version: 1,
+        schema_version,
         source_id: digest_text(&source_root.to_string_lossy()),
         fingerprint: scan_fingerprint(&files)?,
         source_root,
         files,
+    })
+}
+
+fn scan_file(
+    absolute: &Path,
+    path: Vec<String>,
+    schema_version: u32,
+) -> Result<ScannedFile, CliError> {
+    let (digest, size_bytes) = digest_file(absolute)?;
+    let metadata = if schema_version >= 2 {
+        let metadata = souvenirs_metadata::relationship_metadata(absolute)
+            .map_err(|error| CliError::invalid_data(error.to_string()))?;
+        ScannedMetadata {
+            apple_content_identifier: metadata.apple_content_identifier,
+        }
+    } else {
+        ScannedMetadata::default()
+    };
+    Ok(ScannedFile {
+        id: digest_text(&path.join("/")),
+        path,
+        digest,
+        size_bytes,
+        kind: classify_path(absolute),
+        metadata,
     })
 }
 
@@ -1976,10 +2003,15 @@ fn scanned_source_file(file: &ScannedFile) -> Result<SourceFile, CliError> {
             .map_err(|error| CliError::invalid_data(error.to_string()))?,
         SourcePath::new(file.path.clone())
             .map_err(|error| CliError::invalid_data(error.to_string()))?,
+        file.metadata.clone(),
     )
 }
 
-fn source_file(id: SourceFileId, path: SourcePath) -> Result<SourceFile, CliError> {
+fn source_file(
+    id: SourceFileId,
+    path: SourcePath,
+    metadata: ScannedMetadata,
+) -> Result<SourceFile, CliError> {
     let filename = path.filename();
     let filename_path = Path::new(filename);
     let basename = filename_path
@@ -2006,7 +2038,7 @@ fn source_file(id: SourceFileId, path: SourcePath) -> Result<SourceFile, CliErro
                 model: None,
                 serial_number: None,
             },
-            apple_content_identifier: None,
+            apple_content_identifier: metadata.apple_content_identifier,
         },
     })
 }
@@ -2200,6 +2232,7 @@ fn inspect_collection_files(path: &Path) -> Result<InspectedCollectionFiles, Cli
                 .map_err(|error| CliError::invalid_data(error.to_string()))?,
             SourcePath::new([filename.clone()])
                 .map_err(|error| CliError::invalid_data(error.to_string()))?,
+            ScannedMetadata::default(),
         )?;
         match file.kind {
             SourceFileKind::Original(_) => {

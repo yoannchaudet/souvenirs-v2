@@ -4,6 +4,8 @@ use std::process::{Command, Output};
 
 use jsonschema::JSONSchema;
 use serde_json::Value;
+use souvenirs_cli::{ScannedMetadata, SourceScan};
+use souvenirs_domain::plan::ContentDigest;
 use tempfile::TempDir;
 
 fn run(args: &[&str]) -> Output {
@@ -102,6 +104,42 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
     assert_eq!(
         plan_value["import_plan"]["document"]["items"][0]["disposition"]["kind"],
         "transfer"
+    );
+}
+
+#[test]
+fn plans_a_version_one_scan_without_reinterpreting_metadata() {
+    const IDENTIFIER: &str = "11111111-2222-3333-4444-555555555555";
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("still.jpg"), live_photo_jpeg(IDENTIFIER)).unwrap();
+    fs::write(source.join("different.mov"), live_photo_video(IDENTIFIER)).unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+    let mut scan: SourceScan = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    scan.schema_version = 1;
+    for file in &mut scan.files {
+        file.metadata = ScannedMetadata::default();
+    }
+    scan.fingerprint = ContentDigest::from_bytes(&serde_json::to_vec(&scan.files).unwrap());
+    fs::write(&snapshot, serde_json::to_vec_pretty(&scan).unwrap()).unwrap();
+
+    let plan = create_plan(&temporary, "legacy-scan", &snapshot);
+
+    assert_eq!(
+        plan["import_plan"]["document"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
 }
 
@@ -215,6 +253,312 @@ fn create_plan(temporary: &TempDir, suffix: &str, snapshot: &std::path::Path) ->
         "--confirm",
     ]));
     serde_json::from_slice(&fs::read(plan).unwrap()).unwrap()
+}
+
+fn apple_maker_note(identifier: &str) -> Vec<u8> {
+    let mut value = identifier.as_bytes().to_vec();
+    value.push(0);
+    let value_offset = 14 + 2 + 12 + 4;
+    let mut output = b"Apple iOS\0\0\x01MM".to_vec();
+    output.extend_from_slice(&1_u16.to_be_bytes());
+    output.extend_from_slice(&0x0011_u16.to_be_bytes());
+    output.extend_from_slice(&2_u16.to_be_bytes());
+    output.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    output.extend_from_slice(&(value_offset as u32).to_be_bytes());
+    output.extend_from_slice(&0_u32.to_be_bytes());
+    output.extend_from_slice(&value);
+    output
+}
+
+fn live_photo_jpeg(identifier: &str) -> Vec<u8> {
+    let maker_note = apple_maker_note(identifier);
+    let mut tiff = b"MM\0\x2a".to_vec();
+    tiff.extend_from_slice(&8_u32.to_be_bytes());
+    tiff.extend_from_slice(&1_u16.to_be_bytes());
+    tiff.extend_from_slice(&0x8769_u16.to_be_bytes());
+    tiff.extend_from_slice(&4_u16.to_be_bytes());
+    tiff.extend_from_slice(&1_u32.to_be_bytes());
+    tiff.extend_from_slice(&26_u32.to_be_bytes());
+    tiff.extend_from_slice(&0_u32.to_be_bytes());
+    tiff.extend_from_slice(&1_u16.to_be_bytes());
+    tiff.extend_from_slice(&0x927c_u16.to_be_bytes());
+    tiff.extend_from_slice(&7_u16.to_be_bytes());
+    tiff.extend_from_slice(&(maker_note.len() as u32).to_be_bytes());
+    tiff.extend_from_slice(&44_u32.to_be_bytes());
+    tiff.extend_from_slice(&0_u32.to_be_bytes());
+    tiff.extend_from_slice(&maker_note);
+
+    let mut segment = b"Exif\0\0".to_vec();
+    segment.extend_from_slice(&tiff);
+    let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+    jpeg.extend_from_slice(&u16::try_from(segment.len() + 2).unwrap().to_be_bytes());
+    jpeg.extend_from_slice(&segment);
+    jpeg.extend_from_slice(&[0xff, 0xd9]);
+    jpeg
+}
+
+fn atom(kind: [u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut output = u32::try_from(body.len() + 8)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    output.extend_from_slice(&kind);
+    output.extend_from_slice(body);
+    output
+}
+
+fn live_photo_video(identifier: &str) -> Vec<u8> {
+    let mut keys = vec![0, 0, 0, 0];
+    keys.extend_from_slice(&1_u32.to_be_bytes());
+    keys.extend_from_slice(&atom(*b"mdta", b"com.apple.quicktime.content.identifier"));
+
+    let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
+    data.extend_from_slice(identifier.as_bytes());
+    let ilst = atom(*b"ilst", &atom(1_u32.to_be_bytes(), &atom(*b"data", &data)));
+    [
+        atom(*b"ftyp", b"qt  "),
+        atom(
+            *b"moov",
+            &atom(*b"meta", &[atom(*b"keys", &keys), ilst].concat()),
+        ),
+    ]
+    .concat()
+}
+
+fn bigtiff_dng(little_endian: bool) -> Vec<u8> {
+    let mut bytes = if little_endian {
+        b"II".to_vec()
+    } else {
+        b"MM".to_vec()
+    };
+    let u16_bytes = |value: u16| {
+        if little_endian {
+            value.to_le_bytes()
+        } else {
+            value.to_be_bytes()
+        }
+    };
+    let u64_bytes = |value: u64| {
+        if little_endian {
+            value.to_le_bytes()
+        } else {
+            value.to_be_bytes()
+        }
+    };
+    bytes.extend_from_slice(&u16_bytes(43));
+    bytes.extend_from_slice(&u16_bytes(8));
+    bytes.extend_from_slice(&u16_bytes(0));
+    bytes.extend_from_slice(&u64_bytes(16));
+    bytes.extend_from_slice(&u64_bytes(0));
+    bytes
+}
+
+#[test]
+fn plans_differing_basename_live_photo_from_scanned_metadata() {
+    const IDENTIFIER: &str = "11111111-2222-3333-4444-555555555555";
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("STILL.JPG"), live_photo_jpeg(IDENTIFIER)).unwrap();
+    fs::write(source.join("DIFFERENT.MOV"), live_photo_video(IDENTIFIER)).unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+
+    let snapshot_value: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    assert_eq!(snapshot_value["schema_version"], 2);
+    assert!(snapshot_value["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|file| {
+            file["metadata"]["apple_content_identifier"] == serde_json::json!(IDENTIFIER)
+        }));
+
+    let plan = create_plan(&temporary, "live-photo", &snapshot);
+    let items = plan["import_plan"]["document"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["companion", "primary"]
+    );
+    let destinations = plan["import_plan"]["document"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step["action"]["destination"].as_array())
+        .map(|path| path.last().unwrap().as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(destinations.contains(&"2026-10-10 12-34-56 001.JPG"));
+    assert!(destinations.contains(&"2026-10-10 12-34-56 001.MOV"));
+}
+
+#[test]
+fn missing_and_duplicate_live_photo_identifiers_do_not_guess_by_basename() {
+    const IDENTIFIER: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("same.JPG"), b"not a jpeg").unwrap();
+    fs::write(source.join("same.MOV"), b"not a movie").unwrap();
+    fs::write(source.join("first.JPG"), live_photo_jpeg(IDENTIFIER)).unwrap();
+    fs::write(source.join("second.JPG"), live_photo_jpeg(IDENTIFIER)).unwrap();
+    fs::write(source.join("clip.MOV"), live_photo_video(IDENTIFIER)).unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+
+    let plan = create_plan(&temporary, "live-findings", &snapshot);
+    let items = plan["import_plan"]["document"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["disposition"]["finding"] == "ambiguous_live_photo")
+            .count(),
+        3
+    );
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["disposition"]["kind"] == "transfer")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn malformed_relationship_metadata_blocks_scanning_instead_of_guessing() {
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("paired.jpg"),
+        [0xff, 0xd8, 0xff, 0xe1, 0xff, 0xff, 0, 0, 0, 0, 0, 0],
+    )
+    .unwrap();
+    fs::write(
+        source.join("paired.mov"),
+        live_photo_video("different-identifier"),
+    )
+    .unwrap();
+    let snapshot = temporary.path().join("scan.json");
+
+    let output = run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    assert!(!snapshot.exists());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("JPEG segment exceeds the file"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn valid_unsupported_bigtiff_dng_plans_without_an_identifier() {
+    const IDENTIFIER: &str = "11111111-2222-3333-4444-555555555555";
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("paired.dng"), bigtiff_dng(true)).unwrap();
+    fs::write(source.join("paired.mov"), live_photo_video(IDENTIFIER)).unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+
+    let scan: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    let dng = scan["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == serde_json::json!(["paired.dng"]))
+        .unwrap();
+    assert!(dng.get("metadata").is_none());
+
+    let plan = create_plan(&temporary, "bigtiff", &snapshot);
+    assert_eq!(
+        plan["import_plan"]["document"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn differing_basename_compound_preserves_multi_suffix_sidecar_ambiguity() {
+    const IDENTIFIER: &str = "99999999-8888-7777-6666-555555555555";
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("image.jpg"), live_photo_jpeg(IDENTIFIER)).unwrap();
+    fs::write(source.join("different.mov"), live_photo_video(IDENTIFIER)).unwrap();
+    fs::write(source.join("image.jpg.mp4"), b"standalone video").unwrap();
+    fs::write(source.join("image.jpg.xmp"), b"sidecar").unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+
+    let plan = create_plan(&temporary, "sidecar-live", &snapshot);
+    let document = &plan["import_plan"]["document"];
+    assert_eq!(document["items"].as_array().unwrap().len(), 2);
+    let ambiguous = document["unhandled_content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["finding"]["kind"] == "ambiguous_sidecar")
+        .unwrap();
+    let candidates = ambiguous["finding"]["candidate_item_ids"]
+        .as_array()
+        .unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_ne!(candidates[0], candidates[1]);
+    for candidate in candidates {
+        let item = document["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["item_id"] == *candidate)
+            .unwrap();
+        assert_eq!(item["disposition"]["finding"], "ambiguous_sidecar");
+    }
 }
 
 #[test]
