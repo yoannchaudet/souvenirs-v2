@@ -95,7 +95,7 @@ final class SouvenirsUITests: XCTestCase {
             evaluatedWith: start
         )
         waitForExpectations(timeout: 3)
-        start.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        app.typeKey(.return, modifierFlags: [])
 
         XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["dismiss-import-completed"].exists)
@@ -112,7 +112,7 @@ final class SouvenirsUITests: XCTestCase {
             evaluatedWith: start
         )
         waitForExpectations(timeout: 3)
-        start.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        app.typeKey(.return, modifierFlags: [])
 
         XCTAssertTrue(
             app.staticTexts["import-source-unavailable"].waitForExistence(timeout: 5)
