@@ -8,6 +8,7 @@ mod durability;
 mod lock;
 mod manifest;
 mod operation;
+mod recovery;
 
 pub use capabilities::{
     StorageCapabilities, StorageCapabilityError, VolumeIdentity, WriteSuitability,
@@ -21,6 +22,10 @@ pub use manifest::{ManifestReplacement, ManifestReplacementError, ManifestReplac
 pub use operation::Failpoint;
 pub use operation::{
     DurableTransition, OperationJournal, OperationJournalError, OperationOutcome, OperationRecord,
+};
+pub use recovery::{
+    RecoveryCopy, RecoveryDirectory, RecoveryError, RecoveryManifest, RecoveryMode,
+    RecoveryOutcome, RecoveryRequest,
 };
 
 #[cfg(test)]
