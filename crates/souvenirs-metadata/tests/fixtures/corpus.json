@@ -7,8 +7,7 @@
       "content_identifier": null,
       "candidates": [
         ["exif_datetime_digitized", "2024-07-09T10:11:13"],
-        ["exif_datetime_original", "2024-07-09T10:11:12"],
-        ["xmp_date_created", "2024-07-09T10:11:14"]
+        ["exif_datetime_original", "2024-07-09T10:11:12"]
       ],
       "disposition": "transfer"
     },
@@ -25,7 +24,9 @@
       "path": ["DCIM", "100CANON", "IMG_0001.xmp"],
       "device": [null, null, null],
       "content_identifier": null,
-      "candidates": [],
+      "candidates": [
+        ["xmp_date_created", "2024-07-09T10:11:14"]
+      ],
       "disposition": "sidecar"
     },
     {
@@ -117,9 +118,29 @@
       "device": ["Canon", "PowerShot G2", null],
       "content_identifier": null,
       "candidates": [
-        ["xmp_date_created", "2024-07-09T10:11:12"]
+        ["google_takeout_photo_taken_time", "2024-07-09T11:12:13"]
       ],
       "disposition": "transfer"
+    },
+    {
+      "id": "legacy-xmp",
+      "path": ["LEGACY", "holiday.jpeg.xmp"],
+      "device": [null, null, null],
+      "content_identifier": null,
+      "candidates": [
+        ["xmp_exif_datetime_original", "2024-07-09T10:11:12"]
+      ],
+      "disposition": "sidecar"
+    },
+    {
+      "id": "orphan-xmp",
+      "path": ["LEGACY", "missing.jpeg.xmp"],
+      "device": [null, null, null],
+      "content_identifier": null,
+      "candidates": [
+        ["xmp_date_created", "1999-01-02T03:04:05"]
+      ],
+      "disposition": "sidecar"
     },
     {
       "id": "standalone-mov",

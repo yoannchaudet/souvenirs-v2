@@ -37,6 +37,7 @@ struct CorpusOutcome {
     relationships: Vec<String>,
     findings: Vec<String>,
     accepted_sources: Vec<String>,
+    disagreements: Vec<String>,
     canonical_files: Vec<String>,
     confirmations: Vec<String>,
     excluded: Vec<String>,
@@ -56,22 +57,33 @@ fn representative_corpus_has_deterministic_relationships_and_plan_results() {
             "android-mp4 [] single",
             "canon-jpeg+canon-raw [canon-xmp] raw+jpeg",
             "iphone-still+iphone-video [iphone-aae] live-photo",
-            "legacy-jpeg [] single",
+            "legacy-jpeg [legacy-xmp] single",
             "nikon-raw [nikon-dop] single",
             "pixel-dng [] single",
             "sony-raw [sony-pp3] single",
             "standalone-mov [] single",
         ]
     );
-    assert_eq!(forward.findings, ["unsupported: unknown"]);
+    assert_eq!(
+        forward.findings,
+        ["orphan-xmp: orphan-sidecar", "unsupported: unknown"]
+    );
     assert_eq!(
         forward.accepted_sources,
         [
             "canon-jpeg: exif-original 2024-07-09 10:11:12.0",
             "iphone-still: exif-original 2024-08-03 15:30:45.0",
-            "legacy-jpeg: xmp-date-created 2024-07-09 10:11:12.0",
+            "legacy-jpeg: xmp-exif-original 2024-07-09 10:11:12.0",
             "nikon-raw: exif-digitized 2024-09-10 8:00:00.0",
             "standalone-mov: quicktime-creation-date 2024-08-03 15:30:45.0",
+        ]
+    );
+    assert_eq!(
+        forward.disagreements,
+        [
+            "canon-jpeg: exif-digitized 2024-07-09 10:11:13.0",
+            "canon-jpeg: xmp-date-created 2024-07-09 10:11:14.0",
+            "legacy-jpeg: google-takeout-photo-taken-time 2024-07-09 11:12:13.0",
         ]
     );
     assert_eq!(
@@ -81,6 +93,7 @@ fn representative_corpus_has_deterministic_relationships_and_plan_results() {
             "2024-07-09 10-11-12 001.JPG",
             "2024-07-09 10-11-12 001.xmp",
             "2024-07-09 10-11-12 002.jpeg",
+            "2024-07-09 10-11-12 002.jpeg.xmp",
             "2024-08-03 15-30-45 001.AAE",
             "2024-08-03 15-30-45 001.HEIC",
             "2024-08-03 15-30-45 001.MOV",
@@ -142,6 +155,7 @@ fn corpus_covers_supported_formats_devices_and_date_sources() {
             "google_takeout_photo_taken_time",
             "quick_time_creation_date",
             "xmp_date_created",
+            "xmp_exif_datetime_original",
         ]
         .into()
     );
@@ -162,6 +176,7 @@ fn evaluate(fixtures: &[FixtureFile]) -> CorpusOutcome {
 
     let mut relationships = Vec::new();
     let mut accepted_sources = Vec::new();
+    let mut disagreements = Vec::new();
     let mut accepted = Vec::new();
     let mut confirmations = Vec::new();
     let mut excluded = Vec::new();
@@ -192,32 +207,22 @@ fn evaluate(fixtures: &[FixtureFile]) -> CorpusOutcome {
             sidecars
         ));
 
+        let datetime_candidates = std::iter::once(&item.primary)
+            .chain(item.sidecars.iter())
+            .flat_map(|id| by_id[id].metadata.datetime_candidates.iter().cloned());
         match (
             fixture.disposition.as_str(),
-            resolve_datetime(primary.metadata.datetime_candidates.clone()),
+            resolve_datetime(datetime_candidates),
         ) {
             (
                 "transfer",
                 DateTimeResolution::Accepted {
-                    accepted: value, ..
+                    accepted: value,
+                    disagreements: item_disagreements,
                 },
             ) => {
-                let source = match value.source {
-                    AcceptedDateTimeSource::Metadata(DateTimeSource::ExifDateTimeOriginal) => {
-                        "exif-original"
-                    }
-                    AcceptedDateTimeSource::Metadata(DateTimeSource::ExifDateTimeDigitized) => {
-                        "exif-digitized"
-                    }
-                    AcceptedDateTimeSource::Metadata(DateTimeSource::QuickTimeCreationDate) => {
-                        "quicktime-creation-date"
-                    }
-                    AcceptedDateTimeSource::Metadata(DateTimeSource::XmpDateCreated) => {
-                        "xmp-date-created"
-                    }
-                    AcceptedDateTimeSource::Metadata(source) => {
-                        panic!("unexpected accepted metadata source: {source:?}")
-                    }
+                let source = match &value.source {
+                    AcceptedDateTimeSource::Metadata(source) => source_label(*source),
                     source => panic!("unexpected accepted source: {source:?}"),
                 };
                 accepted_sources.push(format!(
@@ -225,6 +230,14 @@ fn evaluate(fixtures: &[FixtureFile]) -> CorpusOutcome {
                     item.primary.as_str(),
                     value.wall_clock
                 ));
+                disagreements.extend(item_disagreements.iter().map(|candidate| {
+                    format!(
+                        "{}: {} {}",
+                        item.primary.as_str(),
+                        source_label(candidate.source),
+                        candidate_value_label(candidate)
+                    )
+                }));
                 accepted.push((item, value.wall_clock));
             }
             ("missing", DateTimeResolution::Missing) => {
@@ -289,6 +302,9 @@ fn evaluate(fixtures: &[FixtureFile]) -> CorpusOutcome {
         .findings
         .iter()
         .map(|finding| match finding {
+            RelationshipFinding::OrphanSidecar(id) => {
+                format!("{}: orphan-sidecar", id.as_str())
+            }
             RelationshipFinding::UnknownContent(id) => format!("{}: unknown", id.as_str()),
             finding => panic!("unexpected corpus relationship finding: {finding:?}"),
         })
@@ -296,6 +312,7 @@ fn evaluate(fixtures: &[FixtureFile]) -> CorpusOutcome {
     relationships.sort();
     findings.sort();
     accepted_sources.sort();
+    disagreements.sort();
     canonical_files.sort();
     confirmations.sort();
     excluded.sort();
@@ -303,6 +320,7 @@ fn evaluate(fixtures: &[FixtureFile]) -> CorpusOutcome {
         relationships,
         findings,
         accepted_sources,
+        disagreements,
         canonical_files,
         confirmations,
         excluded,
@@ -364,6 +382,7 @@ fn datetime_candidate(source: &str, value: &str) -> DateTimeCandidate {
         "exif_datetime_digitized" => DateTimeSource::ExifDateTimeDigitized,
         "quick_time_creation_date" => DateTimeSource::QuickTimeCreationDate,
         "xmp_date_created" => DateTimeSource::XmpDateCreated,
+        "xmp_exif_datetime_original" => DateTimeSource::XmpExifDateTimeOriginal,
         "container_creation_time" => DateTimeSource::ContainerCreationTime,
         "google_takeout_photo_taken_time" => DateTimeSource::GoogleTakeoutPhotoTakenTime,
         "filename_pattern" => DateTimeSource::FilenamePattern,
@@ -383,4 +402,28 @@ fn datetime_candidate(source: &str, value: &str) -> DateTimeCandidate {
         _ => DateTimeValue::Local(value),
     };
     DateTimeCandidate { source, value }
+}
+
+fn source_label(source: DateTimeSource) -> &'static str {
+    match source {
+        DateTimeSource::ExifDateTimeOriginal => "exif-original",
+        DateTimeSource::ExifDateTimeDigitized => "exif-digitized",
+        DateTimeSource::QuickTimeCreationDate => "quicktime-creation-date",
+        DateTimeSource::XmpDateCreated => "xmp-date-created",
+        DateTimeSource::XmpExifDateTimeOriginal => "xmp-exif-original",
+        DateTimeSource::ContainerCreationTime => "container-creation-time",
+        DateTimeSource::GoogleTakeoutPhotoTakenTime => "google-takeout-photo-taken-time",
+        DateTimeSource::FilenamePattern => "filename-pattern",
+    }
+}
+
+fn candidate_value_label(candidate: &DateTimeCandidate) -> String {
+    match &candidate.value {
+        DateTimeValue::Local(value) | DateTimeValue::LocalWithOffset { local: value, .. } => {
+            value.to_string()
+        }
+        DateTimeValue::UtcWithoutLocalContext(value) => format!("{value} UTC"),
+        DateTimeValue::AmbiguousContainer(value) => format!("{value} ambiguous"),
+        DateTimeValue::DateOnly(value) => value.to_string(),
+    }
 }
