@@ -281,6 +281,7 @@ public actor EngineSupervisor {
     private let requestTimeout: Duration
     private let shutdownTimeout: Duration
     private let terminationTimeout: Duration
+    private let responseEOFGrace: Duration
     private var process: Process?
     private var standardInput: Pipe?
     private var standardOutput: Pipe?
@@ -300,7 +301,9 @@ public actor EngineSupervisor {
     private var pendingReadBatches: [UInt64: ([Data], Bool)] = [:]
     private var nextReadBatch: UInt64 = 0
     private var responseStreamHasEnded = false
+    private var protocolConnectionError: SupervisorError?
     private var observedTermination: ObservedTermination?
+    private var responseEOFTask: Task<Void, Never>?
     private var terminationDrainTask: Task<Void, Never>?
     private var terminationWaiters:
         [UUID: CheckedContinuation<Termination, any Error>] = [:]
@@ -317,6 +320,7 @@ public actor EngineSupervisor {
         self.requestTimeout = .seconds(30)
         self.shutdownTimeout = .seconds(3)
         self.terminationTimeout = .seconds(1)
+        self.responseEOFGrace = .seconds(1)
     }
 
     init(
@@ -334,6 +338,7 @@ public actor EngineSupervisor {
         self.requestTimeout = requestTimeout
         self.shutdownTimeout = shutdownTimeout
         self.terminationTimeout = terminationTimeout
+        self.responseEOFGrace = terminationTimeout
     }
 
     init(
@@ -353,6 +358,7 @@ public actor EngineSupervisor {
         self.requestTimeout = requestTimeout
         self.shutdownTimeout = shutdownTimeout
         self.terminationTimeout = terminationTimeout
+        self.responseEOFGrace = terminationTimeout
     }
 
     public static nonisolated func bundledExecutableURL(
@@ -629,6 +635,7 @@ public actor EngineSupervisor {
         let buffered = bufferedOperationEvents.removeValue(forKey: operationID) ?? []
         let terminal = terminalOperations.contains(operationID)
         let failure = operationFailures.removeValue(forKey: operationID)
+            ?? (terminal ? nil : protocolConnectionError)
         let token = UUID()
         return AsyncThrowingStream { continuation in
             operationSubscriptions[operationID] = OperationSubscription(
@@ -720,7 +727,13 @@ public actor EngineSupervisor {
         timeout: Duration
     ) async throws -> Result
     where Parameters: Encodable & Sendable, Result: Decodable & Sendable {
-        guard let writer, process != nil, case .running = state else {
+        guard process != nil, case .running = state else {
+            throw SupervisorError.notRunning
+        }
+        if let protocolConnectionError {
+            throw protocolConnectionError
+        }
+        guard let writer else {
             throw SupervisorError.notRunning
         }
 
@@ -816,8 +829,7 @@ public actor EngineSupervisor {
                 receive(line)
             }
             if batch.1 {
-                responseStreamHasEnded = true
-                finalizeTerminationIfReady()
+                responseStreamDidEnd(generation: receivedGeneration)
             }
         }
     }
@@ -1249,16 +1261,51 @@ public actor EngineSupervisor {
         finalizeTerminationIfReady()
     }
 
+    private func responseStreamDidEnd(generation endedGeneration: UInt64) {
+        responseStreamHasEnded = true
+        if let process {
+            observeTerminationIfNeeded(for: process)
+        }
+        if observedTermination != nil {
+            finalizeTerminationIfReady()
+            return
+        }
+
+        responseEOFTask?.cancel()
+        let responseEOFGrace = responseEOFGrace
+        responseEOFTask = Task { [weak self] in
+            try? await Task.sleep(for: responseEOFGrace)
+            guard !Task.isCancelled else {
+                return
+            }
+            await self?.finishConnectionAfterEOFGrace(
+                generation: endedGeneration
+            )
+        }
+    }
+
+    private func finishConnectionAfterEOFGrace(generation endedGeneration: UInt64) {
+        guard endedGeneration == generation, responseStreamHasEnded else {
+            return
+        }
+        responseEOFTask = nil
+        if let process {
+            observeTerminationIfNeeded(for: process)
+        }
+        terminateProtocolConnectionIfNeeded()
+        finalizeTerminationIfReady()
+    }
+
     private func finalizeTerminationIfReady() {
         guard responseStreamHasEnded, let observedTermination else {
             return
         }
 
+        responseEOFTask?.cancel()
+        responseEOFTask = nil
         terminationDrainTask?.cancel()
         terminationDrainTask = nil
-        let connectionError: SupervisorError = observedTermination.wasRequested
-            ? .responseStreamEnded
-            : .unexpectedTermination(observedTermination.termination)
+        terminateProtocolConnectionIfNeeded()
         lineReader?.stop()
         lineReader = nil
         writer?.close { _ in }
@@ -1273,25 +1320,50 @@ public actor EngineSupervisor {
             ? .idle
             : .exitedUnexpectedly(observedTermination.termination)
 
-        for identifier in Array(pendingResponses.keys) {
-            finishRequest(identifier, with: .failure(connectionError))
-        }
-        for subscription in operationSubscriptions.values {
-            subscription.continuation.finish(throwing: connectionError)
-        }
-        operationSubscriptions.removeAll()
-        for operationID in knownOperations
-        where !terminalOperations.contains(operationID) {
-            operationFailures[operationID] = connectionError
-            terminalOperations.insert(operationID)
-        }
-
         let waiters = terminationWaiters.values
         terminationWaiters.removeAll()
         for waiter in waiters {
             waiter.resume(returning: observedTermination.termination)
         }
         self.observedTermination = nil
+    }
+
+    private func terminateProtocolConnectionIfNeeded() {
+        guard responseStreamHasEnded, protocolConnectionError == nil else {
+            return
+        }
+
+        let connectionError: SupervisorError
+        if let observedTermination {
+            connectionError = observedTermination.wasRequested
+                ? .responseStreamEnded
+                : .unexpectedTermination(observedTermination.termination)
+        } else {
+            connectionError = .responseStreamEnded
+        }
+        protocolConnectionError = connectionError
+        lineReader?.stop()
+
+        for identifier in Array(pendingResponses.keys) {
+            finishRequest(identifier, with: .failure(connectionError))
+        }
+
+        let subscribedOperationIDs = Set(operationSubscriptions.keys)
+        for subscription in operationSubscriptions.values {
+            subscription.continuation.finish(throwing: connectionError)
+        }
+        operationSubscriptions.removeAll()
+        for operationID in subscribedOperationIDs {
+            pruneOperation(operationID)
+        }
+
+        let unfinishedOperationIDs = knownOperations
+            .union(bufferedOperationEvents.keys)
+            .subtracting(terminalOperations)
+        for operationID in unfinishedOperationIDs {
+            operationFailures[operationID] = connectionError
+            terminalOperations.insert(operationID)
+        }
     }
 
     private func resetProtocolState() {
@@ -1305,7 +1377,10 @@ public actor EngineSupervisor {
         pendingReadBatches.removeAll()
         nextReadBatch = 0
         responseStreamHasEnded = false
+        protocolConnectionError = nil
         observedTermination = nil
+        responseEOFTask?.cancel()
+        responseEOFTask = nil
         terminationDrainTask?.cancel()
         terminationDrainTask = nil
     }

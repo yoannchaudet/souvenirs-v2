@@ -333,6 +333,148 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertEqual(termination, .init(reason: .exit, status: 0))
     }
 
+    func testBufferedNonterminalEventFailsWhenEngineExitsImmediately() async throws {
+        let executable = try makeExecutable(
+            """
+            IFS= read -r _ || exit 2
+            printf '%s\\n' '\(handshakeResponse)'
+            IFS= read -r _ || exit 3
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            exit 37
+            """
+        )
+        let supervisor = makeSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+        _ = try await supervisor.handshake()
+        let operationID = try await supervisor.requestOperation(
+            method: "test.operation",
+            parameters: TestParameters(value: "exit")
+        )
+        let result = try await collectWithinTimeout(
+            try await supervisor.events(for: operationID)
+        )
+
+        XCTAssertEqual(result.events.map(\.sequence), [0])
+        XCTAssertEqual(
+            result.events.first?.payload,
+            .started(name: "test.operation")
+        )
+        XCTAssertEqual(
+            result.failure,
+            .unexpectedTermination(.init(reason: .exit, status: 37))
+        )
+    }
+
+    func testStandardOutputEOFFailsPendingRequestAndActiveOperationStream() async throws {
+        let executable = try makeExecutable(
+            """
+            trap 'exit 0' TERM
+            IFS= read -r _ || exit 2
+            printf '%s\\n' '\(handshakeResponse)'
+            IFS= read -r _ || exit 3
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            IFS= read -r _ || exit 4
+            exec 1>&-
+            sleep 5
+            """
+        )
+        let supervisor = makeSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+        _ = try await supervisor.handshake()
+        let operationID = try await supervisor.requestOperation(
+            method: "test.operation",
+            parameters: TestParameters(value: "stdout-eof")
+        )
+        let stream = try await supervisor.events(for: operationID)
+        let cancellation = Task {
+            try await supervisor.cancel(operationID: operationID)
+        }
+
+        do {
+            _ = try await cancellation.value
+            XCTFail("Expected the pending request to fail at stdout EOF")
+        } catch let error as EngineSupervisor.SupervisorError {
+            XCTAssertEqual(error, .responseStreamEnded)
+        }
+
+        let result = try await collectWithinTimeout(stream)
+        XCTAssertEqual(result.events.map(\.sequence), [0])
+        XCTAssertEqual(result.failure, .responseStreamEnded)
+
+        _ = try? await supervisor.stop()
+        let termination = try await supervisor.waitForTermination()
+        XCTAssertEqual(termination, .init(reason: .exit, status: 0))
+    }
+
+    func testStandardOutputEOFFailsBufferedOperationStream() async throws {
+        let executable = try makeExecutable(
+            """
+            trap 'exit 0' TERM
+            IFS= read -r _ || exit 2
+            printf '%s\\n' '\(handshakeResponse)'
+            IFS= read -r _ || exit 3
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            exec 1>&-
+            sleep 5
+            """
+        )
+        let supervisor = makeSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+        _ = try await supervisor.handshake()
+        let operationID = try await supervisor.requestOperation(
+            method: "test.operation",
+            parameters: TestParameters(value: "stdout-eof")
+        )
+        do {
+            _ = try await supervisor.cancel(operationID: operationID)
+            XCTFail("Expected stdout EOF to make the connection terminal")
+        } catch let error as EngineSupervisor.SupervisorError {
+            XCTAssertEqual(error, .responseStreamEnded)
+        }
+
+        let result = try await collectWithinTimeout(
+            try await supervisor.events(for: operationID)
+        )
+
+        XCTAssertEqual(result.events.map(\.sequence), [0])
+        XCTAssertEqual(result.failure, .responseStreamEnded)
+        _ = try? await supervisor.stop()
+    }
+
+    func testTerminalEventRemainsSuccessfulWhenStandardOutputCloses() async throws {
+        let executable = try makeExecutable(
+            """
+            trap 'exit 0' TERM
+            IFS= read -r _ || exit 2
+            printf '%s\\n' '\(handshakeResponse)'
+            IFS= read -r _ || exit 3
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"completed","result":{"item_count":1}}'
+            exec 1>&-
+            sleep 5
+            """
+        )
+        let supervisor = makeSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+        _ = try await supervisor.handshake()
+        let operationID = try await supervisor.requestOperation(
+            method: "test.operation",
+            parameters: TestParameters(value: "stdout-eof")
+        )
+
+        let result = try await collectWithinTimeout(
+            try await supervisor.events(for: operationID)
+        )
+
+        XCTAssertEqual(result.events.map(\.sequence), [0])
+        XCTAssertTrue(result.events[0].isTerminal)
+        XCTAssertNil(result.failure)
+        _ = try? await supervisor.stop()
+    }
+
     func testLateResponseDoesNotFailAnotherRequest() async throws {
         let executable = try makeExecutable(
             """
@@ -779,10 +921,40 @@ final class EngineSupervisorTests: XCTestCase {
         }
         return events
     }
+
+    private func collectWithinTimeout(
+        _ stream: AsyncThrowingStream<EngineSupervisor.OperationEvent, any Error>
+    ) async throws -> StreamCollection {
+        try await withThrowingTaskGroup(of: StreamCollection.self) { group in
+            group.addTask {
+                var events: [EngineSupervisor.OperationEvent] = []
+                do {
+                    for try await event in stream {
+                        events.append(event)
+                    }
+                    return StreamCollection(events: events, failure: nil)
+                } catch let error as EngineSupervisor.SupervisorError {
+                    return StreamCollection(events: events, failure: error)
+                }
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(1))
+                throw TestTimeout()
+            }
+            let result = try await group.next()
+            group.cancelAll()
+            return try XCTUnwrap(result)
+        }
+    }
 }
 
 private struct TestParameters: Encodable, Sendable {
     let value: String
+}
+
+private struct StreamCollection: Sendable {
+    let events: [EngineSupervisor.OperationEvent]
+    let failure: EngineSupervisor.SupervisorError?
 }
 
 private struct TestTimeout: Error {}
