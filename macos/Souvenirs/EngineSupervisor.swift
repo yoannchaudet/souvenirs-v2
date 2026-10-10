@@ -179,6 +179,7 @@ public actor EngineSupervisor {
     }
 
     private let executableURL: URL
+    private let arguments: [String]
     private let isProcessRunning: @Sendable (Process) -> Bool
     private let processTermination: @Sendable (Process) -> Termination
     private let handshakeTimeout: Duration
@@ -209,8 +210,12 @@ public actor EngineSupervisor {
     private var terminationWaiters:
         [UUID: CheckedContinuation<Termination, any Error>] = [:]
 
-    public init(executableURL: URL = EngineSupervisor.bundledExecutableURL()) {
+    public init(
+        executableURL: URL = EngineSupervisor.bundledExecutableURL(),
+        arguments: [String] = []
+    ) {
         self.executableURL = executableURL
+        self.arguments = arguments
         self.isProcessRunning = { $0.isRunning }
         self.processTermination = { EngineSupervisor.termination(for: $0) }
         self.handshakeTimeout = .seconds(3)
@@ -227,6 +232,7 @@ public actor EngineSupervisor {
         terminationTimeout: Duration
     ) {
         self.executableURL = executableURL
+        self.arguments = []
         self.isProcessRunning = { $0.isRunning }
         self.processTermination = { EngineSupervisor.termination(for: $0) }
         self.handshakeTimeout = handshakeTimeout
@@ -245,6 +251,7 @@ public actor EngineSupervisor {
         terminationTimeout: Duration = .seconds(1)
     ) {
         self.executableURL = executableURL
+        self.arguments = []
         self.isProcessRunning = isProcessRunning
         self.processTermination = processTermination
         self.handshakeTimeout = handshakeTimeout
@@ -285,6 +292,7 @@ public actor EngineSupervisor {
         let input = Pipe()
         let output = Pipe()
         launchedProcess.executableURL = executableURL
+        launchedProcess.arguments = arguments
         launchedProcess.standardInput = input
         launchedProcess.standardOutput = output
         let processTermination = processTermination

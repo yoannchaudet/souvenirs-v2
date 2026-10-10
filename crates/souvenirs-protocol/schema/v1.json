@@ -281,6 +281,24 @@
             "method": {
               "type": "string",
               "enum": [
+                "operation.start"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/StartOperationParameters"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
                 "operation.cancel"
               ]
             },
@@ -379,6 +397,18 @@
           }
         }
       ]
+    },
+    "StartOperationParameters": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

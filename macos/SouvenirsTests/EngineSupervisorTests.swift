@@ -608,6 +608,55 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertEqual(state, .exitedUnexpectedly(termination))
     }
 
+    func testStartPassesConfiguredProcessArguments() async throws {
+        let executable = try makeExecutable(
+            """
+            test "$1" = "--scenario" || exit 31
+            test "$2" = "successful-operation" || exit 32
+            """
+        )
+        let supervisor = EngineSupervisor(
+            executableURL: executable,
+            arguments: ["--scenario", "successful-operation"]
+        )
+        _ = try await supervisor.start()
+
+        let termination = try await supervisor.waitForTermination()
+
+        XCTAssertEqual(termination, .init(reason: .exit, status: 0))
+    }
+
+    @MainActor
+    func testFakeEngineConfigurationRequiresExecutableAndScenario() {
+        let executable = "/tmp/souvenirs-fake-engine"
+        let configuration = EngineAppModel.fakeEngineConfiguration(
+            environment: [
+                "SOUVENIRS_ENGINE_EXECUTABLE": executable,
+                "SOUVENIRS_FAKE_ENGINE_SCENARIO": "successful-operation",
+            ]
+        )
+
+        XCTAssertEqual(
+            configuration,
+            EngineLaunchConfiguration(
+                executableURL: URL(fileURLWithPath: executable),
+                arguments: ["--scenario", "successful-operation"]
+            )
+        )
+        XCTAssertNil(
+            EngineAppModel.fakeEngineConfiguration(
+                environment: ["SOUVENIRS_ENGINE_EXECUTABLE": executable]
+            )
+        )
+        XCTAssertNil(
+            EngineAppModel.fakeEngineConfiguration(
+                environment: [
+                    "SOUVENIRS_FAKE_ENGINE_SCENARIO": "successful-operation"
+                ]
+            )
+        )
+    }
+
     func testTerminationHandlerUsesInjectedMapper() async throws {
         let executable = try makeExecutable("exit 17")
         let mappedTermination = EngineSupervisor.Termination(
