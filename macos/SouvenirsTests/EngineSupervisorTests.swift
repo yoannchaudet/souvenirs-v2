@@ -253,7 +253,7 @@ final class EngineSupervisorTests: XCTestCase {
             printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":["import.scan"]}}'
             IFS= read -r request || exit 3
             id=$(printf '%s' "$request" | sed -E 's/.*"id":"([^"]+)".*/\\1/')
-            printf '%s\\n' '{"kind":"response","id":"'"$id"'","protocol_version":1,"status":"success","result":{"type":"import_scan","source_path":"/source","source_name":"source","file_count":1,"media_count":1,"photo_count":1,"video_count":0,"unsupported_count":0,"uncertain_time_count":0,"total_bytes":3,"suggested_collection_name":"Source","suggested_accepted_date":null,"suggested_range_end":null,"pending_item_count":0,"unresolved_item_count":1,"datetime_sources":[]}}'
+            printf '%s\\n' '{"kind":"response","id":"'"$id"'","protocol_version":1,"status":"success","result":{"type":"import_scan","source_path":"/source","source_name":"source","file_count":1,"media_count":1,"photo_count":1,"video_count":0,"unsupported_count":0,"uncertain_time_count":0,"total_bytes":3,"suggested_collection_name":"Source","suggested_accepted_date":null,"suggested_range_end":null,"pending_item_count":0,"unresolved_item_count":1,"datetime_sources":[]}}'; while IFS= read -r _; do :; done
             """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
