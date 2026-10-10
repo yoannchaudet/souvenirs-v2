@@ -42,6 +42,7 @@ Every requirement must serve one of these goals:
 | 1 | [Catalog](catalog.md) | The durable format: layout, collections, datetimes, relationships, filenames, manifests, and exports. |
 | 2 | [Operations](operations.md) | Imports, backlog organization, duplicates, organization changes, and legacy conversion. |
 | 3 | [Storage and recovery](storage.md) | Verified copies, the operation journal, the rebuildable index, and interruption recovery. |
+| 4 | [Application architecture](architecture.md) | The native macOS application, Rust engine, automation interface, and test architecture. |
 
 Each rule has one primary home.
 Links connect shared requirements.

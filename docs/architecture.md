@@ -1,0 +1,460 @@
+# Application architecture
+
+**Status: draft, not implemented behavior.** This document defines the proposed application architecture.
+
+## Goals
+
+- Provide a polished, native macOS application.
+- Keep catalog rules and storage behavior in one Rust implementation.
+- Expose a stable, non-interactive CLI for tests and development agents.
+- Keep the core test suite fast enough for continuous local use.
+- Test the macOS interface separately from catalog correctness.
+- Recover safely from process, machine, storage, and network interruption.
+
+## Non-goals
+
+- Support platforms other than macOS in the first implementation.
+- Use the CLI as the primary human interface.
+- Put catalog rules in Swift.
+- Make SQLite part of the durable catalog format.
+- Require NAS or UI tests in the fast local test loop.
+- Distribute through the Mac App Store in the first milestone.
+
+## System design
+
+The application uses a native Swift interface and a Rust engine.
+
+The macOS application starts a bundled engine process.
+The application and engine exchange versioned JSON messages through standard input and output.
+The CLI calls the same Rust application services without starting the macOS application.
+
+The engine owns all authoritative catalog reads and writes.
+The Swift application owns presentation state and macOS integration.
+
+The initial implementation does not use a direct Swift-to-Rust foreign function interface.
+The process boundary isolates failures and simplifies asynchronous communication.
+
+## macOS application
+
+The macOS application uses SwiftUI for application structure.
+It uses AppKit where SwiftUI does not provide sufficient control or performance.
+
+SwiftUI owns:
+
+- Window composition.
+- Navigation.
+- Sheets.
+- Forms.
+- Settings.
+- State-driven progress views.
+- Most collection views.
+
+AppKit can own:
+
+- Large tables.
+- Complex selection.
+- Finder-style drag and drop.
+- Menu bar integration.
+- Precise keyboard navigation.
+- Performance-sensitive grids.
+
+The application uses Swift Concurrency.
+One Swift actor supervises the engine process and owns protocol communication.
+
+The application must not:
+
+- Modify catalog files.
+- Allocate canonical counters.
+- Update manifests.
+- Write journals.
+- Decide recovery actions.
+- Update the catalog index directly.
+
+The application can retain:
+
+- Window state.
+- Navigation and selection state.
+- User preferences.
+- Recent catalog references.
+- Security-scoped bookmarks when required.
+
+## Rust workspace
+
+The Rust workspace separates pure rules, orchestration, storage, and client interfaces.
+
+```text
+crates/
+  souvenirs-domain/
+  souvenirs-application/
+  souvenirs-storage/
+  souvenirs-metadata/
+  souvenirs-protocol/
+  souvenirs-engine/
+  souvenirs-cli/
+  souvenirs-test-support/
+
+macos/
+  Souvenirs/
+  SouvenirsTests/
+  SouvenirsUITests/
+```
+
+### Domain
+
+`souvenirs-domain` contains pure catalog rules.
+
+It owns:
+
+- Portable name validation.
+- Collection ranges.
+- Canonical filenames.
+- Counter allocation.
+- Logical item relationships.
+- Accepted datetime rules.
+- Plan values.
+- Drift detection.
+- Recovery decisions.
+- Operation state transitions.
+
+It must not access the filesystem, SQLite, the system clock, environment variables, or process-global state.
+
+### Application services
+
+`souvenirs-application` coordinates use cases.
+
+It owns:
+
+- Catalog initialization.
+- Catalog scanning.
+- Import planning.
+- Plan validation.
+- Import execution.
+- Recovery.
+- Integrity checks.
+- Progress reporting.
+- Cancellation policy.
+
+It depends on explicit interfaces for storage, metadata, hashing, journals, indexes, locks, time, and operation events.
+It does not know whether the caller is the CLI or the macOS application.
+
+### Storage
+
+`souvenirs-storage` implements durable storage behavior from [Storage and recovery](storage.md).
+
+It owns:
+
+- Staging.
+- Verified copies.
+- Atomic publication.
+- Manifest replacement.
+- Journal persistence.
+- Catalog locks.
+- SQLite access.
+- Filesystem scanning.
+- macOS durability operations.
+
+The implementation isolates these macOS APIs behind a narrow interface:
+
+- `F_FULLFSYNC`
+- `F_NOCACHE`
+- `renamex_np` with `RENAME_EXCL`
+- Volume identity and capability queries
+
+### Metadata
+
+`souvenirs-metadata` extracts and normalizes media metadata.
+
+The implementation must validate candidate libraries against a representative media corpus.
+The corpus must include each format and source device supported by the first milestone.
+
+Other crates consume normalized metadata values.
+They must not depend on parser-specific types.
+
+### Protocol
+
+`souvenirs-protocol` defines requests, responses, progress events, and structured errors.
+
+Every request contains:
+
+- A request identifier.
+- A protocol version.
+- A method.
+- Typed parameters.
+
+Every response contains:
+
+- The request identifier.
+- The protocol version.
+- A result or structured error.
+
+Long operations return an operation identifier.
+The engine emits ordered progress events for that operation.
+
+The first request performs a handshake.
+The handshake reports the engine version, protocol version, compatible client version, and capabilities.
+
+The Rust types generate a committed JSON Schema.
+Swift protocol fixtures must validate against this schema.
+
+### Engine
+
+`souvenirs-engine` exposes application services to the macOS application.
+
+It reads one JSON request per line from standard input.
+It writes responses and events to standard output.
+It writes diagnostics to standard error.
+
+The engine does not listen on a network port.
+It exits when the parent closes the connection.
+It rejects incompatible protocol versions.
+
+The macOS application reports unexpected engine termination.
+It can restart the engine for read operations.
+An unfinished mutation remains governed by its catalog journal.
+
+### CLI
+
+`souvenirs-cli` exposes application services for automation.
+
+Initial command groups are:
+
+```text
+souvenirs catalog initialize
+souvenirs catalog inspect
+souvenirs import scan
+souvenirs import plan
+souvenirs import execute
+souvenirs operation status
+souvenirs operation recover
+souvenirs operation cancel
+souvenirs integrity check
+souvenirs protocol schema
+```
+
+The CLI must:
+
+- Support structured JSON output.
+- Support JSON Lines progress output.
+- Keep result data on standard output.
+- Keep diagnostics on standard error.
+- Use stable exit codes.
+- Avoid interactive prompts.
+- Avoid implicit destination selection.
+- Avoid executing an unconfirmed plan.
+
+Human-readable output is secondary.
+Tests and agents must not parse human-readable output.
+
+## Plans
+
+Every mutation uses an immutable, serializable plan.
+
+A plan contains:
+
+- A schema version.
+- A unique identifier.
+- Catalog identity.
+- Source identities.
+- Observed manifest fingerprints.
+- Source and destination paths.
+- Accepted datetimes.
+- Exclusions.
+- Planned filesystem steps.
+- Required free space.
+- Creation time.
+- A digest of the complete plan.
+
+The CLI can save a plan to a file.
+Execution accepts the exact saved plan.
+
+```text
+souvenirs import plan ... --output import-plan.json
+souvenirs import execute --plan import-plan.json
+```
+
+Execution revalidates mutable assumptions.
+It rejects source or catalog drift.
+
+## Index
+
+SQLite remains a rebuildable cache.
+It is not an authoritative source.
+
+The index stores manifest digests, paths, normalized metadata, and search fields.
+The engine updates it after the matching durable catalog change.
+
+The engine can delete and rebuild a missing, outdated, or corrupt index.
+
+## Test architecture
+
+### Fast core tests
+
+The fast suite covers `souvenirs-domain` and most application services.
+
+It uses fixed clocks, deterministic identifiers, seeded property tests, and in-memory test doubles.
+It does not launch processes or access real storage.
+
+The initial performance target is five seconds on a development Mac.
+
+Property tests cover:
+
+- Portable canonical names.
+- Collision-free counter allocation.
+- Destination overwrite prevention.
+- Recovery deletion limits.
+- Collection range containment.
+- Plan serialization.
+- Traversal-order independence.
+
+### Filesystem integration tests
+
+Storage tests use real temporary directories.
+A virtual filesystem does not replace these tests.
+
+The suite covers:
+
+- Exclusive creation.
+- Atomic publication.
+- Manifest replacement.
+- Lock contention.
+- Destination conflicts.
+- Source disappearance.
+- Cancellation.
+- Recovery after each durable transition.
+- Unicode and case-fold collisions.
+
+The storage implementation provides test-only failpoints around durable transitions.
+A test process can terminate at each failpoint.
+The next process runs recovery and verifies the resulting catalog.
+
+### Storage environment tests
+
+Storage tests run at different frequencies.
+
+| Environment | Frequency |
+| --- | --- |
+| Local temporary directory | Every pull request |
+| APFS attached volume | Before release |
+| exFAT attached volume | Before release |
+| SMB test server | Nightly and before release |
+| Forced SMB interruption | Nightly and before release |
+
+### Protocol tests
+
+The repository keeps golden protocol requests, responses, errors, and progress streams.
+
+Rust and Swift tests use the same fixtures.
+The suite covers version mismatches, event ordering, cancellation races, malformed messages, and engine termination.
+
+### CLI end-to-end tests
+
+CLI tests create temporary sources and catalogs.
+
+Each test can:
+
+1. Create a source fixture.
+2. Request a plan.
+3. Inspect the JSON plan.
+4. Execute the plan.
+5. Inspect the resulting catalog.
+6. Run an integrity check.
+7. Compare the result with an expected tree.
+
+The CLI is the primary automation interface for development agents.
+
+### Swift state tests
+
+Swift state tests use a fake engine client.
+They do not launch the application.
+
+They cover button availability, blocking decisions, errors, progress, reconnection, recovery routing, navigation, and selection.
+
+### macOS UI tests
+
+XCUITest covers a small set of complete user journeys.
+
+Most UI tests launch the application with a deterministic fake engine.
+The fake engine serves named scenarios for important states and failures.
+
+Every interactive control has a stable accessibility identifier.
+Tests use accessibility values instead of pixel coordinates.
+
+A smaller smoke suite launches the real engine with a temporary catalog.
+It covers startup, catalog creation, import planning, execution, progress, and recovery routing.
+
+## Development commands
+
+The repository provides stable commands through one task runner.
+
+```text
+just test-core
+just test-rust
+just test-cli
+just test-swift
+just test-ui
+just test-integration
+just test-storage
+just check
+just test-all
+```
+
+`just test-core` targets a five-second runtime.
+`just check` runs formatting, static checks, core tests, and Swift state tests.
+`just test-all` runs all tests available on the current machine.
+
+## Continuous integration
+
+Pull requests run:
+
+- Rust formatting.
+- Clippy with warnings denied.
+- Core tests.
+- Protocol tests.
+- CLI end-to-end tests.
+- Swift compilation.
+- Swift state tests.
+- A small fake-engine UI suite.
+
+The main branch also runs local filesystem integration tests, real-engine UI smoke tests, and failpoint recovery tests.
+
+Nightly jobs also run SMB tests, large fixture tests, repeated interruption tests, metadata corpus tests, and performance tests.
+
+## Distribution
+
+The first milestone uses direct distribution with Hardened Runtime, code signing, and notarization.
+The bundle includes a signed engine executable.
+
+The first milestone does not require the Mac App Sandbox.
+The sandbox adds risk around arbitrary volumes, NAS paths, persistent access, and child processes.
+
+Mac App Store support requires a separate validation of security-scoped resource access across the engine process boundary.
+
+## Delivery constraints
+
+One implementation issue can produce more than one pull request.
+Each pull request must remain below 2,000 lines of code.
+Pull requests should remain comfortably below this limit when practical.
+
+Each pull request must provide one independently reviewable capability.
+Tests and generated files count toward review cost even when line-count tools exclude them.
+
+## Initial sequence
+
+1. Validate metadata extraction, filesystem durability, and engine packaging.
+2. Implement pure catalog rules and plans.
+3. Implement the CLI on local temporary catalogs.
+4. Implement journals, verified copies, failpoints, and recovery.
+5. Implement the engine protocol.
+6. Build the simplified native import interface.
+7. Add fake-engine UI scenarios.
+8. Add real-engine UI smoke tests.
+9. Validate attached-drive behavior.
+10. Validate SMB interruption and recovery.
+
+## Open questions
+
+- Which macOS version is the minimum deployment target?
+- Which media formats and source devices are required for the first milestone?
+- Which Rust libraries satisfy the metadata corpus?
+- Which task runner provides the repository commands?
+- Does a sandboxed child process retain access to every required security-scoped location?
