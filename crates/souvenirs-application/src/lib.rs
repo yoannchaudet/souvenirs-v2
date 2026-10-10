@@ -388,16 +388,17 @@ fn collect_source_files(
 }
 
 fn media_kind(path: &Path) -> Option<MediaKind> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    if matches!(
-        extension.as_str(),
-        "jpg" | "jpeg" | "heic" | "png" | "tif" | "tiff" | "dng" | "cr2" | "cr3" | "nef"
-    ) {
-        Some(MediaKind::Photo)
-    } else if matches!(extension.as_str(), "mov" | "mp4" | "m4v" | "avi") {
-        Some(MediaKind::Video)
-    } else {
-        None
+    match souvenirs_metadata::classify_path(path) {
+        souvenirs_metadata::AssetKind::Original {
+            media: souvenirs_metadata::MediaKind::Photo,
+            ..
+        } => Some(MediaKind::Photo),
+        souvenirs_metadata::AssetKind::Original {
+            media: souvenirs_metadata::MediaKind::Video,
+            ..
+        } => Some(MediaKind::Video),
+        souvenirs_metadata::AssetKind::Sidecar { .. }
+        | souvenirs_metadata::AssetKind::Unsupported => None,
     }
 }
 

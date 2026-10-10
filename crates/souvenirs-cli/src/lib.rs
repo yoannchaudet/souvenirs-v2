@@ -1699,24 +1699,10 @@ fn collect_files(
 }
 
 fn classify_path(path: &Path) -> ScannedFileKind {
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    if [
-        "jpg", "jpeg", "heic", "cr3", "nef", "arw", "dng", "mp4", "mov",
-    ]
-    .iter()
-    .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-    {
-        ScannedFileKind::Media
-    } else if ["xmp", "aae", "dop", "pp3"]
-        .iter()
-        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-    {
-        ScannedFileKind::Sidecar
-    } else {
-        ScannedFileKind::Unknown
+    match souvenirs_metadata::classify_path(path) {
+        souvenirs_metadata::AssetKind::Original { .. } => ScannedFileKind::Media,
+        souvenirs_metadata::AssetKind::Sidecar { .. } => ScannedFileKind::Sidecar,
+        souvenirs_metadata::AssetKind::Unsupported => ScannedFileKind::Unknown,
     }
 }
 

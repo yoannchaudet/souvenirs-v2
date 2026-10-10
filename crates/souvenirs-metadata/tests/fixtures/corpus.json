@@ -1,0 +1,143 @@
+{
+  "files": [
+    {
+      "id": "canon-jpeg",
+      "path": ["DCIM", "100CANON", "IMG_0001.JPG"],
+      "device": ["Canon", "EOS R5", "R5-001"],
+      "content_identifier": null,
+      "candidates": [
+        ["exif_datetime_digitized", "2024-07-09T10:11:13"],
+        ["exif_datetime_original", "2024-07-09T10:11:12"],
+        ["xmp_date_created", "2024-07-09T10:11:14"]
+      ],
+      "disposition": "transfer"
+    },
+    {
+      "id": "canon-raw",
+      "path": ["DCIM", "100CANON", "IMG_0001.CR3"],
+      "device": ["Canon", "EOS R5", "R5-001"],
+      "content_identifier": null,
+      "candidates": [],
+      "disposition": "transfer"
+    },
+    {
+      "id": "canon-xmp",
+      "path": ["DCIM", "100CANON", "IMG_0001.xmp"],
+      "device": [null, null, null],
+      "content_identifier": null,
+      "candidates": [],
+      "disposition": "sidecar"
+    },
+    {
+      "id": "iphone-still",
+      "path": ["DCIM", "100APPLE", "IMG_0042.HEIC"],
+      "device": ["Apple", "iPhone 15 Pro", null],
+      "content_identifier": "live-42",
+      "candidates": [
+        ["exif_datetime_original", "2024-08-03T15:30:45"]
+      ],
+      "disposition": "transfer"
+    },
+    {
+      "id": "iphone-video",
+      "path": ["DCIM", "100APPLE", "IMG_E0042.MOV"],
+      "device": ["Apple", "iPhone 15 Pro", null],
+      "content_identifier": "live-42",
+      "candidates": [
+        ["quick_time_creation_date", "2024-08-03T15:30:45"]
+      ],
+      "disposition": "transfer"
+    },
+    {
+      "id": "iphone-aae",
+      "path": ["DCIM", "100APPLE", "IMG_0042.AAE"],
+      "device": [null, null, null],
+      "content_identifier": null,
+      "candidates": [],
+      "disposition": "sidecar"
+    },
+    {
+      "id": "nikon-raw",
+      "path": ["NIKON", "DSC_2000.NEF"],
+      "device": ["Nikon", "Z 8", "Z8-002"],
+      "content_identifier": null,
+      "candidates": [
+        ["exif_datetime_digitized", "2024-09-10T08:00:00"]
+      ],
+      "disposition": "transfer"
+    },
+    {
+      "id": "nikon-dop",
+      "path": ["NIKON", "DSC_2000.NEF.dop"],
+      "device": [null, null, null],
+      "content_identifier": null,
+      "candidates": [],
+      "disposition": "sidecar"
+    },
+    {
+      "id": "sony-raw",
+      "path": ["SONY", "DSC03000.ARW"],
+      "device": ["Sony", "ILCE-7RM5", "A7-003"],
+      "content_identifier": null,
+      "candidates": [],
+      "disposition": "missing"
+    },
+    {
+      "id": "sony-pp3",
+      "path": ["SONY", "DSC03000.ARW.pp3"],
+      "device": [null, null, null],
+      "content_identifier": null,
+      "candidates": [],
+      "disposition": "sidecar"
+    },
+    {
+      "id": "pixel-dng",
+      "path": ["PIXEL", "PXL_20241011_091500000.dng"],
+      "device": ["Google", "Pixel 9 Pro", null],
+      "content_identifier": null,
+      "candidates": [
+        ["google_takeout_photo_taken_time", "2024-10-11T09:15:00"],
+        ["filename_pattern", "2024-10-11T09:15:00"]
+      ],
+      "disposition": "confirm_proposal"
+    },
+    {
+      "id": "android-mp4",
+      "path": ["ANDROID", "VID_20241011_091500.mp4"],
+      "device": ["Google", "Pixel 9 Pro", null],
+      "content_identifier": null,
+      "candidates": [
+        ["container_creation_time", "2024-10-11T09:15:00"]
+      ],
+      "disposition": "confirm_ambiguous"
+    },
+    {
+      "id": "legacy-jpeg",
+      "path": ["LEGACY", "holiday.jpeg"],
+      "device": ["Canon", "PowerShot G2", null],
+      "content_identifier": null,
+      "candidates": [
+        ["xmp_date_created", "2024-07-09T10:11:12"]
+      ],
+      "disposition": "transfer"
+    },
+    {
+      "id": "standalone-mov",
+      "path": ["VIDEO", "clip.mov"],
+      "device": [null, null, null],
+      "content_identifier": null,
+      "candidates": [
+        ["quick_time_creation_date", "2024-08-03T15:30:45"]
+      ],
+      "disposition": "transfer"
+    },
+    {
+      "id": "unsupported",
+      "path": ["notes.pdf"],
+      "device": [null, null, null],
+      "content_identifier": null,
+      "candidates": [],
+      "disposition": "unsupported"
+    }
+  ]
+}
