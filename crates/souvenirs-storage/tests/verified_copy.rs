@@ -2,7 +2,7 @@ use std::fs;
 
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError, OperationJournal,
+    CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError, CopyExpectation, OperationJournal,
     OperationJournalError, VerifiedCopyError,
 };
 use tempfile::TempDir;
@@ -31,6 +31,13 @@ fn journal(layout: &CatalogLayout, lock: &CatalogLock, operation_id: &str) -> Op
     .unwrap()
 }
 
+fn expectation(bytes: &[u8]) -> CopyExpectation {
+    CopyExpectation {
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+        size_bytes: bytes.len() as u64,
+    }
+}
+
 #[test]
 fn publishes_only_after_copy_and_read_back_hashes_match() {
     let (_temporary, layout, lock) = initialized_catalog();
@@ -47,6 +54,7 @@ fn publishes_only_after_copy_and_read_back_hashes_match() {
             &source,
             "2026/original.bin",
             "original1",
+            expectation(b"verified bytes"),
         )
         .unwrap();
 
@@ -70,12 +78,54 @@ fn copies_and_verifies_multiple_buffers() {
     fs::create_dir(layout.root().join("2026")).unwrap();
 
     let copied = layout
-        .copy_verified(&lock, &mut journal, &source, "2026/large.bin", "large")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/large.bin",
+            "large",
+            expectation(&bytes),
+        )
         .unwrap();
 
     assert_eq!(copied.bytes_copied, bytes.len() as u64);
     assert_eq!(copied.sha256, format!("{:x}", Sha256::digest(&bytes)));
     assert_eq!(fs::read(copied.destination).unwrap(), bytes);
+}
+
+#[test]
+fn planned_content_mismatch_remains_staged_and_is_never_published() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "drift");
+    let source_directory = TempDir::new().unwrap();
+    let source = source_directory.path().join("source.bin");
+    fs::write(&source, b"changed bytes").unwrap();
+    fs::create_dir(layout.root().join("2026")).unwrap();
+
+    let error = layout
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "original1",
+            expectation(b"planned bytes"),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        VerifiedCopyError::PlannedContentMismatch { .. }
+    ));
+    assert!(!layout.root().join("2026/original.bin").exists());
+    assert_eq!(
+        fs::read(staged_path(&layout, "drift", "original1")).unwrap(),
+        b"changed bytes"
+    );
+    let journal_text = fs::read_to_string(journal.path()).unwrap();
+    assert!(journal_text.contains("\"kind\":\"copy_started\""));
+    assert!(!journal_text.contains("\"kind\":\"copy_verified\""));
+    assert!(!journal_text.contains("\"kind\":\"copy_publication_started\""));
 }
 
 #[test]
@@ -96,6 +146,7 @@ fn never_overwrites_an_occupied_destination() {
             &source,
             "2026/original.bin",
             "original1",
+            expectation(b"new bytes"),
         )
         .unwrap_err();
 
@@ -139,6 +190,7 @@ fn never_overwrites_an_occupied_staging_path() {
             &source,
             "2026/original.bin",
             "original1",
+            expectation(b"new bytes"),
         )
         .unwrap_err();
 
@@ -167,6 +219,7 @@ fn requires_the_active_lock_for_the_same_catalog() {
             &source,
             "2026/original.bin",
             "original1",
+            expectation(b"bytes"),
         )
         .unwrap_err();
 
@@ -187,7 +240,14 @@ fn rejects_destination_traversal_before_staging_bytes() {
     fs::write(&source, b"bytes").unwrap();
 
     let error = layout
-        .copy_verified(&lock, &mut journal, &source, "../outside.bin", "original1")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "../outside.bin",
+            "original1",
+            expectation(b"bytes"),
+        )
         .unwrap_err();
 
     assert!(matches!(
@@ -206,7 +266,14 @@ fn rejects_invalid_identifiers_before_staging_bytes() {
     fs::write(&source, b"bytes").unwrap();
 
     let error = layout
-        .copy_verified(&lock, &mut journal, &source, "original.bin", "../step")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "original.bin",
+            "../step",
+            expectation(b"bytes"),
+        )
         .unwrap_err();
 
     assert!(matches!(
@@ -234,6 +301,7 @@ fn rejects_catalog_state_destinations() {
             &source,
             ".souvenirs/journal/injected",
             "original1",
+            expectation(b"bytes"),
         )
         .unwrap_err();
 
@@ -263,6 +331,7 @@ fn rejects_a_destination_directory_symlink_outside_the_catalog() {
             &source,
             "escaped/original.bin",
             "original1",
+            expectation(b"bytes"),
         )
         .unwrap_err();
 
@@ -290,7 +359,14 @@ fn serialization_failure_does_not_append_a_partial_journal_record() {
     let before = fs::read(journal.path()).unwrap();
 
     let error = layout
-        .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy1")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "copy1",
+            expectation(b""),
+        )
         .unwrap_err();
 
     assert!(matches!(

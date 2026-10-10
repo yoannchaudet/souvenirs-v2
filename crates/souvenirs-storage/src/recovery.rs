@@ -12,8 +12,8 @@ use crate::durability::{sync_directory, sync_file};
 use crate::manifest::verify_previous_manifest;
 use crate::operation::validate_identifier;
 use crate::{
-    CatalogLayout, CatalogLock, DurableTransition, ManifestReplacementRequest, OperationJournal,
-    OperationJournalError, OperationOutcome, OperationRecord,
+    CatalogLayout, CatalogLock, CopyExpectation, DurableTransition, ManifestReplacementRequest,
+    OperationJournal, OperationJournalError, OperationOutcome, OperationRecord,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -34,6 +34,8 @@ pub struct RecoveryCopy {
     pub step_id: String,
     pub source: PathBuf,
     pub destination: PathBuf,
+    pub expected_sha256: String,
+    pub expected_size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,6 +232,7 @@ struct CopyState {
     staged_path: PathBuf,
     destination: PathBuf,
     sha256: Option<String>,
+    bytes_copied: Option<u64>,
     published: bool,
 }
 
@@ -241,6 +244,10 @@ fn recover_copies(
     mode: RecoveryMode,
     requests: &[RecoveryCopy],
 ) -> Result<(), RecoveryError> {
+    let requests = requests
+        .iter()
+        .map(|request| (request.step_id.as_str(), request))
+        .collect::<BTreeMap<_, _>>();
     let mut copies = BTreeMap::<String, CopyState>::new();
     let mut order = Vec::new();
     for transition in transitions(records) {
@@ -262,6 +269,7 @@ fn recover_copies(
                         staged_path: staged_path.clone(),
                         destination: destination.clone(),
                         sha256: None,
+                        bytes_copied: None,
                         published: false,
                     },
                 );
@@ -271,7 +279,7 @@ fn recover_copies(
                 staged_path,
                 destination,
                 sha256,
-                bytes_copied: _,
+                bytes_copied,
             } => {
                 let state = copies
                     .get_mut(step_id)
@@ -280,6 +288,7 @@ fn recover_copies(
                     return Err(RecoveryError::InconsistentStep(step_id.clone()));
                 }
                 state.sha256 = Some(sha256.clone());
+                state.bytes_copied = Some(*bytes_copied);
             }
             DurableTransition::CopyPublicationStarted {
                 step_id,
@@ -318,11 +327,40 @@ fn recover_copies(
 
     for step_id in order {
         let state = &copies[&step_id];
+        let request = requests
+            .get(step_id.as_str())
+            .copied()
+            .ok_or_else(|| RecoveryError::RequestMismatch(step_id.clone()))?;
+        if state.source != request.source || state.destination != request.destination {
+            return Err(RecoveryError::RequestMismatch(step_id.clone()));
+        }
         let staged_path = layout.root().join(&state.staged_path);
         let destination = crate::catalog_path::resolve_catalog_entry(layout, &state.destination)
             .map_err(RecoveryError::Path)?;
         let staged_digest = digest_if_file(&staged_path)?;
         let destination_digest = digest_if_file(&destination.resolved_path)?;
+        if let Some(actual_sha256) = state.sha256.as_deref() {
+            if actual_sha256 != request.expected_sha256
+                || state.bytes_copied != Some(request.expected_size_bytes)
+            {
+                if mode == RecoveryMode::CancelRemainingCopies
+                    && !state.published
+                    && destination_digest.is_none()
+                {
+                    if staged_digest.is_some() {
+                        remove_owned_stage(layout, lock, journal, &step_id, &state.staged_path)?;
+                    }
+                    continue;
+                }
+                return Err(RecoveryError::ExpectedContentMismatch {
+                    step: step_id.clone(),
+                    expected_sha256: request.expected_sha256.clone(),
+                    actual_sha256: actual_sha256.to_owned(),
+                    expected_size_bytes: request.expected_size_bytes,
+                    actual_size_bytes: state.bytes_copied,
+                });
+            }
+        }
 
         if state.published {
             ensure_digest(
@@ -414,7 +452,17 @@ fn recover_copies(
                 }
                 (None, None) if mode == RecoveryMode::Resume && state.source.is_file() => {
                     layout
-                        .copy_verified(lock, journal, &state.source, &state.destination, &step_id)
+                        .copy_verified(
+                            lock,
+                            journal,
+                            &state.source,
+                            &state.destination,
+                            &step_id,
+                            CopyExpectation {
+                                sha256: request.expected_sha256.clone(),
+                                size_bytes: request.expected_size_bytes,
+                            },
+                        )
                         .map_err(RecoveryError::Copy)?;
                 }
                 (None, None) if mode == RecoveryMode::Resume => {
@@ -444,10 +492,20 @@ fn recover_copies(
             return Err(RecoveryError::SourceUnavailable(state.source.clone()));
         }
         layout
-            .copy_verified(lock, journal, &state.source, &state.destination, &step_id)
+            .copy_verified(
+                lock,
+                journal,
+                &state.source,
+                &state.destination,
+                &step_id,
+                CopyExpectation {
+                    sha256: request.expected_sha256.clone(),
+                    size_bytes: request.expected_size_bytes,
+                },
+            )
             .map_err(RecoveryError::Copy)?;
     }
-    for request in requests {
+    for request in requests.values() {
         if let Some(recorded) = copies.get(&request.step_id) {
             if recorded.source != request.source || recorded.destination != request.destination {
                 return Err(RecoveryError::RequestMismatch(request.step_id.clone()));
@@ -467,6 +525,10 @@ fn recover_copies(
                 &request.source,
                 &request.destination,
                 &request.step_id,
+                CopyExpectation {
+                    sha256: request.expected_sha256.clone(),
+                    size_bytes: request.expected_size_bytes,
+                },
             )
             .map_err(RecoveryError::Copy)?;
     }
@@ -1077,6 +1139,13 @@ pub enum RecoveryError {
     },
     DuplicateManifest(PathBuf),
     DuplicateStep(String),
+    ExpectedContentMismatch {
+        step: String,
+        expected_sha256: String,
+        actual_sha256: String,
+        expected_size_bytes: u64,
+        actual_size_bytes: Option<u64>,
+    },
     InconsistentStep(String),
     InvalidManifestPath(PathBuf),
     InvalidStagingPath(PathBuf),
@@ -1121,6 +1190,21 @@ impl fmt::Display for RecoveryError {
             }
             Self::DuplicateStep(step) => {
                 write!(formatter, "duplicate recovery step identifier: {step:?}")
+            }
+            Self::ExpectedContentMismatch {
+                step,
+                expected_sha256,
+                actual_sha256,
+                expected_size_bytes,
+                actual_size_bytes,
+            } => {
+                let actual_size_bytes = actual_size_bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                write!(
+                    formatter,
+                    "verified recovery copy {step:?} does not match the confirmed plan: expected SHA-256 {expected_sha256} and {expected_size_bytes} bytes, found SHA-256 {actual_sha256} and {actual_size_bytes} bytes"
+                )
             }
             Self::InconsistentStep(step) => {
                 write!(
