@@ -1,97 +1,85 @@
 # Project map
 
-Use these structures for durable coordination state in the private
-`yoannchaudet/souvenirs-v2-context` repository. Use a session artifact only as a temporary
-cache. Use it as a fallback source only when the context repository is unreadable. If the
-configured Copilot project is unavailable, continue reading durable state through GitHub
-and cache pending updates in the artifact until persistence is available.
+The private `yoannchaudet/souvenirs-v2-context` repository stores durable coordination
+state. Read its `AGENTS.md` before changing that state. Use a session artifact only as a
+temporary cache. Use it as a fallback source only when the context repository is
+unreadable. If the configured Copilot project is unavailable, continue reading durable
+state through GitHub and cache pending updates in the artifact until persistence is
+available.
 
-Store `project-map.md` and `handoff.md` at the root of the default branch. If either file
-is missing, treat its state as `Unknown` and create it from the matching structure through
-a focused pull request.
+Store the project map at `project-map.md` and the current handoff at
+`handoffs/current.md`. Preserve completed integration summaries under `checkpoints/` and
+accepted decisions under `decisions/`. Add integration summaries to
+`checkpoints/README.md`. Add each accepted decision as the next numbered record and index
+it in `decisions/README.md`. Treat the record and its required index update as one focused
+change.
 
 Keep each entry concise and derived from an authoritative Souvenirs source. Use stable
-GitHub links instead of copying issue or pull request bodies. Use `Unknown` when evidence
-is unavailable.
+GitHub links instead of copying issue or pull request bodies. State the evidence date for
+time-sensitive summaries. Use `Unknown` when evidence is unavailable.
+
+If `project-map.md` is missing, create it with this starting structure through a focused
+pull request:
 
 ```markdown
 # Souvenirs project map
 
-Updated: <ISO date>
+Evidence checked with GitHub: <ISO date>
 
-## Milestone outcome
+## Current milestone
 
 <One user-visible outcome>
 
 ## User journeys
 
-| Journey | Current state | Target state | Evidence |
-|---|---|---|---|
+<Current and target journeys with authoritative links>
 
 ## Workstreams
 
-| Workstream | Issues | Dependencies | Active session or PR | Status |
-|---|---|---|---|---|
+| Workstream | Authoritative records | Coordination state |
+| --- | --- | --- |
 
 ## Invariants
 
-| Invariant | Source | Affected work |
-|---|---|---|
+<Verified product and coordination invariants>
 
 ## Issue reconciliation
 
-| Issue | Keep, revise, merge, or close | Reason | Related issue |
-|---|---|---|---|
+| Record | State | Reconciliation |
+| --- | --- | --- |
 
-## Recent changes
+## Recent merged pull-request consequences
 
-| Change | Backlog or architecture consequence |
-|---|---|
+<Concise consequences with authoritative links>
 
-## Decisions needed
+## Decisions
 
-| Decision | Why it matters | Options |
-|---|---|---|
+<Accepted coordination decisions with links to `decisions/`>
 
-## Next review checkpoint
+## Next checkpoint
 
 <Trigger and scope>
 ```
 
-Use this structure for the current coordinator handoff:
+If `handoffs/current.md` is missing, create it with this starting structure through a
+focused pull request:
 
 ```markdown
 # Souvenirs coordinator handoff
 
-Updated: <ISO date>
+Evidence checked with GitHub: <ISO date>
 
-## Current outcome
+## Active work
 
-<User-visible or architectural outcome currently being coordinated>
+<Verified current work with authoritative links>
 
-## Accepted decisions
+## Blockers
 
-| Decision | Consequence | Authoritative source |
-|---|---|---|
+<Verified blockers and material `Unknown` state>
 
-## Integration and merge state
+## Exact next actions
 
-| Pull request or checkpoint | Verified state | Dependency or consequence | Source |
-|---|---|---|---|
-
-## Backlog reconciliation
-
-| Issue or workstream | Current disposition | Reason | Source |
-|---|---|---|---|
-
-## Blockers and unknowns
-
-| Item | Effect | Evidence or `Unknown` |
-|---|---|---|
-
-## Next safe action
-
-<One concise action and its prerequisites>
+<Ordered actions and prerequisites>
 ```
 
 Do not store credentials, secrets, personal data, local absolute paths, raw logs,

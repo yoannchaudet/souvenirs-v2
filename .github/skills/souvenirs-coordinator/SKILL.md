@@ -25,7 +25,7 @@ Do not invoke this skill for:
 
 Read the following before organizing work:
 
-- `AGENTS.md` for repository workflow and review requirements.
+- The product repository's `AGENTS.md` for workflow and review requirements.
 - `docs/README.md` for the specification map.
 - `docs/architecture.md` for component boundaries, testing, delivery, and pull request
   constraints.
@@ -33,8 +33,8 @@ Read the following before organizing work:
 - `docs/operations.md` for user operations, plans, recovery, and release behavior.
 - `docs/storage.md` for persistence, locking, integrity, and interruption rules.
 - The relevant GitHub issues, pull requests, project fields, and active sessions.
-- The derived `project-map.md` and `handoff.md` state in the private
-  `yoannchaudet/souvenirs-v2-context` repository.
+- The derived `project-map.md`, `handoffs/current.md`, accepted decisions, and integration
+  checkpoints in the private `yoannchaudet/souvenirs-v2-context` repository.
 
 `yoannchaudet/souvenirs-v2` remains authoritative for specifications, source, tests,
 issues, pull requests, and GitHub Project fields. The context repository contains only
@@ -78,9 +78,10 @@ directly. Do not combine unrelated fixes only to reduce the number of sessions.
 
 At the start of coordinated work:
 
-1. Read `project-map.md` and `handoff.md` from the default branch of
+1. Read `project-map.md` and `handoffs/current.md` from the default branch of
    `yoannchaudet/souvenirs-v2-context` through GitHub before organizing a new batch.
-   Reading the state does not require a context-repository checkout.
+   Follow their links to the accepted decisions and integration checkpoints relevant to
+   the current work. Reading the state does not require a context-repository checkout.
 2. Verify state-sensitive claims against live GitHub issues, pull requests, checks,
    reviews, merges, and Project fields.
 3. Refresh the working view for the current session when live data or accepted
@@ -88,9 +89,9 @@ At the start of coordinated work:
    [Update durable coordination state](#update-durable-coordination-state).
 
 If either durable file is missing, treat its state as `Unknown`. Bootstrap the missing
-file from [references/project-map.md](references/project-map.md) through a focused
-context-repository pull request. Do not block product work while the bootstrap pull
-request is in progress.
+file from [references/project-map.md](references/project-map.md), subject to the context
+repository's `AGENTS.md`, through a focused context-repository pull request. Do not block
+product work while the bootstrap pull request is in progress.
 
 Use the session artifact only as a temporary cache or fallback. Do not treat it as the
 durable source when the context repository is readable. If the private repository is
@@ -98,10 +99,10 @@ unreadable, continue product work with the session artifact and report the durab
 limitation. If its configured Copilot project is unavailable, continue reading durable
 state through GitHub but report that persistence is unavailable.
 
-Use the exact structures in
-[references/project-map.md](references/project-map.md). Record an authoritative source for
-each state-sensitive claim, or mark the information `Unknown` instead of inferring it.
-Prefer stable GitHub links to copied issue or pull request text.
+Follow the context repository's existing structure and
+[references/project-map.md](references/project-map.md). Record an authoritative source
+and evidence date for each state-sensitive claim, or mark the information `Unknown`
+instead of inferring it. Prefer stable GitHub links to copied issue or pull request text.
 
 Organize issues by behavior and system boundary, not only by label or creation order.
 
@@ -135,10 +136,15 @@ Keep the one-session-per-pull-request model for context changes. Use the app's m
 orchestration model to create a focused context-repository session and pull request
 instead of expanding a product pull request.
 
-Apply the context repository's own instructions and run a `rubber-duck` review before
-publication. Shepherd each context pull request through its checks, review, and merge.
-The Souvenirs product issue-linking, MVP project-tracking, specialist-review, and product
-pull-request size rules do not apply unless the context repository adopts them.
+Before changing context state, read and follow its `AGENTS.md`. Update only the smallest
+relevant project map, decision, integration checkpoint, or current handoff. Add accepted
+decisions as numbered records under `decisions/` and index them in
+`decisions/README.md`. Add integration summaries to `checkpoints/README.md`. A required
+index update is part of the smallest relevant change. Apply the context repository's
+complete-diff review and `git diff --check` requirements before publication. Shepherd
+each context pull request through its checks, review, and merge. The Souvenirs product
+issue-linking, MVP project-tracking, specialist-review, and product pull-request size
+rules do not apply unless the context repository adopts them.
 
 Create or update a context-repository pull request after:
 
@@ -153,11 +159,12 @@ future coordinator would do.
 
 Store concise derived state and links only. Never store credentials, secrets, personal
 data, local absolute paths, raw logs, generated media, copied source code, or full
-duplicated issue or pull request bodies.
+duplicated issue or pull request bodies, or archived or transient session identifiers.
 
 Do not publish links to the private context repository in public Souvenirs issues, pull
 requests, or review comments. Link from private context state to the authoritative
-Souvenirs source instead.
+Souvenirs source instead. Repository-tracked instructions may name the private repository
+without linking to its contents.
 
 ## Select implementation slices
 
@@ -193,7 +200,7 @@ Every kickoff must state:
 - adjacent issues that must remain compatible
 - explicit non-goals
 - expected verification
-- the work-tracking obligations in `AGENTS.md`
+- the work-tracking obligations in the product repository's `AGENTS.md`
 - the requirement to report discoveries that change project assumptions
 
 When a child can change durable coordination state, its kickoff must also state:
@@ -236,7 +243,7 @@ plan before implementation begins.
 
 ### Before publication
 
-Follow `AGENTS.md`, including the required `rubber-duck` review.
+Follow the product repository's `AGENTS.md`, including the required `rubber-duck` review.
 
 Classify the work with
 [references/review-gates.md](references/review-gates.md). Use the planned behavior and
