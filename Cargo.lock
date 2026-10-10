@@ -832,6 +832,12 @@ dependencies = [
 [[package]]
 name = "souvenirs-storage"
 version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "time",
+]
 
 [[package]]
 name = "souvenirs-test-support"
@@ -879,6 +885,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5dfd88e563464686c916c7e46e623e520ddc6d79fa6641390f2e3fa86e83e885"
 dependencies = [
  "deranged",
+ "itoa",
  "num-conv",
  "powerfmt",
  "serde",
