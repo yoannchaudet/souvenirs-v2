@@ -576,6 +576,24 @@
               "$ref": "#/definitions/ImportReviewParameters"
             }
           }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "operation.inspect"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/CatalogPathParameters"
+            }
+          }
         }
       ],
       "required": [
@@ -853,6 +871,30 @@
               ]
             }
           }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "operation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/UnfinishedOperationResult"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "operation_inspection"
+              ]
+            }
+          }
         }
       ]
     },
@@ -862,11 +904,70 @@
         "name"
       ],
       "properties": {
+        "catalog_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "collection_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_path": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
+    },
+    "UnfinishedOperationResult": {
+      "type": "object",
+      "required": [
+        "collection_name",
+        "copied_count",
+        "operation_id",
+        "source_available",
+        "source_name",
+        "total_count"
+      ],
+      "properties": {
+        "collection_name": {
+          "type": "string"
+        },
+        "copied_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "source_available": {
+          "type": "boolean"
+        },
+        "source_name": {
+          "type": "string"
+        },
+        "total_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
     }
   }
 }

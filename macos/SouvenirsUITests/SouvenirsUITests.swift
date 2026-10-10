@@ -85,6 +85,76 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
+    func testExecutesImportAndShowsCompletedOutcome() throws {
+        let app = launch(scenario: "import-execution")
+        openImportReview(app)
+        app.descendants(matching: .any)["date-as-shown"].click()
+        let start = app.descendants(matching: .any)["start-import"]
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: start
+        )
+        waitForExpectations(timeout: 3)
+        app.typeKey(.return, modifierFlags: [])
+
+        XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["dismiss-import-completed"].exists)
+    }
+
+    @MainActor
+    func testExecutionSourceDisconnectShowsReconnectState() throws {
+        let app = launch(scenario: "import-source-unavailable")
+        openImportReview(app)
+        app.descendants(matching: .any)["date-as-shown"].click()
+        let start = app.descendants(matching: .any)["start-import"]
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: start
+        )
+        waitForExpectations(timeout: 3)
+        app.typeKey(.return, modifierFlags: [])
+
+        XCTAssertTrue(
+            app.staticTexts["import-source-unavailable"].waitForExistence(timeout: 5)
+        )
+    }
+
+    @MainActor
+    func testRoutesUnfinishedImportAndMissingSource() throws {
+        let app = launch(scenario: "import-recovery-missing")
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+
+        XCTAssertTrue(app.staticTexts["recovery-title"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["recovery-source-unavailable"].exists)
+        XCTAssertFalse(app.buttons["finish-recovery"].isEnabled)
+        XCTAssertTrue(app.buttons["cancel-recovery"].isEnabled)
+    }
+
+    @MainActor
+    func testFinishesDetectedRecovery() throws {
+        let app = launch(scenario: "import-recovery")
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(app.staticTexts["recovery-title"].waitForExistence(timeout: 5))
+        app.buttons["finish-recovery"].click()
+
+        XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    private func openImportReview(_ app: XCUIApplication) {
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
+        app.buttons["choose-import-folder"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["import-review-sheet"]
+                .waitForExistence(timeout: 5)
+        )
+    }
+
+    @MainActor
     private func launch(scenario: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [

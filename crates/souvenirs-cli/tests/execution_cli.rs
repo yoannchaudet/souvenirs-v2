@@ -86,6 +86,12 @@ fn operation_journal(catalog: &Path, operation_id: &str) -> PathBuf {
 fn simulate_interruption_after_first_copy(catalog: &Path, path: &Path) {
     let contents = fs::read_to_string(path).unwrap();
     let lines = contents.lines().collect::<Vec<_>>();
+    let metadata = lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| record["kind"] == "metadata")
+        .expect("journal should contain recovery metadata");
+    assert_eq!(metadata["collection_name"], "Vacation");
     let published_index = lines
         .iter()
         .position(|line| {

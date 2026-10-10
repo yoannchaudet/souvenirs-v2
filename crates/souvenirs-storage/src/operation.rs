@@ -95,6 +95,11 @@ pub enum OperationRecord {
         operation_id: String,
         plan: serde_json::Value,
     },
+    Metadata {
+        collection_name: String,
+        source_path: PathBuf,
+        total_count: usize,
+    },
     Transition {
         transition: DurableTransition,
     },
@@ -352,6 +357,22 @@ impl OperationJournal {
         Ok(path)
     }
 
+    pub fn record_metadata(
+        &mut self,
+        layout: &CatalogLayout,
+        lock: &CatalogLock,
+        collection_name: String,
+        source_path: PathBuf,
+        total_count: usize,
+    ) -> Result<(), OperationJournalError> {
+        self.ensure_active(layout, lock)?;
+        self.append(&OperationRecord::Metadata {
+            collection_name,
+            source_path,
+            total_count,
+        })
+    }
+
     pub fn complete(
         &mut self,
         layout: &CatalogLayout,
@@ -444,6 +465,43 @@ impl OperationJournal {
                 source,
             })
     }
+}
+
+pub fn read_operation_records(
+    path: impl AsRef<Path>,
+) -> Result<Vec<OperationRecord>, OperationJournalError> {
+    let path = path.as_ref();
+    let metadata = fs::symlink_metadata(path).map_err(|source| OperationJournalError::Io {
+        action: "inspect operation journal",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.file_type().is_file()
+        || path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+    {
+        return Err(OperationJournalError::InvalidJournalPath(
+            path.to_path_buf(),
+        ));
+    }
+    let bytes = fs::read(path).map_err(|source| OperationJournalError::Io {
+        action: "read operation journal",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut records = Vec::new();
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        records.push(serde_json::from_slice(line).map_err(|source| {
+            OperationJournalError::DeserializeRecord {
+                path: path.to_path_buf(),
+                line: index + 1,
+                source,
+            }
+        })?);
+    }
+    Ok(records)
 }
 
 fn ensure_lock(layout: &CatalogLayout, lock: &CatalogLock) -> Result<(), OperationJournalError> {

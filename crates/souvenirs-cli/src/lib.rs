@@ -845,6 +845,34 @@ fn import_execute(
         .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
     let mut journal = OperationJournal::create(&layout, &lock, &operation_id, &stored.import_plan)
         .map_err(|error| CliError::conflict(format!("create operation journal: {error}")))?;
+    let collection_name = stored
+        .import_plan
+        .document()
+        .steps
+        .iter()
+        .find_map(|step| match &step.action {
+            PlanStepKind::CopyFile { destination, .. } => destination
+                .get(1)
+                .map(|directory| collection_name_from_directory(directory)),
+            _ => None,
+        })
+        .unwrap_or_else(|| "Import".to_owned());
+    let total_count = stored
+        .import_plan
+        .document()
+        .steps
+        .iter()
+        .filter(|step| matches!(step.action, PlanStepKind::CopyFile { .. }))
+        .count();
+    journal
+        .record_metadata(
+            &layout,
+            &lock,
+            collection_name,
+            stored.source_root.clone(),
+            total_count,
+        )
+        .map_err(|error| CliError::operation(error.to_string()))?;
 
     let mut completed_steps = 0_usize;
     for step in &stored.import_plan.document().steps {
@@ -860,6 +888,7 @@ fn import_execute(
                     )
                     .map_err(|error| CliError::operation(error.to_string()))?;
             }
+
             PlanStepKind::CopyFile {
                 source_file_id,
                 destination,
@@ -931,6 +960,25 @@ fn import_execute(
             completed_steps,
         },
     )
+}
+
+fn collection_name_from_directory(directory: &str) -> String {
+    let Some((date, name)) = directory.split_once(' ') else {
+        return directory.to_owned();
+    };
+    let valid_date_prefix = date.len() == 10
+        && date.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 4 | 7) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        });
+    if valid_date_prefix && !name.is_empty() {
+        name.to_owned()
+    } else {
+        directory.to_owned()
+    }
 }
 
 fn operation_status(catalog: &Path, operation_id: &str) -> Result<(), CliError> {

@@ -4,10 +4,11 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 use souvenirs_protocol::{
     CancellationAccepted, CatalogResult, EngineMessage, HandshakeResult, ImportReviewResult,
-    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload, ProtocolError,
-    Request, RequestPayload, ResponseResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD,
-    CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD,
-    IMPORT_SCAN_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
+    OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
+    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
+    CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD,
+    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 fn main() {
@@ -37,6 +38,10 @@ enum Scenario {
     CatalogError,
     ImportFlow,
     ImportError,
+    ImportExecution,
+    ImportSourceUnavailable,
+    ImportRecovery,
+    ImportRecoveryMissing,
 }
 
 fn parse_scenario() -> Result<Scenario, String> {
@@ -62,6 +67,10 @@ fn parse_scenario() -> Result<Scenario, String> {
         Some("catalog-error") => Scenario::CatalogError,
         Some("import-flow") => Scenario::ImportFlow,
         Some("import-error") => Scenario::ImportError,
+        Some("import-execution") => Scenario::ImportExecution,
+        Some("import-source-unavailable") => Scenario::ImportSourceUnavailable,
+        Some("import-recovery") => Scenario::ImportRecovery,
+        Some("import-recovery-missing") => Scenario::ImportRecoveryMissing,
         _ => return Err(usage()),
     };
     if arguments.next().is_some() {
@@ -85,6 +94,10 @@ fn usage() -> String {
         "  catalog-error",
         "  import-flow",
         "  import-error",
+        "  import-execution",
+        "  import-source-unavailable",
+        "  import-recovery",
+        "  import-recovery-missing",
     ]
     .join("\n")
 }
@@ -128,6 +141,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     CATALOG_OPEN_METHOD.to_owned(),
                     IMPORT_SCAN_METHOD.to_owned(),
                     IMPORT_REVIEW_METHOD.to_owned(),
+                    OPERATION_INSPECT_METHOD.to_owned(),
                 ],
             }),
         ),
@@ -247,6 +261,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::OpenCatalog(parameters) => {
                         catalog_result(&mut output, request.id, parameters.path)?;
                     }
+                    RequestPayload::InspectOperation(_) => {
+                        operation_inspection(&mut output, request.id, None)?;
+                    }
                     _ => reject_request(&mut output, request)?,
                 }
             }
@@ -269,6 +286,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 match request.payload {
                     RequestPayload::OpenCatalog(parameters) => {
                         catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::InspectOperation(_) => {
+                        operation_inspection(&mut output, request.id, None)?;
                     }
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
@@ -313,12 +333,137 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::OpenCatalog(parameters) => {
                         catalog_result(&mut output, request.id, parameters.path)?;
                     }
+                    RequestPayload::InspectOperation(_) => {
+                        operation_inspection(&mut output, request.id, None)?;
+                    }
                     RequestPayload::ScanImport(_) => write_protocol_error(
                         &mut output,
                         request.id,
                         "source_unavailable",
                         "The source is no longer available. Reconnect it and try again.",
                     )?,
+                    _ => reject_request(&mut output, request)?,
+                }
+            }
+        }
+        Scenario::ImportExecution | Scenario::ImportSourceUnavailable => {
+            while let Some(request) = next_request(&mut input, &mut output)? {
+                match request.payload {
+                    RequestPayload::OpenCatalog(parameters) => {
+                        catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::InspectOperation(_) => {
+                        operation_inspection(&mut output, request.id, None)?;
+                    }
+                    RequestPayload::ScanImport(parameters) => {
+                        import_scan_result(&mut output, request.id, parameters.source_path)?;
+                    }
+                    RequestPayload::ReviewImport(parameters) => {
+                        import_review(&mut output, request.id, parameters)?;
+                    }
+                    RequestPayload::StartOperation(parameters)
+                        if parameters.name == "import.execute" =>
+                    {
+                        accept_operation(&mut output, request.id)?;
+                        write_event(
+                            &mut output,
+                            0,
+                            OperationEventPayload::Started {
+                                name: "import.execute".to_owned(),
+                            },
+                        )?;
+                        write_event(
+                            &mut output,
+                            1,
+                            OperationEventPayload::Progress {
+                                completed_units: 7,
+                                total_units: Some(12),
+                                message: Some("Reading back and checking each copy…".to_owned()),
+                            },
+                        )?;
+                        let terminal = if matches!(scenario, Scenario::ImportSourceUnavailable) {
+                            OperationEventPayload::Failed {
+                                error: ProtocolError::new(
+                                    "source_unavailable",
+                                    "The source was disconnected.",
+                                ),
+                            }
+                        } else {
+                            OperationEventPayload::Completed {
+                                result: json!({
+                                    "copied_count": 12,
+                                    "skipped_count": 3,
+                                    "left_on_source_count": 2
+                                }),
+                            }
+                        };
+                        write_event(&mut output, 2, terminal)?;
+                    }
+                    _ => reject_request(&mut output, request)?,
+                }
+            }
+        }
+        Scenario::ImportRecovery | Scenario::ImportRecoveryMissing => {
+            while let Some(request) = next_request(&mut input, &mut output)? {
+                match request.payload {
+                    RequestPayload::OpenCatalog(parameters) => {
+                        catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::InspectOperation(_) => operation_inspection(
+                        &mut output,
+                        request.id,
+                        Some(UnfinishedOperationResult {
+                            operation_id: "operation-1".to_owned(),
+                            collection_name: "Dolomites".to_owned(),
+                            source_name: "EOS_DIGITAL".to_owned(),
+                            copied_count: 7,
+                            total_count: 12,
+                            source_available: matches!(scenario, Scenario::ImportRecovery),
+                        }),
+                    )?,
+                    RequestPayload::StartOperation(parameters)
+                        if parameters.name == "operation.recover" =>
+                    {
+                        accept_operation(&mut output, request.id)?;
+                        write_event(
+                            &mut output,
+                            0,
+                            OperationEventPayload::Started {
+                                name: "operation.recover".to_owned(),
+                            },
+                        )?;
+                        write_event(
+                            &mut output,
+                            1,
+                            OperationEventPayload::Progress {
+                                completed_units: 10,
+                                total_units: Some(12),
+                                message: Some("Finishing verified copies…".to_owned()),
+                            },
+                        )?;
+                        write_event(
+                            &mut output,
+                            2,
+                            OperationEventPayload::Completed {
+                                result: json!({
+                                    "copied_count": 12,
+                                    "skipped_count": 3,
+                                    "left_on_source_count": 2
+                                }),
+                            },
+                        )?;
+                    }
+                    RequestPayload::CancelOperation(_) => {
+                        write_message(
+                            &mut output,
+                            &EngineMessage::success(
+                                request.id,
+                                ResponseResult::CancellationAccepted(CancellationAccepted {
+                                    operation_id: "operation-1".to_owned(),
+                                }),
+                            ),
+                        )?;
+                    }
                     _ => reject_request(&mut output, request)?,
                 }
             }
@@ -393,13 +538,61 @@ fn reject_request(output: &mut impl Write, request: Request) -> io::Result<()> {
         | RequestPayload::CreateCatalog(_)
         | RequestPayload::OpenCatalog(_)
         | RequestPayload::ScanImport(_)
-        | RequestPayload::ReviewImport(_) => write_protocol_error(
+        | RequestPayload::ReviewImport(_)
+        | RequestPayload::InspectOperation(_) => write_protocol_error(
             output,
             request.id,
             "unsupported_catalog_request",
             "Catalog requests are not supported in this scenario.",
         ),
     }
+}
+
+fn import_review(
+    output: &mut impl Write,
+    request_id: String,
+    parameters: souvenirs_protocol::ImportReviewParameters,
+) -> io::Result<()> {
+    let scan = fake_scan(parameters.source_path);
+    let can_start = parameters.date_resolution.is_some();
+    write_message(
+        output,
+        &EngineMessage::success(
+            request_id,
+            ResponseResult::ImportReview(Box::new(ImportReviewResult {
+                scan,
+                collection_name: parameters.collection_name.clone(),
+                destination_mode: parameters.destination_mode,
+                destination_path: format!(
+                    "{}/2026/{} {}",
+                    parameters.catalog_path, parameters.accepted_date, parameters.collection_name
+                ),
+                accepted_date: parameters.accepted_date,
+                date_resolution: parameters.date_resolution,
+                required_decision_count: usize::from(!can_start),
+                transfer_count: 12,
+                skipped_count: 3,
+                left_on_source_count: 2,
+                operation_count: 14,
+                required_space_bytes: 41_000_000_000,
+                can_start,
+            })),
+        ),
+    )
+}
+
+fn operation_inspection(
+    output: &mut impl Write,
+    request_id: String,
+    operation: Option<UnfinishedOperationResult>,
+) -> io::Result<()> {
+    write_message(
+        output,
+        &EngineMessage::success(
+            request_id,
+            ResponseResult::OperationInspection(OperationInspectionResult { operation }),
+        ),
+    )
 }
 
 fn fake_scan(source_path: String) -> ImportScanResult {
