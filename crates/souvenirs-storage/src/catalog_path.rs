@@ -59,6 +59,9 @@ pub(crate) fn resolve_catalog_entry(
     })
 }
 
+pub fn validate_directory(layout: &CatalogLayout, path: &Path) -> Result<(), CatalogPathError> {
+    resolve_catalog_entry(layout, &path.join(".containment-check")).map(|_| ())
+}
 pub(crate) fn validate_catalog_relative(path: &Path) -> Result<(), CatalogPathError> {
     if path.as_os_str().is_empty()
         || path.is_absolute()

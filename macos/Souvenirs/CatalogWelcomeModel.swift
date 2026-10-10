@@ -265,6 +265,7 @@ final class ImportPlanningModel: ObservableObject {
     var canStart: Bool {
         guard let review else { return false }
         return review.canStart
+            && review.reviewedPlan != nil
             && review.collectionName == collectionName
             && review.destinationMode == destinationMode
             && review.acceptedDate == acceptedDate
@@ -275,7 +276,7 @@ final class ImportPlanningModel: ObservableObject {
 
     var title: String {
         guard let scan else { return "Reading this source…" }
-        return "\(scan.mediaCount) new photos and videos will be copied into \(destinationDescription)"
+        return "\(review?.transferCount ?? scan.mediaCount) new photos and videos will be copied into \(destinationDescription)"
     }
 
     var destinationDescription: String {
@@ -290,7 +291,7 @@ final class ImportPlanningModel: ObservableObject {
             let scan = try await engine.scanImport(sourcePath: sourcePath)
             self.scan = scan
             collectionName = scan.suggestedCollectionName
-            acceptedDate = scan.suggestedAcceptedDate
+            acceptedDate = scan.suggestedAcceptedDate ?? ""
             await refreshReview()
         } catch {
             isLoading = false
@@ -319,6 +320,8 @@ final class ImportPlanningModel: ObservableObject {
                 dateResolution: dateResolution
             )
             guard generation == reviewGeneration else { return }
+            scan = result.scan
+            self.acceptedDate = result.acceptedDate
             review = result
         } catch {
             guard generation == reviewGeneration else { return }

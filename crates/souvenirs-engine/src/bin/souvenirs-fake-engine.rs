@@ -4,7 +4,8 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 use souvenirs_protocol::{
     CancellationAccepted, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
-    ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
+    ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportReviewResult,
+    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
     OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
     UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
     CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
@@ -319,6 +320,8 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                     operation_count: 14,
                                     required_space_bytes: 41_000_000_000,
                                     can_start,
+                                    reviewed_plan: can_start
+                                        .then(|| "fake-reviewed-plan".to_owned()),
                                 })),
                             ),
                         )?;
@@ -581,6 +584,7 @@ fn import_review(
                 operation_count: 14,
                 required_space_bytes: 41_000_000_000,
                 can_start,
+                reviewed_plan: can_start.then(|| "fake-reviewed-plan".to_owned()),
             })),
         ),
     )
@@ -612,7 +616,15 @@ fn fake_scan(source_path: String) -> ImportScanResult {
         uncertain_time_count: 4,
         total_bytes: 41_000_000_000,
         suggested_collection_name: "Dolomites".to_owned(),
-        suggested_accepted_date: "2026-10-10".to_owned(),
+        suggested_accepted_date: Some("2026-10-10".to_owned()),
+        suggested_range_end: Some("2026-10-12".to_owned()),
+        pending_item_count: 4,
+        unresolved_item_count: 0,
+        datetime_sources: vec![ImportDateSourceSummary {
+            source: ImportDateSource::ContainerCreationTime,
+            state: ImportDateState::NeedsConfirmation,
+            item_count: 4,
+        }],
     }
 }
 
@@ -625,7 +637,7 @@ fn import_scan_result(
         output,
         &EngineMessage::success(
             request_id,
-            ResponseResult::ImportScan(fake_scan(source_path)),
+            ResponseResult::ImportScan(Box::new(fake_scan(source_path))),
         ),
     )
 }

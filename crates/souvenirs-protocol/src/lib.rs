@@ -9,7 +9,7 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 // This is the oldest macOS client version supported by the engine.
-pub const MINIMUM_CLIENT_VERSION: &str = "0.1.0";
+pub const MINIMUM_CLIENT_VERSION: &str = "0.2.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
 pub const START_OPERATION_METHOD: &str = "operation.start";
 pub const CANCEL_OPERATION_METHOD: &str = "operation.cancel";
@@ -117,14 +117,7 @@ pub struct CancelOperationParameters {
 #[serde(deny_unknown_fields, tag = "name")]
 pub enum StartOperationParameters {
     #[serde(rename = "import.execute")]
-    ImportExecute {
-        catalog_path: String,
-        source_path: String,
-        collection_name: String,
-        destination_mode: ImportDestinationMode,
-        accepted_date: String,
-        date_resolution: Option<ImportDateResolution>,
-    },
+    ImportExecute { reviewed_plan: String },
     #[serde(rename = "operation.recover")]
     Recover {
         catalog_path: String,
@@ -254,7 +247,7 @@ pub enum ResponseResult {
     OperationAccepted(OperationAccepted),
     CancellationAccepted(CancellationAccepted),
     Catalog(CatalogResult),
-    ImportScan(ImportScanResult),
+    ImportScan(Box<ImportScanResult>),
     ImportReview(Box<ImportReviewResult>),
     OperationInspection(OperationInspectionResult),
 }
@@ -297,7 +290,35 @@ pub struct ImportScanResult {
     pub uncertain_time_count: usize,
     pub total_bytes: u64,
     pub suggested_collection_name: String,
-    pub suggested_accepted_date: String,
+    pub suggested_accepted_date: Option<String>,
+    pub suggested_range_end: Option<String>,
+    pub pending_item_count: usize,
+    pub unresolved_item_count: usize,
+    pub datetime_sources: Vec<ImportDateSourceSummary>,
+}
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct ImportDateSourceSummary {
+    pub source: ImportDateSource,
+    pub state: ImportDateState,
+    pub item_count: usize,
+}
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportDateSource {
+    ExifDateTimeOriginal,
+    ExifDateTimeDigitized,
+    QuickTimeCreationDate,
+    XmpDateCreated,
+    XmpExifDateTimeOriginal,
+    ContainerCreationTime,
+    GoogleTakeoutPhotoTakenTime,
+    FilenamePattern,
+}
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportDateState {
+    Accepted,
+    NeedsConfirmation,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -315,6 +336,7 @@ pub struct ImportReviewResult {
     pub operation_count: usize,
     pub required_space_bytes: u64,
     pub can_start: bool,
+    pub reviewed_plan: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

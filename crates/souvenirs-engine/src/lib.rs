@@ -6,18 +6,20 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 use souvenirs_application::{
     CatalogIntent as ApplicationIntent, CatalogService, DateResolution, DestinationMode,
+    ImportDateSource as ApplicationDateSource, ImportDateState as ApplicationDateState,
     ImportExecutionRequest, ImportExecutionService, ImportPlanningService, ImportRecoveryMode,
     ImportRecoveryService, ImportReviewRequest, OperationInspectionService, OperationProgress,
     PreparedImport, RecoveryOutcome,
 };
 use souvenirs_protocol::{
     CatalogIntent, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
-    ImportDateResolution, ImportDestinationMode, ImportReviewResult, ImportScanResult,
-    OperationAccepted, OperationEvent, OperationEventPayload, OperationInspectionResult,
-    ProtocolError, Request, RequestPayload, ResponseResult, StartOperationParameters,
-    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
-    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
-    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    ImportDateResolution, ImportDateSource, ImportDateSourceSummary, ImportDateState,
+    ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent,
+    OperationEventPayload, OperationInspectionResult, ProtocolError, Request, RequestPayload,
+    ResponseResult, StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
+    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD,
+    IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
+    START_OPERATION_METHOD,
 };
 
 pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -298,36 +300,18 @@ impl Connection {
         parameters: StartOperationParameters,
     ) -> EngineAction {
         match parameters {
-            StartOperationParameters::ImportExecute {
-                catalog_path,
-                source_path,
-                collection_name,
-                destination_mode,
-                accepted_date,
-                date_resolution,
-            } => match ImportExecutionService::prepare(ImportExecutionRequest {
-                catalog_path: catalog_path.into(),
-                source_path: source_path.into(),
-                collection_name,
-                destination_mode: match destination_mode {
-                    ImportDestinationMode::Create => DestinationMode::Create,
-                    ImportDestinationMode::Existing => DestinationMode::Existing,
-                },
-                accepted_date,
-                date_resolution: date_resolution.map(|resolution| match resolution {
-                    ImportDateResolution::AsShown => DateResolution::AsShown,
-                    ImportDateResolution::ConvertFromUtc => DateResolution::ConvertFromUtc,
-                }),
-            }) {
-                Ok(prepared) => EngineAction::Execute {
-                    request_id,
-                    prepared: Box::new(prepared),
-                },
-                Err(error) => EngineAction::Message(EngineMessage::error(
-                    Some(request_id),
-                    ProtocolError::new(error.code(), error.to_string()),
-                )),
-            },
+            StartOperationParameters::ImportExecute { reviewed_plan } => {
+                match ImportExecutionService::prepare(ImportExecutionRequest { reviewed_plan }) {
+                    Ok(prepared) => EngineAction::Execute {
+                        request_id,
+                        prepared: Box::new(prepared),
+                    },
+                    Err(error) => EngineAction::Message(EngineMessage::error(
+                        Some(request_id),
+                        ProtocolError::new(error.code(), error.to_string()),
+                    )),
+                }
+            }
             StartOperationParameters::Recover {
                 catalog_path,
                 operation_id,
@@ -492,6 +476,9 @@ fn catalog_response(
 }
 
 fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportScanResult {
+    use ApplicationDateSource as A;
+    use ImportDateSource as P;
+
     ImportScanResult {
         source_path: scan.source_path.to_string_lossy().into_owned(),
         source_name: scan.source_name,
@@ -504,6 +491,30 @@ fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportS
         total_bytes: scan.total_bytes,
         suggested_collection_name: scan.suggested_collection_name,
         suggested_accepted_date: scan.suggested_accepted_date,
+        suggested_range_end: scan.suggested_range_end,
+        pending_item_count: scan.pending_item_count,
+        unresolved_item_count: scan.unresolved_item_count,
+        datetime_sources: scan
+            .datetime_sources
+            .into_iter()
+            .map(|summary| ImportDateSourceSummary {
+                source: match summary.source {
+                    A::ExifDateTimeOriginal => P::ExifDateTimeOriginal,
+                    A::ExifDateTimeDigitized => P::ExifDateTimeDigitized,
+                    A::QuickTimeCreationDate => P::QuickTimeCreationDate,
+                    A::XmpDateCreated => P::XmpDateCreated,
+                    A::XmpExifDateTimeOriginal => P::XmpExifDateTimeOriginal,
+                    A::ContainerCreationTime => P::ContainerCreationTime,
+                    A::GoogleTakeoutPhotoTakenTime => P::GoogleTakeoutPhotoTakenTime,
+                    A::FilenamePattern => P::FilenamePattern,
+                },
+                state: match summary.state {
+                    ApplicationDateState::Accepted => ImportDateState::Accepted,
+                    ApplicationDateState::NeedsConfirmation => ImportDateState::NeedsConfirmation,
+                },
+                item_count: summary.item_count,
+            })
+            .collect(),
     }
 }
 
@@ -517,7 +528,7 @@ fn import_scan_response(
     match result {
         Ok(scan) => EngineMessage::success(
             request_id,
-            ResponseResult::ImportScan(import_scan_result(scan)),
+            ResponseResult::ImportScan(Box::new(import_scan_result(scan))),
         ),
         Err(error) => EngineMessage::error(
             Some(request_id),
@@ -553,6 +564,7 @@ fn import_review_response(
                 operation_count: review.operation_count,
                 required_space_bytes: review.required_space_bytes,
                 can_start: review.can_start,
+                reviewed_plan: review.reviewed_plan,
             })),
         ),
         Err(error) => EngineMessage::error(
@@ -617,9 +629,12 @@ fn request_id(line: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{fs, io::Cursor};
 
     use serde_json::{json, Value};
+    use souvenirs_application::{
+        CatalogService, DateResolution, DestinationMode, ImportPlanningService, ImportReviewRequest,
+    };
     use souvenirs_protocol::PROTOCOL_VERSION;
 
     use super::run_engine;
@@ -640,7 +655,7 @@ mod tests {
                 "type": "handshake",
                 "engine_version": env!("CARGO_PKG_VERSION"),
                 "protocol_version": PROTOCOL_VERSION,
-                "compatible_client_version": "0.1.0",
+                "compatible_client_version": "0.2.0",
                 "capabilities": [
                     "operation.cancel",
                     "catalog.validate",
@@ -839,6 +854,57 @@ mod tests {
 
         assert_eq!(responses[1]["error"]["code"], "invalid_request");
         assert_eq!(responses[1]["id"], "request-2");
+    }
+
+    #[test]
+    fn operation_start_rejects_a_removed_or_replaced_reviewed_existing_collection() {
+        use std::os::unix::fs::symlink;
+        let temporary = tempfile::tempdir().unwrap();
+        let [catalog, source] = ["catalog", "source"].map(|name| temporary.path().join(name));
+        for path in [&catalog, &source] {
+            fs::create_dir(path).unwrap();
+        }
+        fs::write(source.join("IMG_20261010_101112.jpg"), b"photo").unwrap();
+        CatalogService::create(&catalog, "Catalog").unwrap();
+        let collection = catalog.join("2026/2026-10-10 Import");
+        fs::create_dir_all(&collection).unwrap();
+        let journal = catalog.join(".souvenirs/journal");
+        let request = ImportReviewRequest {
+            catalog_path: catalog.clone(),
+            source_path: source.clone(),
+            collection_name: "Import".to_owned(),
+            destination_mode: DestinationMode::Existing,
+            accepted_date: "2026-10-10".to_owned(),
+            date_resolution: Some(DateResolution::AsShown),
+        };
+        fs::remove_dir(&collection).unwrap();
+        symlink(&source, &collection).unwrap();
+        assert!(ImportPlanningService::review(request.clone()).is_err());
+        fs::remove_file(&collection).unwrap();
+        fs::create_dir(&collection).unwrap();
+        let review = ImportPlanningService::review(request).unwrap();
+        for replacement in ["missing", "directory", "symlink"] {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if collection.exists() {
+                fs::remove_dir(&collection).unwrap();
+            }
+            match replacement {
+                "directory" => fs::create_dir(&collection).unwrap(),
+                "symlink" => symlink(&source, &collection).unwrap(),
+                _ => {}
+            }
+            let response = match super::Connection::default().start_operation(
+                "request-2".to_owned(),
+                super::StartOperationParameters::ImportExecute {
+                    reviewed_plan: review.reviewed_plan.clone().unwrap(),
+                },
+            ) {
+                super::EngineAction::Message(message) => serde_json::to_value(message).unwrap(),
+                _ => panic!("operation was accepted"),
+            };
+            assert_eq!(response["error"]["code"], "operation_conflict");
+            assert_eq!(fs::read_dir(&journal).unwrap().count(), 1);
+        }
     }
 
     #[test]

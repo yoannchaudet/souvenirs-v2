@@ -112,7 +112,11 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             uncertainTimeCount: 4,
             totalBytes: 41_000_000_000,
             suggestedCollectionName: "Dolomites",
-            suggestedAcceptedDate: "2026-10-10"
+            suggestedAcceptedDate: "2026-10-10",
+            suggestedRangeEnd: "2026-10-12",
+            pendingItemCount: 4,
+            unresolvedItemCount: 0,
+            datetimeSources: [.init(source: .containerCreationTime, state: .needsConfirmation, itemCount: 4)]
         )
     }
 
@@ -141,7 +145,8 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             leftOnSourceCount: 2,
             operationCount: 14,
             requiredSpaceBytes: 41_000_000_000,
-            canStart: dateResolution != nil
+            canStart: dateResolution != nil,
+            reviewedPlan: dateResolution == nil ? nil : "reviewed-plan"
         )
     }
 
