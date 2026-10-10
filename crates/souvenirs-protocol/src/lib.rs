@@ -8,6 +8,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 // Advance only when the oldest compatible macOS client changes.
 pub const COMPATIBLE_CLIENT_VERSION: &str = "0.1.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
+pub const START_OPERATION_METHOD: &str = "operation.start";
 pub const CANCEL_OPERATION_METHOD: &str = "operation.cancel";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -23,6 +24,8 @@ pub struct Request {
 pub enum RequestPayload {
     #[serde(rename = "handshake")]
     Handshake(HandshakeParameters),
+    #[serde(rename = "operation.start")]
+    StartOperation(StartOperationParameters),
     #[serde(rename = "operation.cancel")]
     CancelOperation(CancelOperationParameters),
 }
@@ -37,6 +40,12 @@ pub struct HandshakeParameters {
 #[serde(deny_unknown_fields)]
 pub struct CancelOperationParameters {
     pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartOperationParameters {
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -312,12 +321,14 @@ mod tests {
                 let request = decode_canonically::<Request>(value);
                 assert!(matches!(
                     request.payload,
-                    RequestPayload::Handshake(_) | RequestPayload::CancelOperation(_)
+                    RequestPayload::Handshake(_)
+                        | RequestPayload::StartOperation(_)
+                        | RequestPayload::CancelOperation(_)
                 ));
                 request_count += 1;
             }
         }
-        assert_eq!(request_count, 2);
+        assert_eq!(request_count, 3);
         assert_eq!(engine_message_count, 9);
 
         let schema_value =

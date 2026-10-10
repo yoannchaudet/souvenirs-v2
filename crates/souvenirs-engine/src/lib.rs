@@ -97,6 +97,13 @@ impl Connection {
                     }),
                 )
             }
+            RequestPayload::StartOperation(parameters) => EngineMessage::error(
+                Some(request.id),
+                ProtocolError::new(
+                    "unsupported_operation",
+                    format!("operation {:?} is not implemented", parameters.name),
+                ),
+            ),
 
             RequestPayload::CancelOperation(parameters) => EngineMessage::error(
                 Some(request.id),
@@ -354,6 +361,24 @@ mod tests {
             responses[1]["error"]["data"]["operation_id"],
             "operation-missing"
         );
+    }
+
+    #[test]
+    fn unsupported_operation_is_structured() {
+        let input = format!(
+            "{}{}",
+            request("request-1", "handshake", json!({"client_version": "0.1.0"})),
+            request(
+                "request-2",
+                "operation.start",
+                json!({"name": "import.scan"})
+            )
+        );
+
+        let responses = run_lines(input);
+
+        assert_eq!(responses[1]["error"]["code"], "unsupported_operation");
+        assert_eq!(responses[1]["id"], "request-2");
     }
 
     fn request(id: &str, method: &str, params: Value) -> String {
