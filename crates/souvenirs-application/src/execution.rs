@@ -4,7 +4,6 @@ use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Read;
 use std::num::NonZeroU32;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,7 +17,7 @@ use souvenirs_storage::{
 };
 use time::Date;
 
-use crate::{planning::PlannedImport, CatalogService, SourceSnapshotEntry};
+use crate::{directory_identity, planning::PlannedImport, CatalogService, SourceSnapshotEntry};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportExecutionRequest {
@@ -233,7 +232,7 @@ pub(crate) fn encode_reviewed_plan(
                 step_id: format!("directory-{}", index + 1),
                 path: directory.path.clone(),
                 create: directory.create,
-                inode: directory.inode,
+                identity: directory.identity.clone(),
             })
             .collect(),
         copies,
@@ -272,8 +271,9 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
         let matches = path.metadata().is_ok_and(|metadata| {
             metadata.is_dir()
                 && directory
-                    .inode
-                    .map_or(true, |inode| metadata.ino() == inode)
+                    .identity
+                    .as_ref()
+                    .map_or(true, |identity| directory_identity(&metadata) == *identity)
         });
         if (directory.create && path.exists()) || (!directory.create && !matches) {
             return Err(ImportExecutionError::Conflict(
@@ -449,7 +449,7 @@ struct ExecutionDirectory {
     path: PathBuf,
     create: bool,
     #[serde(default)]
-    inode: Option<u64>,
+    identity: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

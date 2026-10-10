@@ -879,6 +879,7 @@ mod tests {
         .unwrap();
         for replaced in [false, true] {
             if replaced {
+                std::thread::sleep(std::time::Duration::from_millis(20));
                 fs::create_dir(&collection).unwrap();
             } else {
                 fs::remove_dir(&collection).unwrap();

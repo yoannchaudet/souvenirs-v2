@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use souvenirs_domain::catalog::{
@@ -15,8 +14,9 @@ use crate::execution::{
     existing_manifest,
 };
 use crate::{
-    dated_collection_components, inspect_source, scan_summary, CatalogService, DateResolution,
-    DestinationMode, ImportPlanningError, ImportReview, ImportReviewRequest, SourceSnapshotEntry,
+    dated_collection_components, directory_identity, inspect_source, scan_summary, CatalogService,
+    DateResolution, DestinationMode, ImportPlanningError, ImportReview, ImportReviewRequest,
+    SourceSnapshotEntry,
 };
 
 #[derive(Clone, Debug)]
@@ -35,7 +35,7 @@ pub(crate) struct PlannedImport {
 pub(crate) struct PlannedDirectory {
     pub(crate) path: PathBuf,
     pub(crate) create: bool,
-    pub(crate) inode: Option<u64>,
+    pub(crate) identity: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -259,23 +259,20 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
             PlannedDirectory {
                 path: PathBuf::from(&year),
                 create: !request.catalog_path.join(&year).exists(),
-                inode: None,
+                identity: None,
             },
             PlannedDirectory {
                 path: PathBuf::from(&year).join(&collection_directory),
                 create: true,
-                inode: None,
+                identity: None,
             },
         ],
         DestinationMode::Existing => vec![PlannedDirectory {
             path: PathBuf::from(&year).join(&collection_directory),
             create: false,
-            inode: Some(
-                collection_path
-                    .metadata()
-                    .map_err(|error| ImportPlanningError::InvalidPlan(error.to_string()))?
-                    .ino(),
-            ),
+            identity: Some(directory_identity(&collection_path.metadata().map_err(
+                |error| ImportPlanningError::InvalidPlan(error.to_string()),
+            )?)),
         }],
     };
 

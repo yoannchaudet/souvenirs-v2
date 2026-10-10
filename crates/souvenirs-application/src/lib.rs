@@ -13,6 +13,7 @@ pub use souvenirs_domain as domain;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -375,6 +376,16 @@ pub(crate) struct SourceSnapshotEntry {
     pub path: PathBuf,
     pub size_bytes: u64,
     pub sha256: String,
+}
+
+pub(crate) fn directory_identity(metadata: &fs::Metadata) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.ctime(),
+        metadata.ctime_nsec()
+    )
 }
 
 pub(crate) fn inspect_source(
