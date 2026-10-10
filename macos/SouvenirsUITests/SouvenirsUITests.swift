@@ -53,9 +53,9 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
         app.buttons["choose-import-folder"].click()
 
-        XCTAssertTrue(app.otherElements["import-review-sheet"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["import-review-sheet"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["import-review-title"].exists)
-        XCTAssertTrue(app.otherElements["import-date-decision"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["import-date-decision"].exists)
         XCTAssertFalse(app.buttons["start-import"].isEnabled)
 
         app.buttons["date-as-shown"].click()
@@ -66,7 +66,7 @@ final class SouvenirsUITests: XCTestCase {
         )
         waitForExpectations(timeout: 3)
         app.disclosureTriangles["import-details"].click()
-        XCTAssertTrue(app.otherElements["import-operation-summary"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["import-operation-summary"].exists)
         start.click()
         XCTAssertEqual(start.label, "Plan Ready")
     }
