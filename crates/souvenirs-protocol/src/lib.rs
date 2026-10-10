@@ -1,12 +1,15 @@
 //! Versioned, newline-delimited JSON messages exchanged with the engine process.
 
+use std::fmt;
+use std::str::FromStr;
+
 use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 1;
-// Advance only when the oldest compatible macOS client changes.
-pub const COMPATIBLE_CLIENT_VERSION: &str = "0.1.0";
+// This is the oldest macOS client version supported by the engine.
+pub const MINIMUM_CLIENT_VERSION: &str = "0.1.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
 pub const START_OPERATION_METHOD: &str = "operation.start";
 pub const CANCEL_OPERATION_METHOD: &str = "operation.cancel";
@@ -16,6 +19,56 @@ pub const CATALOG_OPEN_METHOD: &str = "catalog.open";
 pub const IMPORT_SCAN_METHOD: &str = "import.scan";
 pub const IMPORT_REVIEW_METHOD: &str = "import.review";
 pub const OPERATION_INSPECT_METHOD: &str = "operation.inspect";
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ClientVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+impl FromStr for ClientVersion {
+    type Err = InvalidClientVersion;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let mut components = value.split('.');
+        let major = parse_version_component(components.next())?;
+        let minor = parse_version_component(components.next())?;
+        let patch = parse_version_component(components.next())?;
+        if components.next().is_some() {
+            return Err(InvalidClientVersion);
+        }
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidClientVersion;
+
+impl fmt::Display for InvalidClientVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "client version must contain three unsigned decimal components without leading zeros",
+        )
+    }
+}
+
+impl std::error::Error for InvalidClientVersion {}
+
+fn parse_version_component(component: Option<&str>) -> Result<u64, InvalidClientVersion> {
+    let component = component.ok_or(InvalidClientVersion)?;
+    if component.is_empty()
+        || (component.len() > 1 && component.starts_with('0'))
+        || !component.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(InvalidClientVersion);
+    }
+    component.parse().map_err(|_| InvalidClientVersion)
+}
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Request {
@@ -357,9 +410,32 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        protocol_schema, EngineMessage, HandshakeResult, OperationEvent, OperationEventPayload,
-        ProtocolError, Request, RequestPayload, ResponseResult, PROTOCOL_VERSION,
+        protocol_schema, ClientVersion, EngineMessage, HandshakeResult, OperationEvent,
+        OperationEventPayload, ProtocolError, Request, RequestPayload, ResponseResult,
+        PROTOCOL_VERSION,
     };
+
+    #[test]
+    fn client_versions_compare_numeric_components() {
+        let older: ClientVersion = "0.9.10".parse().expect("version should parse");
+        let newer: ClientVersion = "0.10.0".parse().expect("version should parse");
+
+        assert!(newer > older);
+        assert_eq!(
+            "1.2.3".parse::<ClientVersion>(),
+            "1.2.3".parse::<ClientVersion>()
+        );
+    }
+
+    #[test]
+    fn malformed_client_versions_are_rejected() {
+        for version in ["", "1", "1.2", "1.2.3.4", "1.02.3", "1.a.3", "-1.2.3"] {
+            assert!(
+                version.parse::<ClientVersion>().is_err(),
+                "{version:?} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn success_response_has_a_typed_result() {

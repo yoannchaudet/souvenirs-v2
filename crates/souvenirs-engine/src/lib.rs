@@ -11,13 +11,13 @@ use souvenirs_application::{
     PreparedImport, RecoveryOutcome,
 };
 use souvenirs_protocol::{
-    CatalogIntent, CatalogResult, EngineMessage, HandshakeResult, ImportDateResolution,
-    ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent,
-    OperationEventPayload, OperationInspectionResult, ProtocolError, Request, RequestPayload,
-    ResponseResult, StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
-    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION,
-    IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
-    START_OPERATION_METHOD,
+    CatalogIntent, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
+    ImportDateResolution, ImportDestinationMode, ImportReviewResult, ImportScanResult,
+    OperationAccepted, OperationEvent, OperationEventPayload, OperationInspectionResult,
+    ProtocolError, Request, RequestPayload, ResponseResult, StartOperationParameters,
+    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
+    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
+    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -158,12 +158,12 @@ impl Connection {
                         ),
                     ));
                 }
-                if parameters.client_version.trim().is_empty() {
+                if parameters.client_version.parse::<ClientVersion>().is_err() {
                     return EngineAction::Message(EngineMessage::error(
                         Some(request.id),
                         ProtocolError::new(
                             "invalid_client_version",
-                            "client version must not be empty",
+                            "client version must use major.minor.patch unsigned decimal syntax",
                         ),
                     ));
                 }
@@ -173,7 +173,7 @@ impl Connection {
                     ResponseResult::Handshake(HandshakeResult {
                         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
                         protocol_version: PROTOCOL_VERSION,
-                        compatible_client_version: COMPATIBLE_CLIENT_VERSION.to_owned(),
+                        compatible_client_version: MINIMUM_CLIENT_VERSION.to_owned(),
                         capabilities: vec![
                             CANCEL_OPERATION_METHOD.to_owned(),
                             CATALOG_VALIDATE_METHOD.to_owned(),
@@ -774,12 +774,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_client_version_is_rejected() {
-        let input = request("request-1", "handshake", json!({"client_version": ""}));
+    fn malformed_client_version_is_rejected() {
+        for client_version in ["", "0.1", "0.01.0", "0.a.0"] {
+            let input = request(
+                "request-1",
+                "handshake",
+                json!({"client_version": client_version}),
+            );
 
-        let response = run(input);
+            let response = run(input);
 
-        assert_eq!(response["error"]["code"], "invalid_client_version");
+            assert_eq!(response["error"]["code"], "invalid_client_version");
+        }
     }
 
     #[test]
