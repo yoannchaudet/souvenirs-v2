@@ -7,5 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+clap = { version = "=4.5.20", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+souvenirs-domain = { path = "../souvenirs-domain" }
+souvenirs-storage = { path = "../souvenirs-storage" }
+time = { workspace = true, features = ["macros", "parsing"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
