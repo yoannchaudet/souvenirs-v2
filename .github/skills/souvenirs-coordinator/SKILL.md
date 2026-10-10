@@ -54,6 +54,7 @@ The coordinator owns:
 - cross-cutting decisions
 - conditional specialist review selection
 - milestone and end-to-end reviews
+- merge readiness and merge sequencing
 - backlog reconciliation after implementation
 
 Each child session owns:
@@ -189,7 +190,28 @@ build, run, and observe the application when required to collect evidence. The
 implementation session owns fixes. The coordinator reconciles overlapping or conflicting
 findings and prevents reviewers from expanding the approved scope without evidence.
 
-Do not merge pull requests. The user owns merge decisions.
+### Before merge
+
+The coordinator shepherds each pull request through merge after the user requests
+coordinated execution. Do not require separate approval for each merge unless the user
+asks to retain merge control.
+
+Before merging, confirm:
+
+- required checks pass
+- required reviews are complete
+- meaningful review findings are resolved or explicitly deferred
+- the pull request remains within its approved scope and size limit
+- dependencies and stacked parents are merged in the required order
+- the latest integration checkpoint does not block the pull request
+- issue and project links correctly describe what the pull request closes or advances
+
+Do not merge a draft pull request, a pull request with unresolved blocking findings, a
+pull request with failing required checks, or a pull request that no longer combines
+cleanly with its dependencies.
+
+Merge foundations before their consumers. After each merge, confirm the resulting branch
+state, update issue and project metadata, and revalidate affected dependent pull requests.
 
 ## Periodic whole-product reviews
 
@@ -217,7 +239,7 @@ than resolving avoidable conflicts after both implementations finish.
 
 A coordinated batch is complete when:
 
-- each implementation unit has a reviewable pull request or a clearly reported blocker
+- each implementation unit is merged or has a clearly reported blocker
 - cross-session interfaces agree
 - applicable verification passes
 - the coordinator has reviewed the combined user journey
