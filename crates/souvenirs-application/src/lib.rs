@@ -1,6 +1,7 @@
 //! Caller-independent application services for catalog and import workflows.
 
 mod execution;
+mod planning;
 
 pub use execution::{
     ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest, ImportExecutionService,
@@ -19,7 +20,7 @@ use souvenirs_storage::{
     DurableTransition, OperationRecord, StorageCapabilities, StorageCapabilityError,
     WriteSuitability, FORMAT_VERSION,
 };
-use time::{macros::format_description, Date, OffsetDateTime};
+use time::{macros::format_description, OffsetDateTime};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogIntent {
@@ -286,6 +287,7 @@ impl ImportPlanningService {
             match media_kind(path) {
                 Some(MediaKind::Photo) => photo_count += 1,
                 Some(MediaKind::Video) => video_count += 1,
+                Some(MediaKind::Sidecar) => {}
                 None => unsupported_count += 1,
             }
         }
@@ -314,45 +316,7 @@ impl ImportPlanningService {
     }
 
     pub fn review(request: ImportReviewRequest) -> Result<ImportReview, ImportPlanningError> {
-        CatalogService::open(&request.catalog_path).map_err(ImportPlanningError::Catalog)?;
-        let scan = Self::scan(&request.source_path)?;
-        if scan.media_count == 0 {
-            return Err(ImportPlanningError::NoSupportedMedia);
-        }
-        let collection = CatalogLabel::new(&request.collection_name)
-            .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?;
-        validate_date(&request.accepted_date)?;
-        let year = &request.accepted_date[..4];
-        let directory = format!("{} {}", request.accepted_date, collection.as_str());
-        let destination_path = request.catalog_path.join(year).join(directory);
-        match request.destination_mode {
-            DestinationMode::Create if destination_path.exists() => {
-                return Err(ImportPlanningError::DestinationAlreadyExists(
-                    destination_path,
-                ));
-            }
-            DestinationMode::Existing if !destination_path.is_dir() => {
-                return Err(ImportPlanningError::DestinationMissing(destination_path));
-            }
-            DestinationMode::Create | DestinationMode::Existing => {}
-        }
-        let required_decision_count =
-            usize::from(scan.uncertain_time_count > 0 && request.date_resolution.is_none());
-        Ok(ImportReview {
-            collection_name: collection.to_string(),
-            destination_mode: request.destination_mode,
-            destination_path,
-            accepted_date: request.accepted_date,
-            date_resolution: request.date_resolution,
-            required_decision_count,
-            transfer_count: scan.media_count,
-            skipped_count: 0,
-            left_on_source_count: scan.unsupported_count,
-            operation_count: scan.media_count + 2,
-            required_space_bytes: scan.total_bytes,
-            can_start: required_decision_count == 0,
-            scan,
-        })
+        planning::review_import(request)
     }
 }
 
@@ -360,6 +324,7 @@ impl ImportPlanningService {
 enum MediaKind {
     Photo,
     Video,
+    Sidecar,
 }
 
 fn collect_source_files(
@@ -403,8 +368,8 @@ fn media_kind(path: &Path) -> Option<MediaKind> {
             media: souvenirs_metadata::MediaKind::Video,
             ..
         } => Some(MediaKind::Video),
-        souvenirs_metadata::AssetKind::Sidecar { .. }
-        | souvenirs_metadata::AssetKind::Unsupported => None,
+        souvenirs_metadata::AssetKind::Sidecar { .. } => Some(MediaKind::Sidecar),
+        souvenirs_metadata::AssetKind::Unsupported => None,
     }
 }
 
@@ -427,12 +392,6 @@ fn title_case_source_name(value: &str) -> String {
     }
 }
 
-fn validate_date(value: &str) -> Result<(), ImportPlanningError> {
-    Date::parse(value, format_description!("[year]-[month]-[day]"))
-        .map(|_| ())
-        .map_err(|_| ImportPlanningError::InvalidDate(value.to_owned()))
-}
-
 #[derive(Debug)]
 pub enum ImportPlanningError {
     Catalog(CatalogServiceError),
@@ -440,6 +399,7 @@ pub enum ImportPlanningError {
     DestinationMissing(PathBuf),
     InvalidCollection(String),
     InvalidDate(String),
+    InvalidPlan(String),
     Io {
         path: PathBuf,
         source: std::io::Error,
@@ -457,6 +417,7 @@ impl ImportPlanningError {
             Self::DestinationMissing(_) => "destination_missing",
             Self::InvalidCollection(_) => "invalid_collection",
             Self::InvalidDate(_) => "invalid_date",
+            Self::InvalidPlan(_) => "invalid_plan",
             Self::Io { .. } => "source_io",
             Self::NoSupportedMedia => "no_supported_media",
             Self::SourceTooLarge => "source_too_large",
@@ -485,6 +446,7 @@ impl fmt::Display for ImportPlanningError {
             Self::InvalidDate(value) => {
                 write!(formatter, "{value:?} is not a valid YYYY-MM-DD date.")
             }
+            Self::InvalidPlan(message) => formatter.write_str(message),
             Self::Io { path, source } => {
                 write!(formatter, "Could not scan {}: {source}", path.display())
             }
