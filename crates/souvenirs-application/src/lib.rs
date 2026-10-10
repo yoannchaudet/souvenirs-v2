@@ -2,6 +2,8 @@
 
 mod execution;
 mod planning;
+#[allow(dead_code)] // Foundation for the versioned review-to-execution handoff in issue #42.
+mod source_datetime;
 
 pub use execution::{
     ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest, ImportExecutionService,

@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 souvenirs-domain = { path = "../souvenirs-domain" }
+time = { workspace = true, features = ["macros", "parsing"] }
 
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }
