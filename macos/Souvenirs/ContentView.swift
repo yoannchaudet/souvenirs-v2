@@ -514,6 +514,7 @@ private struct ImportPlanningSheet: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.28), radius: 34, y: 18)
+        .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityIdentifier("import-review-sheet")
     }

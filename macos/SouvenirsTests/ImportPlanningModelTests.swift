@@ -22,7 +22,6 @@ final class ImportPlanningModelTests: XCTestCase {
         model.prepareExecution()
         XCTAssertTrue(model.isPrepared)
     }
-
     func testCollectionEditInvalidatesPlanUntilRevalidated() async {
         let engine = FakeImportPlanningEngine()
         let model = makeModel(engine: engine)
@@ -39,7 +38,6 @@ final class ImportPlanningModelTests: XCTestCase {
         XCTAssertEqual(engine.lastCollectionName, "Family Trip")
         XCTAssertTrue(model.canStart)
     }
-
     func testDestinationChangeRebuildsReview() async {
         let engine = FakeImportPlanningEngine()
         let model = makeModel(engine: engine)
