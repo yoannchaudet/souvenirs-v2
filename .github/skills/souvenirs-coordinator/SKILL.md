@@ -146,7 +146,7 @@ requested coordinated execution.
 
 ## Integration checkpoints
 
-Apply two project-level checkpoints to every implementation unit.
+Apply three project-level checkpoints to every implementation unit.
 
 ### Before implementation
 
@@ -199,11 +199,12 @@ asks to retain merge control.
 Before merging, confirm:
 
 - required checks pass
-- required reviews are complete
-- meaningful review findings are resolved or explicitly deferred
+- the required `rubber-duck`, specialist, and branch-protection reviews are complete
+- meaningful review findings are resolved, or the pull request records the reason and
+  follow-up for each intentional deferral
 - the pull request remains within its approved scope and size limit
 - dependencies and stacked parents are merged in the required order
-- the latest integration checkpoint does not block the pull request
+- the most recent whole-product integration review does not block the pull request
 - issue and project links correctly describe what the pull request closes or advances
 
 Do not merge a draft pull request, a pull request with unresolved blocking findings, a
@@ -211,7 +212,8 @@ pull request with failing required checks, or a pull request that no longer comb
 cleanly with its dependencies.
 
 Merge foundations before their consumers. After each merge, confirm the resulting branch
-state, update issue and project metadata, and revalidate affected dependent pull requests.
+state, retarget stacked dependents when their base changes, update issue and project
+metadata, and revalidate affected dependent pull requests.
 
 ## Periodic whole-product reviews
 
@@ -239,7 +241,8 @@ than resolving avoidable conflicts after both implementations finish.
 
 A coordinated batch is complete when:
 
-- each implementation unit is merged or has a clearly reported blocker
+- each implementation unit is merged, awaits a user-controlled merge, or has a clearly
+  reported blocker
 - cross-session interfaces agree
 - applicable verification passes
 - the coordinator has reviewed the combined user journey
