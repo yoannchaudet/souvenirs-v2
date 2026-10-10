@@ -162,22 +162,6 @@ final class EngineSupervisorTests: XCTestCase {
         try await supervisor.stop()
     }
 
-    func testHandshakeAcceptsCurrentClientAtMinimumVersion() async throws {
-        let executable = try makeHandshakeFixture(
-            response:
-                """
-                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":[]}}
-                """
-        )
-        let supervisor = EngineSupervisor(executableURL: executable)
-        _ = try await supervisor.start()
-
-        let handshake = try await supervisor.handshake()
-
-        XCTAssertEqual(handshake.compatibleClientVersion, "0.2.0")
-        try await supervisor.stop()
-    }
-
     func testHandshakeRejectsMalformedMinimumClientVersion() async throws {
         let executable = try makeHandshakeFixture(
             response:
@@ -258,10 +242,11 @@ final class EngineSupervisorTests: XCTestCase {
         )
         let supervisor = EngineSupervisor(executableURL: executable)
         _ = try await supervisor.start()
-        _ = try await supervisor.handshake()
+        let handshake = try await supervisor.handshake()
 
         let scan = try await supervisor.scanImport(sourcePath: "/source")
 
+        XCTAssertEqual(handshake.compatibleClientVersion, "0.2.0")
         XCTAssertNil(scan.suggestedAcceptedDate)
         XCTAssertNil(scan.suggestedRangeEnd)
         XCTAssertEqual(scan.unresolvedItemCount, 1)

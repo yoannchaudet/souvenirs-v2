@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use souvenirs_domain::catalog::{
@@ -34,6 +35,7 @@ pub(crate) struct PlannedImport {
 pub(crate) struct PlannedDirectory {
     pub(crate) path: PathBuf,
     pub(crate) create: bool,
+    pub(crate) inode: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -239,7 +241,7 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
     let review = ImportReview {
         collection_name: collection.to_string(),
         destination_mode: request.destination_mode,
-        destination_path: collection_path,
+        destination_path: collection_path.clone(),
         accepted_date: range_start.to_string(),
         date_resolution: request.date_resolution,
         required_decision_count,
@@ -257,13 +259,24 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
             PlannedDirectory {
                 path: PathBuf::from(&year),
                 create: !request.catalog_path.join(&year).exists(),
+                inode: None,
             },
             PlannedDirectory {
                 path: PathBuf::from(&year).join(&collection_directory),
                 create: true,
+                inode: None,
             },
         ],
-        DestinationMode::Existing => Vec::new(),
+        DestinationMode::Existing => vec![PlannedDirectory {
+            path: PathBuf::from(&year).join(&collection_directory),
+            create: false,
+            inode: Some(
+                collection_path
+                    .metadata()
+                    .map_err(|error| ImportPlanningError::InvalidPlan(error.to_string()))?
+                    .ino(),
+            ),
+        }],
     };
 
     let mut planned = PlannedImport {

@@ -116,13 +116,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             suggestedRangeEnd: "2026-10-12",
             pendingItemCount: 4,
             unresolvedItemCount: 0,
-            datetimeSources: [
-                .init(
-                    source: .containerCreationTime,
-                    state: .needsConfirmation,
-                    itemCount: 4
-                )
-            ]
+            datetimeSources: [.init(source: .containerCreationTime, state: .needsConfirmation, itemCount: 4)]
         )
     }
 

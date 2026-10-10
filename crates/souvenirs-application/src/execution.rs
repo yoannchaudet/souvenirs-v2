@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Read;
 use std::num::NonZeroU32;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -232,6 +233,7 @@ pub(crate) fn encode_reviewed_plan(
                 step_id: format!("directory-{}", index + 1),
                 path: directory.path.clone(),
                 create: directory.create,
+                inode: directory.inode,
             })
             .collect(),
         copies,
@@ -254,6 +256,9 @@ pub(crate) fn encode_reviewed_plan(
     .map_err(|error| ImportExecutionError::Planning(error.to_string()))
 }
 
+const MANIFEST_CHANGED: &str =
+    "The destination manifest changed after review. Review the import again.";
+
 fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionError> {
     CatalogService::open(&plan.catalog_path)
         .map_err(|error| ImportExecutionError::Catalog(error.to_string()))?;
@@ -264,7 +269,13 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
     }
     for directory in &plan.directories {
         let path = plan.catalog_path.join(&directory.path);
-        if directory.create == path.exists() {
+        let matches = path.metadata().is_ok_and(|metadata| {
+            metadata.is_dir()
+                && directory
+                    .inode
+                    .map_or(true, |inode| metadata.ino() == inode)
+        });
+        if (directory.create && path.exists()) || (!directory.create && !matches) {
             return Err(ImportExecutionError::Conflict(
                 "The catalog changed after review. Review the import again.".to_owned(),
             ));
@@ -283,24 +294,15 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
     match &plan.manifest.previous_digest {
         Some(expected) => {
             if !manifest_path.is_file() {
-                return Err(ImportExecutionError::Conflict(
-                    "The destination manifest changed after review. Review the import again."
-                        .to_owned(),
-                ));
+                return Err(ImportExecutionError::Conflict(MANIFEST_CHANGED.to_owned()));
             }
             let (actual, _) = digest_file(&manifest_path)?;
             if &actual != expected {
-                return Err(ImportExecutionError::Conflict(
-                    "The destination manifest changed after review. Review the import again."
-                        .to_owned(),
-                ));
+                return Err(ImportExecutionError::Conflict(MANIFEST_CHANGED.to_owned()));
             }
         }
         None if manifest_path.exists() => {
-            return Err(ImportExecutionError::Conflict(
-                "The destination manifest changed after review. Review the import again."
-                    .to_owned(),
-            ));
+            return Err(ImportExecutionError::Conflict(MANIFEST_CHANGED.to_owned()));
         }
         None => {}
     }
@@ -446,6 +448,8 @@ struct ExecutionDirectory {
     step_id: String,
     path: PathBuf,
     create: bool,
+    #[serde(default)]
+    inode: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -872,8 +876,7 @@ mod tests {
     #[test]
     fn executes_prepared_import_and_writes_manifest() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let mut progress = Vec::new();
 
         let outcome =
@@ -896,8 +899,7 @@ mod tests {
         assert!(manifest.contains("2026-10-10 10-11-12 001.jpg"));
         assert!(manifest.contains("2026-10-10 10-11-13 002.jpg"));
 
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Existing)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Existing);
         ImportExecutionService::execute(prepared, |_| {}).unwrap();
         let manifest = fs::read_to_string(collection.join("SHA256SUMS")).unwrap();
         assert_eq!(manifest.lines().count(), 4);
@@ -908,8 +910,7 @@ mod tests {
     #[test]
     fn executes_compound_item_with_shared_stem_and_original_only_manifest() {
         let fixture = compound_fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let outcome = ImportExecutionService::execute(prepared, |_| {}).unwrap();
 
         assert_eq!(outcome.copied_count, 3);
@@ -939,8 +940,7 @@ mod tests {
         )));
         assert!(!manifest.contains(".xmp"));
 
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Existing)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Existing);
         ImportExecutionService::execute(prepared, |_| {}).unwrap();
         assert!(collection.join("2026-10-10 12-00-00 002.CR3").is_file());
         assert!(collection.join("2026-10-10 12-00-00 002.JPG").is_file());
@@ -950,8 +950,7 @@ mod tests {
     #[test]
     fn cancellation_keeps_compound_sidecar_out_of_manifest() {
         let fixture = compound_fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let layout = CatalogLayout::new(&fixture.catalog);
         let lock = CatalogLock::acquire(&layout).unwrap();
         let mut journal =
@@ -1013,8 +1012,7 @@ mod tests {
     #[test]
     fn compound_sidecar_drift_is_not_published_or_manifested() {
         let fixture = compound_fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let operation_id = prepared.operation_id().to_owned();
         let sidecar = prepared
             .plan
@@ -1070,8 +1068,7 @@ mod tests {
             .join("2026")
             .join("2026-10-10 Recovery Import");
         fs::create_dir_all(&collection).unwrap();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Existing)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Existing);
         let sidecar = prepared
             .plan
             .copies
@@ -1090,8 +1087,7 @@ mod tests {
     #[test]
     fn legacy_execution_plan_defaults_copies_to_manifested() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let mut value = serde_json::to_value(&prepared.plan).unwrap();
         value.as_object_mut().unwrap().remove("source_snapshot");
         for copy in value["copies"].as_array_mut().unwrap() {
@@ -1106,8 +1102,7 @@ mod tests {
     #[test]
     fn recovers_an_import_interrupted_after_a_published_copy() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let layout = CatalogLayout::new(&fixture.catalog);
         let lock = CatalogLock::acquire(&layout).unwrap();
         let mut journal =
@@ -1180,8 +1175,7 @@ mod tests {
     #[test]
     fn rejects_recovery_when_an_unpublished_source_changed() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let layout = CatalogLayout::new(&fixture.catalog);
         let lock = CatalogLock::acquire(&layout).unwrap();
         let mut journal =
@@ -1214,8 +1208,7 @@ mod tests {
     #[test]
     fn source_drift_never_publishes_and_cancellation_records_no_stale_entry() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let operation_id = prepared.operation_id().to_owned();
         let destination = fixture.catalog.join(&prepared.plan.copies[0].destination);
         fs::write(
@@ -1266,8 +1259,7 @@ mod tests {
     #[test]
     fn cancellation_manifests_a_matching_verified_stage_that_recovery_publishes() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let first = &prepared.plan.copies[0];
         let layout = CatalogLayout::new(&fixture.catalog);
         let lock = CatalogLock::acquire(&layout).unwrap();
@@ -1336,8 +1328,7 @@ mod tests {
     #[test]
     fn cancellation_does_not_manifest_a_missing_verified_stage() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let first = &prepared.plan.copies[0];
         let layout = CatalogLayout::new(&fixture.catalog);
         let lock = CatalogLock::acquire(&layout).unwrap();
@@ -1402,8 +1393,7 @@ mod tests {
     #[test]
     fn resume_publishes_a_matching_verified_stage_without_the_source() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let first = &prepared.plan.copies[0];
         let layout = CatalogLayout::new(&fixture.catalog);
         let lock = CatalogLock::acquire(&layout).unwrap();
@@ -1470,8 +1460,7 @@ mod tests {
     #[test]
     fn cancellation_rejects_a_legacy_published_copy_that_drifted_from_the_plan() {
         let fixture = fixture();
-        let prepared =
-            ImportExecutionService::prepare(fixture.request(DestinationMode::Create)).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
         let first = &prepared.plan.copies[0];
         let layout = CatalogLayout::new(&fixture.catalog);
         let lock = CatalogLock::acquire(&layout).unwrap();
@@ -1539,55 +1528,36 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_plan_rejects_an_unreviewed_added_file_before_journaling() {
-        let fixture = fixture();
-        let added = fixture.source.join("IMG_20261010_101113.jpg");
-        fs::remove_file(&added).unwrap();
-        let request = fixture.request(DestinationMode::Create);
-
-        fs::write(&added, b"two").unwrap();
-
-        let error = ImportExecutionService::prepare(request).unwrap_err();
-        assert_eq!(error.code(), "operation_conflict");
-        assert_no_import_mutation(&fixture);
-    }
-
-    #[test]
-    fn reviewed_plan_rejects_removed_or_changed_files_before_journaling() {
-        for change in ["remove", "change"] {
+    fn reviewed_plan_rejects_source_drift_before_journaling() {
+        for change in ["add", "remove", "change"] {
             let fixture = fixture();
-            let request = fixture.request(DestinationMode::Create);
             let path = fixture.source.join("IMG_20261010_101113.jpg");
-            if change == "remove" {
-                fs::remove_file(path).unwrap();
-            } else {
-                fs::write(path, b"changed").unwrap();
+            if change == "add" {
+                fs::remove_file(&path).unwrap();
             }
-
+            let request = fixture.request(DestinationMode::Create);
+            match change {
+                "add" => fs::write(path, b"two").unwrap(),
+                "remove" => fs::remove_file(path).unwrap(),
+                _ => fs::write(path, b"changed").unwrap(),
+            }
             let error = ImportExecutionService::prepare(request).unwrap_err();
             assert_eq!(error.code(), "operation_conflict");
-            assert_no_import_mutation(&fixture);
+            assert_eq!(import_journal_count(&fixture), 0);
         }
     }
 
-    fn assert_no_import_mutation(fixture: &Fixture) {
-        assert!(!fixture
-            .catalog
-            .join("2026/2026-10-10 Recovery Import")
-            .exists());
-        assert_eq!(
-            fs::read_dir(CatalogLayout::new(&fixture.catalog).journal_directory())
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    !entry
-                        .file_name()
-                        .to_string_lossy()
-                        .ends_with("-initialize.jsonl")
-                })
-                .count(),
-            0
-        );
+    fn import_journal_count(fixture: &Fixture) -> usize {
+        fs::read_dir(CatalogLayout::new(&fixture.catalog).journal_directory())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with("-initialize.jsonl")
+            })
+            .count()
     }
 
     struct Fixture {
@@ -1611,6 +1581,10 @@ mod tests {
                 reviewed_plan: review.reviewed_plan.unwrap(),
             }
         }
+    }
+
+    fn prep(fixture: &Fixture, mode: DestinationMode) -> super::PreparedImport {
+        ImportExecutionService::prepare(fixture.request(mode)).unwrap()
     }
 
     fn fixture() -> Fixture {

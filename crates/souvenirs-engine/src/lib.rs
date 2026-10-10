@@ -6,6 +6,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 use souvenirs_application::{
     CatalogIntent as ApplicationIntent, CatalogService, DateResolution, DestinationMode,
+    ImportDateSource as ApplicationDateSource, ImportDateState as ApplicationDateState,
     ImportExecutionRequest, ImportExecutionService, ImportPlanningService, ImportRecoveryMode,
     ImportRecoveryService, ImportReviewRequest, OperationInspectionService, OperationProgress,
     PreparedImport, RecoveryOutcome,
@@ -475,6 +476,9 @@ fn catalog_response(
 }
 
 fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportScanResult {
+    use ApplicationDateSource as A;
+    use ImportDateSource as P;
+
     ImportScanResult {
         source_path: scan.source_path.to_string_lossy().into_owned(),
         source_name: scan.source_name,
@@ -495,36 +499,18 @@ fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportS
             .into_iter()
             .map(|summary| ImportDateSourceSummary {
                 source: match summary.source {
-                    souvenirs_application::ImportDateSource::ExifDateTimeOriginal => {
-                        ImportDateSource::ExifDateTimeOriginal
-                    }
-                    souvenirs_application::ImportDateSource::ExifDateTimeDigitized => {
-                        ImportDateSource::ExifDateTimeDigitized
-                    }
-                    souvenirs_application::ImportDateSource::QuickTimeCreationDate => {
-                        ImportDateSource::QuickTimeCreationDate
-                    }
-                    souvenirs_application::ImportDateSource::XmpDateCreated => {
-                        ImportDateSource::XmpDateCreated
-                    }
-                    souvenirs_application::ImportDateSource::XmpExifDateTimeOriginal => {
-                        ImportDateSource::XmpExifDateTimeOriginal
-                    }
-                    souvenirs_application::ImportDateSource::ContainerCreationTime => {
-                        ImportDateSource::ContainerCreationTime
-                    }
-                    souvenirs_application::ImportDateSource::GoogleTakeoutPhotoTakenTime => {
-                        ImportDateSource::GoogleTakeoutPhotoTakenTime
-                    }
-                    souvenirs_application::ImportDateSource::FilenamePattern => {
-                        ImportDateSource::FilenamePattern
-                    }
+                    A::ExifDateTimeOriginal => P::ExifDateTimeOriginal,
+                    A::ExifDateTimeDigitized => P::ExifDateTimeDigitized,
+                    A::QuickTimeCreationDate => P::QuickTimeCreationDate,
+                    A::XmpDateCreated => P::XmpDateCreated,
+                    A::XmpExifDateTimeOriginal => P::XmpExifDateTimeOriginal,
+                    A::ContainerCreationTime => P::ContainerCreationTime,
+                    A::GoogleTakeoutPhotoTakenTime => P::GoogleTakeoutPhotoTakenTime,
+                    A::FilenamePattern => P::FilenamePattern,
                 },
                 state: match summary.state {
-                    souvenirs_application::ImportDateState::Accepted => ImportDateState::Accepted,
-                    souvenirs_application::ImportDateState::NeedsConfirmation => {
-                        ImportDateState::NeedsConfirmation
-                    }
+                    ApplicationDateState::Accepted => ImportDateState::Accepted,
+                    ApplicationDateState::NeedsConfirmation => ImportDateState::NeedsConfirmation,
                 },
                 item_count: summary.item_count,
             })
@@ -643,9 +629,12 @@ fn request_id(line: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{fs, io::Cursor};
 
     use serde_json::{json, Value};
+    use souvenirs_application::{
+        CatalogService, DateResolution, DestinationMode, ImportPlanningService, ImportReviewRequest,
+    };
     use souvenirs_protocol::PROTOCOL_VERSION;
 
     use super::run_engine;
@@ -865,6 +854,48 @@ mod tests {
 
         assert_eq!(responses[1]["error"]["code"], "invalid_request");
         assert_eq!(responses[1]["id"], "request-2");
+    }
+
+    #[test]
+    fn operation_start_rejects_a_removed_or_replaced_reviewed_existing_collection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let catalog = temporary.path().join("catalog");
+        let source = temporary.path().join("source");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("IMG_20261010_101112.jpg"), b"photo").unwrap();
+        CatalogService::create(&catalog, "Catalog").unwrap();
+        let collection = catalog.join("2026/2026-10-10 Import");
+        fs::create_dir_all(&collection).unwrap();
+        let journal = catalog.join(".souvenirs/journal");
+        let review = ImportPlanningService::review(ImportReviewRequest {
+            catalog_path: catalog.clone(),
+            source_path: source,
+            collection_name: "Import".to_owned(),
+            destination_mode: DestinationMode::Existing,
+            accepted_date: "2026-10-10".to_owned(),
+            date_resolution: Some(DateResolution::AsShown),
+        })
+        .unwrap();
+        for replaced in [false, true] {
+            if replaced {
+                fs::create_dir(&collection).unwrap();
+            } else {
+                fs::remove_dir(&collection).unwrap();
+            }
+            let input = format!(
+                "{}{}",
+                request("request-1", "handshake", json!({"client_version": "0.2.0"})),
+                request(
+                    "request-2",
+                    "operation.start",
+                    json!({"name": "import.execute", "reviewed_plan": review.reviewed_plan.as_ref().unwrap()})
+                )
+            );
+            let responses = run_lines(input);
+            assert_eq!(responses[1]["error"]["code"], "operation_conflict");
+            assert_eq!(fs::read_dir(&journal).unwrap().count(), 1);
+        }
     }
 
     #[test]
