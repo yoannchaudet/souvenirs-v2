@@ -1,6 +1,7 @@
 # Application architecture
 
-**Status: draft, not implemented behavior.** This document defines the proposed application architecture.
+**Status: draft architecture.** This document defines the proposed application architecture.
+The minimum macOS version below is an implemented bootstrap constraint.
 
 ## Goals
 
@@ -38,6 +39,12 @@ The process boundary isolates failures and simplifies asynchronous communication
 
 The macOS application uses SwiftUI for application structure.
 It uses AppKit where SwiftUI does not provide sufficient control or performance.
+
+### Minimum macOS version
+
+The initial application supports macOS 14 and later.
+The bootstrap Xcode project sets the macOS deployment target to version 14.0.
+This deployment target is an implemented constraint, not a draft architecture proposal.
 
 SwiftUI owns:
 
@@ -449,7 +456,6 @@ Tests and generated files count toward review cost even when line-count tools ex
 
 ## Open questions
 
-- Which macOS version is the minimum deployment target?
 - Which media formats and source devices are required for the first milestone?
 - Which Rust libraries satisfy the metadata corpus?
 - Does a sandboxed child process retain access to every required security-scoped location?
