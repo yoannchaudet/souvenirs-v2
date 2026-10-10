@@ -454,6 +454,7 @@ private struct ImportPlanningSheet: View {
                     Text("Import from \(model.scan?.sourceName ?? "source")")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("import-review-sheet")
                     Text(model.title)
                         .font(.system(size: 22, weight: .bold))
                         .accessibilityIdentifier("import-review-title")
@@ -515,8 +516,6 @@ private struct ImportPlanningSheet: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.28), radius: 34, y: 18)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("import-review-sheet")
     }
 
     private var destinationCard: some View {
