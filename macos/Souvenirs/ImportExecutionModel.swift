@@ -3,12 +3,7 @@ import Foundation
 @MainActor
 protocol ImportExecutionEngine: AnyObject {
     func startImportExecution(
-        catalogPath: String,
-        sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
-        dateResolution: EngineSupervisor.ImportDateResolution?
+        reviewedPlan: String
     ) async throws -> String
     func inspectUnfinishedOperation(catalogPath: String) async throws
         -> EngineSupervisor.UnfinishedOperation?
@@ -21,22 +16,12 @@ protocol ImportExecutionEngine: AnyObject {
 
 extension EngineAppModel: ImportExecutionEngine {
     func startImportExecution(
-        catalogPath: String,
-        sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
-        dateResolution: EngineSupervisor.ImportDateResolution?
+        reviewedPlan: String
     ) async throws -> String {
         try await supervisor.requestOperation(
             method: "operation.start",
             parameters: StartImportParameters(
-                catalogPath: catalogPath,
-                sourcePath: sourcePath,
-                collectionName: collectionName,
-                destinationMode: destinationMode,
-                acceptedDate: acceptedDate,
-                dateResolution: dateResolution
+                reviewedPlan: reviewedPlan
             )
         )
     }
@@ -138,14 +123,11 @@ final class ImportExecutionCoordinator: ObservableObject {
         phase = .running
         operationTask = Task {
             do {
-                let operationID = try await engine.startImportExecution(
-                    catalogPath: catalog.path,
-                    sourcePath: review.scan.sourcePath,
-                    collectionName: review.collectionName,
-                    destinationMode: review.destinationMode,
-                    acceptedDate: review.acceptedDate,
-                    dateResolution: review.dateResolution
-                )
+                guard let reviewedPlan = review.reviewedPlan else {
+                    phase = .failed("The reviewed import plan is unavailable. Review the import again.")
+                    return
+                }
+                let operationID = try await engine.startImportExecution(reviewedPlan: reviewedPlan)
                 self.operationID = operationID
                 try await consume(operationID: operationID, recovering: false)
             } catch {
@@ -315,21 +297,11 @@ final class ImportExecutionCoordinator: ObservableObject {
 
 private struct StartImportParameters: Encodable, Sendable {
     let name = "import.execute"
-    let catalogPath: String
-    let sourcePath: String
-    let collectionName: String
-    let destinationMode: EngineSupervisor.ImportDestinationMode
-    let acceptedDate: String
-    let dateResolution: EngineSupervisor.ImportDateResolution?
+    let reviewedPlan: String
 
     enum CodingKeys: String, CodingKey {
         case name
-        case catalogPath = "catalog_path"
-        case sourcePath = "source_path"
-        case collectionName = "collection_name"
-        case destinationMode = "destination_mode"
-        case acceptedDate = "accepted_date"
-        case dateResolution = "date_resolution"
+        case reviewedPlan = "reviewed_plan"
     }
 }
 

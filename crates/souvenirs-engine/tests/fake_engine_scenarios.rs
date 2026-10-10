@@ -171,7 +171,7 @@ fn handshake() -> Value {
     request(
         "macos-handshake-1",
         "handshake",
-        json!({"client_version": "0.1.0"}),
+        json!({"client_version": "0.2.0"}),
     )
 }
 
@@ -181,12 +181,7 @@ fn start_request() -> Value {
         "operation.start",
         json!({
             "name": "import.execute",
-            "catalog_path": "/Volumes/photos/Family Catalog",
-            "source_path": "/Volumes/camera/EOS_DIGITAL",
-            "collection_name": "Dolomites",
-            "destination_mode": "create",
-            "accepted_date": "2026-10-10",
-            "date_resolution": "as_shown"
+            "reviewed_plan": "fake-reviewed-plan"
         }),
     )
 }

@@ -20,12 +20,12 @@ final class EngineSupervisorTests: XCTestCase {
             """
             trap 'exit 99' TERM
             IFS= read -r request || exit 2
-            expected='{"id":"macos-handshake-1","method":"handshake","params":{"client_version":"0.1.0"},"protocol_version":1}'
+            expected='{"id":"macos-handshake-1","method":"handshake","params":{"client_version":"0.2.0"},"protocol_version":1}'
             if [ "$request" != "$expected" ]; then
                 echo "unexpected request: $request" >&2
                 exit 3
             fi
-            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":["operation.cancel"]}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":["operation.cancel"]}}'
             while IFS= read -r _; do :; done
             """
         )
@@ -37,9 +37,9 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertEqual(
             handshake,
             .init(
-                engineVersion: "0.1.0",
+                engineVersion: "0.2.0",
                 protocolVersion: 1,
-                compatibleClientVersion: "0.1.0",
+                compatibleClientVersion: "0.2.0",
                 capabilities: ["operation.cancel"]
             )
         )
@@ -140,7 +140,13 @@ final class EngineSupervisorTests: XCTestCase {
                 {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":[]}}
                 """
         )
-        let supervisor = EngineSupervisor(executableURL: executable)
+        let supervisor = EngineSupervisor(
+            executableURL: executable,
+            handshakeTimeout: .seconds(3),
+            shutdownTimeout: .seconds(3),
+            terminationTimeout: .seconds(1),
+            clientVersion: "0.1.0"
+        )
         _ = try await supervisor.start()
 
         do {
@@ -153,6 +159,22 @@ final class EngineSupervisorTests: XCTestCase {
             )
         }
 
+        try await supervisor.stop()
+    }
+
+    func testHandshakeAcceptsCurrentClientAtMinimumVersion() async throws {
+        let executable = try makeHandshakeFixture(
+            response:
+                """
+                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":[]}}
+                """
+        )
+        let supervisor = EngineSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+
+        let handshake = try await supervisor.handshake()
+
+        XCTAssertEqual(handshake.compatibleClientVersion, "0.2.0")
         try await supervisor.stop()
     }
 
@@ -219,8 +241,30 @@ final class EngineSupervisorTests: XCTestCase {
         let handshake = try await supervisor.handshake()
 
         XCTAssertEqual(handshake.engineVersion, "0.1.0")
-        XCTAssertEqual(handshake.compatibleClientVersion, "0.1.0")
+        XCTAssertEqual(handshake.compatibleClientVersion, "0.2.0")
         XCTAssertEqual(handshake.capabilities, ["operation.cancel"])
+        try await supervisor.stop()
+    }
+
+    func testCurrentClientDecodesDateLessScanAfterHandshake() async throws {
+        let executable = try makeExecutable(
+            """
+            IFS= read -r _ || exit 2
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":["import.scan"]}}'
+            IFS= read -r request || exit 3
+            id=$(printf '%s' "$request" | sed -E 's/.*"id":"([^"]+)".*/\\1/')
+            printf '%s\\n' '{"kind":"response","id":"'"$id"'","protocol_version":1,"status":"success","result":{"type":"import_scan","source_path":"/source","source_name":"source","file_count":1,"media_count":1,"photo_count":1,"video_count":0,"unsupported_count":0,"uncertain_time_count":0,"total_bytes":3,"suggested_collection_name":"Source","suggested_accepted_date":null,"suggested_range_end":null,"pending_item_count":0,"unresolved_item_count":1,"datetime_sources":[]}}'
+            """
+        )
+        let supervisor = EngineSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+        _ = try await supervisor.handshake()
+
+        let scan = try await supervisor.scanImport(sourcePath: "/source")
+
+        XCTAssertNil(scan.suggestedAcceptedDate)
+        XCTAssertNil(scan.suggestedRangeEnd)
+        XCTAssertEqual(scan.unresolvedItemCount, 1)
         try await supervisor.stop()
     }
 

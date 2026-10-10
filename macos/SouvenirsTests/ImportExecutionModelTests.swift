@@ -207,7 +207,17 @@ final class ImportExecutionModelTests: XCTestCase {
                 uncertainTimeCount: 4,
                 totalBytes: 41_000_000_000,
                 suggestedCollectionName: "Dolomites",
-                suggestedAcceptedDate: "2026-10-10"
+                suggestedAcceptedDate: "2026-10-10",
+                suggestedRangeEnd: "2026-10-12",
+                pendingItemCount: 4,
+                unresolvedItemCount: 0,
+                datetimeSources: [
+                    .init(
+                        source: .containerCreationTime,
+                        state: .needsConfirmation,
+                        itemCount: 4
+                    )
+                ]
             ),
             collectionName: "Dolomites",
             destinationMode: .create,
@@ -220,7 +230,8 @@ final class ImportExecutionModelTests: XCTestCase {
             leftOnSourceCount: 2,
             operationCount: 14,
             requiredSpaceBytes: 41_000_000_000,
-            canStart: true
+            canStart: true,
+            reviewedPlan: "reviewed-plan"
         )
     }
 
@@ -267,14 +278,7 @@ private final class FakeImportExecutionEngine: ImportExecutionEngine {
     private var continuation:
         AsyncThrowingStream<EngineSupervisor.OperationEvent, any Error>.Continuation?
 
-    func startImportExecution(
-        catalogPath: String,
-        sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
-        dateResolution: EngineSupervisor.ImportDateResolution?
-    ) async throws -> String {
+    func startImportExecution(reviewedPlan: String) async throws -> String {
         "operation-1"
     }
 

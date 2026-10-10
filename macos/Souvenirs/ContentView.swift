@@ -726,7 +726,7 @@ private struct ImportPlanningSheet: View {
 
                     if let scan = model.scan {
                         destinationCard
-                        if scan.uncertainTimeCount > 0 {
+                        if (model.review?.requiredDecisionCount ?? scan.pendingItemCount) > 0 {
                             dateDecision(scan)
                         }
                         summary(scan)
@@ -812,7 +812,7 @@ private struct ImportPlanningSheet: View {
                     }
                     .accessibilityIdentifier("import-destination-mode")
                 }
-                Text("\(model.acceptedDate) · from the dates in your photos")
+                Text(dateSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -837,14 +837,15 @@ private struct ImportPlanningSheet: View {
                     .frame(width: 22, height: 22)
                     .background(.orange.opacity(0.15), in: Circle())
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("\(scan.uncertainTimeCount) videos have an uncertain time")
-                        .font(.callout.bold())
-                    Text("The camera didn’t say which time zone it used.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    ForEach(
+                        scan.datetimeSources.filter { $0.state == .needsConfirmation },
+                        id: \.source
+                    ) { summary in
+                        Text(pendingDateSummary(summary))
+                            .font(.callout.bold())
+                    }
                     HStack {
                         decisionButton("As shown", value: .asShown)
-                        decisionButton("Convert from UTC", value: .convertFromUTC)
                     }
                 }
             }
@@ -890,15 +891,62 @@ private struct ImportPlanningSheet: View {
                     systemImage: "externaldrive"
                 )
             }
+            if scan.unresolvedItemCount > 0 {
+                Label(
+                    "\(scan.unresolvedItemCount) items have no usable date and will stay on the source.",
+                    systemImage: "calendar.badge.exclamationmark"
+                )
+            }
             if let review = model.review {
                 Label(
                     "\(review.operationCount) verified operations · \(bytes(review.requiredSpaceBytes))",
                     systemImage: "checkmark.circle"
                 )
             }
+
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+    }
+
+    private var dateSummary: String {
+        guard let start = model.scan?.suggestedAcceptedDate else {
+            return "No accepted media date was found"
+        }
+        let range = model.scan?.suggestedRangeEnd.flatMap {
+            $0 == start ? nil : "\(start)–\($0)"
+        } ?? start
+        let sources = model.scan?.datetimeSources
+            .filter { $0.state == .accepted }
+            .map { dateSourceName($0.source) }
+            .joined(separator: ", ") ?? ""
+        return sources.isEmpty ? range : "\(range) · \(sources)"
+    }
+
+    private func pendingDateSummary(
+        _ summary: EngineSupervisor.ImportDateSourceSummary
+    ) -> String {
+        switch summary.source {
+        case .filenamePattern:
+            return "\(summary.itemCount) filename date proposals need confirmation"
+        case .containerCreationTime:
+            return "\(summary.itemCount) ambiguous container dates need confirmation"
+        default:
+            return "\(summary.itemCount) \(dateSourceName(summary.source)) dates need confirmation"
+        }
+    }
+
+    private func dateSourceName(_ source: EngineSupervisor.ImportDateSource) -> String {
+        switch source {
+        case .exifDateTimeOriginal: "EXIF DateTimeOriginal"
+        case .exifDateTimeDigitized: "EXIF DateTimeDigitized"
+        case .quickTimeCreationDate: "QuickTime creation date"
+        case .xmpDateCreated: "owned XMP DateCreated"
+        case .xmpExifDateTimeOriginal: "owned XMP DateTimeOriginal"
+        case .containerCreationTime: "container creation time"
+        case .googleTakeoutPhotoTakenTime: "Google Takeout proposal"
+        case .filenamePattern: "filename proposal"
+        }
     }
 
     private var details: some View {
@@ -1022,7 +1070,17 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
             uncertainTimeCount: 4,
             totalBytes: 41_000_000_000,
             suggestedCollectionName: "Dolomites",
-            suggestedAcceptedDate: "2026-10-10"
+            suggestedAcceptedDate: "2026-10-10",
+            suggestedRangeEnd: "2026-10-12",
+            pendingItemCount: 4,
+            unresolvedItemCount: 0,
+            datetimeSources: [
+                .init(
+                    source: .containerCreationTime,
+                    state: .needsConfirmation,
+                    itemCount: 4
+                )
+            ]
         )
     }
 
@@ -1048,18 +1106,14 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
             leftOnSourceCount: scan.unsupportedCount,
             operationCount: scan.mediaCount + 2,
             requiredSpaceBytes: scan.totalBytes,
-            canStart: dateResolution != nil
+            canStart: dateResolution != nil,
+            reviewedPlan: dateResolution == nil ? nil : "preview-reviewed-plan"
         )
     }
 
-    func startImportExecution(
-        catalogPath: String,
-        sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
-        dateResolution: EngineSupervisor.ImportDateResolution?
-    ) async throws -> String { "preview-operation" }
+    func startImportExecution(reviewedPlan: String) async throws -> String {
+        "preview-operation"
+    }
     func inspectUnfinishedOperation(
         catalogPath: String
     ) async throws -> EngineSupervisor.UnfinishedOperation? { nil }

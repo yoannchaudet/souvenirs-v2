@@ -218,7 +218,17 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
             uncertainTimeCount: 4,
             totalBytes: 41_000_000_000,
             suggestedCollectionName: "Dolomites",
-            suggestedAcceptedDate: "2026-10-10"
+            suggestedAcceptedDate: "2026-10-10",
+            suggestedRangeEnd: "2026-10-12",
+            pendingItemCount: 4,
+            unresolvedItemCount: 0,
+            datetimeSources: [
+                .init(
+                    source: .containerCreationTime,
+                    state: .needsConfirmation,
+                    itemCount: 4
+                )
+            ]
         )
     }
 
@@ -244,7 +254,8 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
             leftOnSourceCount: 2,
             operationCount: 14,
             requiredSpaceBytes: 41_000_000_000,
-            canStart: dateResolution != nil
+            canStart: dateResolution != nil,
+            reviewedPlan: dateResolution == nil ? nil : "reviewed-plan"
         )
     }
 
@@ -257,14 +268,9 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
         )
     }
 
-    func startImportExecution(
-        catalogPath: String,
-        sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
-        dateResolution: EngineSupervisor.ImportDateResolution?
-    ) async throws -> String { "visual-operation" }
+    func startImportExecution(reviewedPlan: String) async throws -> String {
+        "visual-operation"
+    }
     func inspectUnfinishedOperation(
         catalogPath: String
     ) async throws -> EngineSupervisor.UnfinishedOperation? { inspection }

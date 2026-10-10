@@ -12,12 +12,13 @@ use souvenirs_application::{
 };
 use souvenirs_protocol::{
     CatalogIntent, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
-    ImportDateResolution, ImportDestinationMode, ImportReviewResult, ImportScanResult,
-    OperationAccepted, OperationEvent, OperationEventPayload, OperationInspectionResult,
-    ProtocolError, Request, RequestPayload, ResponseResult, StartOperationParameters,
-    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
-    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
-    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    ImportDateResolution, ImportDateSource, ImportDateSourceSummary, ImportDateState,
+    ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent,
+    OperationEventPayload, OperationInspectionResult, ProtocolError, Request, RequestPayload,
+    ResponseResult, StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
+    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD,
+    IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
+    START_OPERATION_METHOD,
 };
 
 pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -298,36 +299,18 @@ impl Connection {
         parameters: StartOperationParameters,
     ) -> EngineAction {
         match parameters {
-            StartOperationParameters::ImportExecute {
-                catalog_path,
-                source_path,
-                collection_name,
-                destination_mode,
-                accepted_date,
-                date_resolution,
-            } => match ImportExecutionService::prepare(ImportExecutionRequest {
-                catalog_path: catalog_path.into(),
-                source_path: source_path.into(),
-                collection_name,
-                destination_mode: match destination_mode {
-                    ImportDestinationMode::Create => DestinationMode::Create,
-                    ImportDestinationMode::Existing => DestinationMode::Existing,
-                },
-                accepted_date,
-                date_resolution: date_resolution.map(|resolution| match resolution {
-                    ImportDateResolution::AsShown => DateResolution::AsShown,
-                    ImportDateResolution::ConvertFromUtc => DateResolution::ConvertFromUtc,
-                }),
-            }) {
-                Ok(prepared) => EngineAction::Execute {
-                    request_id,
-                    prepared: Box::new(prepared),
-                },
-                Err(error) => EngineAction::Message(EngineMessage::error(
-                    Some(request_id),
-                    ProtocolError::new(error.code(), error.to_string()),
-                )),
-            },
+            StartOperationParameters::ImportExecute { reviewed_plan } => {
+                match ImportExecutionService::prepare(ImportExecutionRequest { reviewed_plan }) {
+                    Ok(prepared) => EngineAction::Execute {
+                        request_id,
+                        prepared: Box::new(prepared),
+                    },
+                    Err(error) => EngineAction::Message(EngineMessage::error(
+                        Some(request_id),
+                        ProtocolError::new(error.code(), error.to_string()),
+                    )),
+                }
+            }
             StartOperationParameters::Recover {
                 catalog_path,
                 operation_id,
@@ -504,6 +487,48 @@ fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportS
         total_bytes: scan.total_bytes,
         suggested_collection_name: scan.suggested_collection_name,
         suggested_accepted_date: scan.suggested_accepted_date,
+        suggested_range_end: scan.suggested_range_end,
+        pending_item_count: scan.pending_item_count,
+        unresolved_item_count: scan.unresolved_item_count,
+        datetime_sources: scan
+            .datetime_sources
+            .into_iter()
+            .map(|summary| ImportDateSourceSummary {
+                source: match summary.source {
+                    souvenirs_application::ImportDateSource::ExifDateTimeOriginal => {
+                        ImportDateSource::ExifDateTimeOriginal
+                    }
+                    souvenirs_application::ImportDateSource::ExifDateTimeDigitized => {
+                        ImportDateSource::ExifDateTimeDigitized
+                    }
+                    souvenirs_application::ImportDateSource::QuickTimeCreationDate => {
+                        ImportDateSource::QuickTimeCreationDate
+                    }
+                    souvenirs_application::ImportDateSource::XmpDateCreated => {
+                        ImportDateSource::XmpDateCreated
+                    }
+                    souvenirs_application::ImportDateSource::XmpExifDateTimeOriginal => {
+                        ImportDateSource::XmpExifDateTimeOriginal
+                    }
+                    souvenirs_application::ImportDateSource::ContainerCreationTime => {
+                        ImportDateSource::ContainerCreationTime
+                    }
+                    souvenirs_application::ImportDateSource::GoogleTakeoutPhotoTakenTime => {
+                        ImportDateSource::GoogleTakeoutPhotoTakenTime
+                    }
+                    souvenirs_application::ImportDateSource::FilenamePattern => {
+                        ImportDateSource::FilenamePattern
+                    }
+                },
+                state: match summary.state {
+                    souvenirs_application::ImportDateState::Accepted => ImportDateState::Accepted,
+                    souvenirs_application::ImportDateState::NeedsConfirmation => {
+                        ImportDateState::NeedsConfirmation
+                    }
+                },
+                item_count: summary.item_count,
+            })
+            .collect(),
     }
 }
 
@@ -517,7 +542,7 @@ fn import_scan_response(
     match result {
         Ok(scan) => EngineMessage::success(
             request_id,
-            ResponseResult::ImportScan(import_scan_result(scan)),
+            ResponseResult::ImportScan(Box::new(import_scan_result(scan))),
         ),
         Err(error) => EngineMessage::error(
             Some(request_id),
@@ -553,6 +578,7 @@ fn import_review_response(
                 operation_count: review.operation_count,
                 required_space_bytes: review.required_space_bytes,
                 can_start: review.can_start,
+                reviewed_plan: review.reviewed_plan,
             })),
         ),
         Err(error) => EngineMessage::error(
@@ -640,7 +666,7 @@ mod tests {
                 "type": "handshake",
                 "engine_version": env!("CARGO_PKG_VERSION"),
                 "protocol_version": PROTOCOL_VERSION,
-                "compatible_client_version": "0.1.0",
+                "compatible_client_version": "0.2.0",
                 "capabilities": [
                     "operation.cancel",
                     "catalog.validate",
