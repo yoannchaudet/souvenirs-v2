@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     let engineStatus: EngineAppModel.Status
     @ObservedObject var model: CatalogWelcomeModel
+    @ObservedObject var imports: ImportExecutionCoordinator
     @State private var showsCreatedItems = false
 
     var body: some View {
@@ -25,10 +26,16 @@ struct ContentView: View {
                     Color.black.opacity(0.22).ignoresSafeArea()
                     ImportPlanningSheet(
                         model: planning,
-                        onCancel: model.dismissImport
+                        onCancel: model.dismissImport,
+                        onStart: {
+                            guard let review = planning.review else { return }
+                            imports.start(review: review, catalog: planning.catalog)
+                            model.dismissImport()
+                        }
                     )
                 }
             }
+            recoveryOverlay
         }
         .alert(
             model.presentedErrorTitle,
@@ -275,11 +282,11 @@ struct ContentView: View {
                     .background(.selection.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
                 Spacer()
                 Divider()
-                Label("Ready for your first import", systemImage: "circle.fill")
+                Label(sidebarStatus, systemImage: "circle.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .symbolRenderingMode(.palette)
-                    .foregroundStyle(.green, .secondary)
+                    .foregroundStyle(sidebarStatusColor, .secondary)
                     .accessibilityIdentifier("catalog-health")
             }
             .padding(16)
@@ -290,21 +297,31 @@ struct ContentView: View {
 
             VStack {
                 HStack {
-                    Text("All Photos")
-                        .font(.headline)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(imports.collectionName.isEmpty ? "All Photos" : imports.collectionName)
+                            .font(.headline)
+                        if !imports.collectionName.isEmpty, let review = imports.review {
+                            Text("\(review.acceptedDate) · \(review.transferCount) photos and videos")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Spacer()
                 }
                 .padding(.horizontal, 18)
                 .frame(height: 44)
                 Divider()
-                Spacer()
-                Image(systemName: "square.and.arrow.down")
+                if imports.catalog?.path == catalog.path, imports.phase != .idle {
+                    importActivity(catalog)
+                } else {
+                    Spacer()
+                    Image(systemName: "square.and.arrow.down")
                     .font(.system(size: 28))
                     .foregroundStyle(.blue)
                     .frame(width: 84, height: 66)
                     .background(.background, in: RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.09), radius: 14, y: 7)
-                Text("Your catalog is ready")
+                    Text("Your catalog is ready")
                     .font(.title2.bold())
                     .padding(.top, 18)
                     .accessibilityIdentifier("catalog-ready")
@@ -324,7 +341,8 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)
-                Spacer()
+                    Spacer()
+                }
                 HStack(spacing: 3) {
                     Image(systemName: "folder")
                     Text("Stored as ordinary folders on \(catalog.volumeName) ·")
@@ -344,6 +362,253 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 820, minHeight: 560)
+        .task(id: catalog.path) {
+            await imports.inspect(catalog: catalog)
+        }
+    }
+
+    private var sidebarStatus: String {
+        switch imports.phase {
+        case .running, .recovering, .stopping:
+            return "Importing · \(imports.percentCompleted)%"
+        case .recoveryPrompt, .sourceUnavailable, .failed:
+            return "Import paused · needs you"
+        default:
+            return "Everything is safe"
+        }
+    }
+
+    private var sidebarStatusColor: Color {
+        switch imports.phase {
+        case .running, .recovering, .stopping:
+            return .blue
+        case .recoveryPrompt, .sourceUnavailable:
+            return .orange
+        case .failed:
+            return .red
+        default:
+            return .green
+        }
+    }
+
+    @ViewBuilder
+    private func importActivity(_ catalog: RecentCatalog) -> some View {
+        switch imports.phase {
+        case .running, .recovering:
+            importProgress
+        case .stopping:
+            activityMessage(
+                icon: "stop.circle",
+                title: "Stopping safely…",
+                message: "Souvenirs keeps every verified item and records where the import stopped.",
+                tint: .secondary,
+                identifier: "import-stopping",
+                actionTitle: nil
+            )
+        case .completed(let outcome):
+            completedImport(outcome)
+        case .sourceUnavailable:
+            activityMessage(
+                icon: "externaldrive.badge.exclamationmark",
+                title: "Connect \(imports.sourceName) to continue",
+                message: "Everything already copied is safe. The import will resume after you reconnect the source.",
+                tint: .orange,
+                identifier: "import-source-unavailable",
+                actionTitle: "Dismiss",
+                action: imports.dismissOutcome
+            )
+        case .cancelled(let copiedCount):
+            activityMessage(
+                icon: "stop.circle.fill",
+                title: "Import stopped",
+                message: "\(copiedCount) verified items remain in your catalog. Nothing on the source was changed.",
+                tint: .secondary,
+                identifier: "import-cancelled",
+                actionTitle: "Done",
+                action: imports.dismissOutcome
+            )
+        case .failed(let message):
+            activityMessage(
+                icon: "exclamationmark.triangle.fill",
+                title: "Import needs attention",
+                message: message,
+                tint: .red,
+                identifier: "import-failed",
+                actionTitle: "Dismiss",
+                action: imports.dismissOutcome
+            )
+        case .idle, .recoveryPrompt:
+            Spacer()
+        }
+    }
+
+    private var importProgress: some View {
+        VStack(spacing: 18) {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Text("Copying \(imports.completedUnits) of \(imports.totalUnits)")
+                        .font(.headline)
+                        .accessibilityIdentifier("import-progress-count")
+                    Spacer()
+                    Text("\(imports.percentCompleted)%")
+                        .foregroundStyle(.secondary)
+                }
+                ProgressView(value: imports.fractionCompleted)
+                    .progressViewStyle(.linear)
+                    .accessibilityIdentifier("import-progress-bar")
+                HStack {
+                    Label(
+                        "Keep \(imports.sourceName) connected. Nothing on it will change. You can close this window.",
+                        systemImage: "checkmark.shield"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Stop…") { imports.stop() }
+                        .disabled(!imports.canStop)
+                        .accessibilityIdentifier("stop-import")
+                }
+            }
+            .padding(16)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.08), radius: 14, y: 6)
+
+            Text(imports.progressMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("import-progress-message")
+            thumbnailWall
+        }
+        .padding(22)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func completedImport(_ outcome: ImportOutcome) -> some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 11) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("All \(outcome.copiedCount) copied and checked. You can eject \(imports.sourceName).")
+                        .font(.headline)
+                        .accessibilityIdentifier("import-completed")
+                    Text("\(outcome.skippedCount) already in your archive were skipped · \(outcome.leftOnSourceCount) remain on the source")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { imports.dismissOutcome() }
+                    .accessibilityIdentifier("dismiss-import-completed")
+            }
+            .padding(14)
+            .background(.green.opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12).stroke(.green.opacity(0.28))
+            }
+            thumbnailWall
+        }
+        .padding(22)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private var thumbnailWall: some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 5),
+            spacing: 7
+        ) {
+            ForEach(0..<15, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(
+                        [Color.blue, .teal, .green, .indigo, .mint][index % 5]
+                            .opacity(index < Int(imports.completedUnits) ? 0.52 : 0.1)
+                    )
+                    .frame(height: index == 0 ? 118 : 80)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func activityMessage(
+        icon: String,
+        title: String,
+        message: String,
+        tint: Color,
+        identifier: String,
+        actionTitle: String?,
+        action: @escaping () -> Void = {}
+    ) -> some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: icon)
+                .font(.system(size: 34))
+                .foregroundStyle(tint)
+            Text(title)
+                .font(.title2.bold())
+                .accessibilityIdentifier(identifier)
+            Text(message)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+            if let actionTitle {
+                Button(actionTitle, action: action)
+                    .accessibilityIdentifier("\(identifier)-action")
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var recoveryOverlay: some View {
+        if case .recoveryPrompt(let sourceAvailable) = imports.phase {
+            ZStack {
+                Color.black.opacity(0.24).ignoresSafeArea()
+                VStack(alignment: .leading, spacing: 14) {
+                    Label(
+                        sourceAvailable
+                            ? "Finish importing “\(imports.collectionName)”?"
+                            : "Connect \(imports.sourceName) to finish the import",
+                        systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
+                    )
+                    .font(.title3.bold())
+                    .accessibilityIdentifier("recovery-title")
+                    Text(
+                        sourceAvailable
+                            ? "The import stopped before it finished. Nothing was lost."
+                            : "\(imports.completedUnits) items are safely in your catalog. The rest are still on the source."
+                    )
+                    .foregroundStyle(.secondary)
+                    Label(
+                        "\(imports.completedUnits) items are safely in your catalog.",
+                        systemImage: "checkmark"
+                    )
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+                    if !sourceAvailable {
+                        Label("Waiting for the source. Recovery starts when it is available.", systemImage: "progress.indicator")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("recovery-source-unavailable")
+                    }
+                    HStack {
+                        Button("Stop Here…") { imports.stopRecoveryHere() }
+                            .accessibilityIdentifier("cancel-recovery")
+                        Spacer()
+                        Button("Not Now") { imports.deferRecovery() }
+                            .accessibilityIdentifier("defer-recovery")
+                        Button("Finish Import") { imports.finishRecovery() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!sourceAvailable)
+                            .accessibilityIdentifier("finish-recovery")
+                    }
+                }
+                .padding(24)
+                .frame(width: 465)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                .shadow(color: .black.opacity(0.28), radius: 32, y: 18)
+            }
+        }
     }
 
     private func welcomeAction(
@@ -445,6 +710,7 @@ struct ContentView: View {
 private struct ImportPlanningSheet: View {
     @ObservedObject var model: ImportPlanningModel
     let onCancel: () -> Void
+    let onStart: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -502,6 +768,7 @@ private struct ImportPlanningSheet: View {
                     .accessibilityIdentifier("cancel-import-review")
                 Button(model.isPrepared ? "Plan Ready" : "Start Import") {
                     model.prepareExecution()
+                    if model.isPrepared { onStart() }
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
@@ -705,12 +972,13 @@ private struct ImportPlanningSheet: View {
                     volumeName: "photos-nas.local"
                 )
             ]
-        )
+        ),
+        imports: ImportExecutionCoordinator(engine: PreviewCatalogEngine())
     )
 }
 
 @MainActor
-private final class PreviewCatalogEngine: CatalogEngineClient {
+private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEngine {
     func validateCatalog(path: String, intent: String) async throws
         -> EngineSupervisor.CatalogLocation {
         .init(
@@ -782,5 +1050,25 @@ private final class PreviewCatalogEngine: CatalogEngineClient {
             requiredSpaceBytes: scan.totalBytes,
             canStart: dateResolution != nil
         )
+    }
+
+    func startImportExecution(
+        catalogPath: String,
+        sourcePath: String,
+        collectionName: String
+    ) async throws -> String { "preview-operation" }
+    func inspectUnfinishedOperation(
+        catalogPath: String
+    ) async throws -> EngineSupervisor.UnfinishedOperation? { nil }
+    func recoverOperation(operationID: String) async throws -> String { "preview-recovery" }
+    func cancel(
+        operationID: String
+    ) async throws -> EngineSupervisor.CancellationAccepted {
+        .init(operationID: operationID)
+    }
+    func events(
+        for operationID: String
+    ) async throws -> AsyncThrowingStream<EngineSupervisor.OperationEvent, any Error> {
+        AsyncThrowingStream { $0.finish() }
     }
 }

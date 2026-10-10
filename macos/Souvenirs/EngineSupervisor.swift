@@ -105,6 +105,24 @@ public actor EngineSupervisor {
         }
     }
 
+    public struct UnfinishedOperation: Codable, Equatable, Sendable {
+        public let operationID: String
+        public let collectionName: String
+        public let sourceName: String
+        public let copiedCount: Int
+        public let totalCount: Int
+        public let sourceAvailable: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case operationID = "operation_id"
+            case collectionName = "collection_name"
+            case sourceName = "source_name"
+            case copiedCount = "copied_count"
+            case totalCount = "total_count"
+            case sourceAvailable = "source_available"
+        }
+    }
+
     public struct OperationEvent: Equatable, Sendable {
         public enum Payload: Equatable, Sendable {
             case started(name: String)
@@ -566,6 +584,22 @@ public actor EngineSupervisor {
             )
         }
         return result.review
+    }
+
+    public func inspectUnfinishedOperation(
+        catalogPath: String
+    ) async throws -> UnfinishedOperation? {
+        let result: OperationInspectionResult = try await sendRequest(
+            method: "operation.inspect",
+            parameters: CatalogPathParameters(path: catalogPath),
+            timeout: requestTimeout
+        )
+        guard result.type == "operation_inspection" else {
+            throw SupervisorError.malformedResponse(
+                "The response result type is not operation_inspection"
+            )
+        }
+        return result.operation
     }
 
     private func catalogLocation(from result: CatalogResult) throws -> CatalogLocation {
@@ -1677,6 +1711,11 @@ private struct ImportReviewResult: Decodable, Sendable {
         case requiredSpaceBytes = "required_space_bytes"
         case canStart = "can_start"
     }
+}
+
+private struct OperationInspectionResult: Decodable, Sendable {
+    let type: String
+    let operation: EngineSupervisor.UnfinishedOperation?
 }
 
 private struct OperationEventEnvelope: Decodable {

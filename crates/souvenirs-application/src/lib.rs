@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use souvenirs_domain::names::CatalogLabel;
 use souvenirs_storage::{
-    CatalogConfig, CatalogInitializationError, CatalogLayout, StorageCapabilities,
-    StorageCapabilityError, WriteSuitability, FORMAT_VERSION,
+    read_operation_records, CatalogConfig, CatalogInitializationError, CatalogLayout,
+    DurableTransition, OperationRecord, StorageCapabilities, StorageCapabilityError,
+    WriteSuitability, FORMAT_VERSION,
 };
 use time::{macros::format_description, Date, OffsetDateTime};
 
@@ -147,12 +148,116 @@ pub struct ImportReview {
 
 pub struct ImportPlanningService;
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UnfinishedOperation {
+    pub operation_id: String,
+    pub collection_name: String,
+    pub source_name: String,
+    pub copied_count: usize,
+    pub total_count: usize,
+    pub source_available: bool,
+}
+
+pub struct OperationInspectionService;
+
+impl OperationInspectionService {
+    pub fn unfinished(
+        catalog: impl AsRef<Path>,
+    ) -> Result<Option<UnfinishedOperation>, CatalogServiceError> {
+        let catalog = catalog.as_ref();
+        CatalogService::open(catalog)?;
+        let journals = CatalogLayout::new(catalog).journal_directory();
+        let entries = match fs::read_dir(&journals) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(CatalogServiceError::Io {
+                    path: journals,
+                    source,
+                });
+            }
+        };
+        let mut paths = entries
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|source| CatalogServiceError::Io {
+                        path: journals.clone(),
+                        source,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        paths.sort();
+        for path in paths {
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("-initialize.jsonl"))
+            {
+                continue;
+            }
+            let records = read_operation_records(&path).map_err(|error| {
+                CatalogServiceError::InvalidOperationJournal {
+                    path: path.clone(),
+                    message: error.to_string(),
+                }
+            })?;
+            if matches!(records.last(), Some(OperationRecord::Outcome { .. })) {
+                continue;
+            }
+            let Some(OperationRecord::Plan { operation_id, .. }) = records.first() else {
+                continue;
+            };
+            let Some((collection_name, source_path, total_count)) =
+                records.iter().find_map(|record| match record {
+                    OperationRecord::Metadata {
+                        collection_name,
+                        source_path,
+                        total_count,
+                    } => Some((collection_name, source_path, total_count)),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let copied_count = records
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record,
+                        OperationRecord::Transition {
+                            transition: DurableTransition::CopyPublished { .. }
+                        }
+                    )
+                })
+                .count();
+            return Ok(Some(UnfinishedOperation {
+                operation_id: operation_id.clone(),
+                collection_name: collection_name.clone(),
+                source_name: source_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("the source")
+                    .to_owned(),
+                copied_count,
+                total_count: *total_count,
+                source_available: source_path.is_dir(),
+            }));
+        }
+        Ok(None)
+    }
+}
+
 impl ImportPlanningService {
     pub fn scan(source: impl AsRef<Path>) -> Result<ImportScanSummary, ImportPlanningError> {
         let source = source.as_ref();
         if !source.is_dir() {
             return Err(ImportPlanningError::SourceUnavailable(source.to_path_buf()));
         }
+
         let mut files = Vec::new();
         collect_source_files(source, &mut files)?;
         files.sort();
@@ -446,6 +551,10 @@ pub enum CatalogServiceError {
         source: std::io::Error,
     },
     InvalidConfig(PathBuf),
+    InvalidOperationJournal {
+        path: PathBuf,
+        message: String,
+    },
     InvalidName(String),
     NotCatalog(PathBuf),
     NotDirectory(PathBuf),
@@ -460,6 +569,7 @@ impl CatalogServiceError {
             Self::AlreadyCatalog(_) => "catalog_already_exists",
             Self::Initialization(_) | Self::Io { .. } | Self::Storage(_) => "catalog_io",
             Self::InvalidConfig(_) => "invalid_catalog",
+            Self::InvalidOperationJournal { .. } => "invalid_operation_journal",
             Self::InvalidName(_) => "invalid_catalog_name",
             Self::NotCatalog(_) => "not_a_catalog",
             Self::NotDirectory(_) => "not_a_directory",
@@ -480,6 +590,11 @@ impl fmt::Display for CatalogServiceError {
             Self::InvalidConfig(_) => {
                 formatter.write_str("The catalog configuration is damaged or unreadable.")
             }
+            Self::InvalidOperationJournal { path, message } => write!(
+                formatter,
+                "Could not read operation journal {}: {message}",
+                path.display()
+            ),
             Self::InvalidName(message) => write!(formatter, "Choose a different name: {message}"),
             Self::NotCatalog(_) => formatter.write_str(
                 "This folder is not a Souvenirs catalog. Choose a folder containing .souvenirs.yml.",
@@ -518,6 +633,7 @@ mod tests {
     use super::{
         CatalogIntent, CatalogService, CatalogServiceError, DateResolution, DestinationMode,
         ImportPlanningError, ImportPlanningService, ImportReviewRequest,
+        OperationInspectionService,
     };
 
     #[test]
@@ -530,6 +646,10 @@ mod tests {
             .expect("catalog should initialize");
         let location = CatalogService::open(directory.path()).expect("catalog should open");
         assert_eq!(location.display_name.as_deref(), Some("Family Catalog"));
+        assert_eq!(
+            OperationInspectionService::unfinished(directory.path()).unwrap(),
+            None
+        );
         assert!(matches!(
             CatalogService::validate(directory.path(), CatalogIntent::Create),
             Err(CatalogServiceError::AlreadyCatalog(_))
@@ -543,6 +663,56 @@ mod tests {
             CatalogService::open(directory.path()),
             Err(CatalogServiceError::NotCatalog(_))
         ));
+    }
+
+    #[test]
+    fn reports_typed_unfinished_operation_metadata() {
+        let directory = tempdir().expect("temporary directory");
+        let catalog = directory.path().join("catalog");
+        let source = directory.path().join("EOS_DIGITAL");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir(&source).unwrap();
+        CatalogService::create(&catalog, "Family").unwrap();
+        let layout = souvenirs_storage::CatalogLayout::new(&catalog);
+        let lock = souvenirs_storage::CatalogLock::acquire(&layout).unwrap();
+        let mut journal = souvenirs_storage::OperationJournal::create(
+            &layout,
+            &lock,
+            "import-one",
+            &serde_json::json!({"confirmed": true}),
+        )
+        .unwrap();
+        journal
+            .record_metadata(&layout, &lock, "Dolomites".to_owned(), source.clone(), 12)
+            .unwrap();
+        drop(journal);
+        lock.release().unwrap();
+        fs::remove_dir(&source).unwrap();
+
+        let operation = OperationInspectionService::unfinished(&catalog)
+            .unwrap()
+            .expect("unfinished operation");
+        assert_eq!(operation.operation_id, "import-one");
+        assert_eq!(operation.collection_name, "Dolomites");
+        assert_eq!(operation.source_name, "EOS_DIGITAL");
+        assert_eq!(operation.total_count, 12);
+        assert!(!operation.source_available);
+    }
+
+    #[test]
+    fn missing_journal_directory_means_no_unfinished_operation() {
+        let directory = tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Family").unwrap();
+        let journals = souvenirs_storage::CatalogLayout::new(directory.path()).journal_directory();
+        for entry in fs::read_dir(&journals).unwrap() {
+            fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        fs::remove_dir(journals).unwrap();
+
+        assert_eq!(
+            OperationInspectionService::unfinished(directory.path()).unwrap(),
+            None
+        );
     }
 
     #[test]

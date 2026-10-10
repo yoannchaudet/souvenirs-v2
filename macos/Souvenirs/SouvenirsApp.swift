@@ -96,6 +96,7 @@ final class EngineAppModel: ObservableObject {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let engine = EngineAppModel()
+    lazy var imports = ImportExecutionCoordinator(engine: engine)
 
     private var terminationRequested = false
 
@@ -123,21 +124,30 @@ struct SouvenirsApp: App {
 
     var body: some Scene {
         WindowGroup {
-            EngineRootView(engine: appDelegate.engine)
+            EngineRootView(
+                engine: appDelegate.engine,
+                imports: appDelegate.imports
+            )
         }
     }
 }
 
 private struct EngineRootView: View {
     @ObservedObject var engine: EngineAppModel
+    @ObservedObject var imports: ImportExecutionCoordinator
     @StateObject private var welcome: CatalogWelcomeModel
 
-    init(engine: EngineAppModel) {
+    init(engine: EngineAppModel, imports: ImportExecutionCoordinator) {
         self.engine = engine
+        self.imports = imports
         _welcome = StateObject(wrappedValue: CatalogWelcomeModel(engine: engine))
     }
 
     var body: some View {
-        ContentView(engineStatus: engine.status, model: welcome)
+        ContentView(
+            engineStatus: engine.status,
+            model: welcome,
+            imports: imports
+        )
     }
 }

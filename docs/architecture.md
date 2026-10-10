@@ -56,6 +56,17 @@ SwiftUI owns:
 - State-driven progress views.
 - Most collection views.
 
+### Interface conventions
+
+The application uses standard macOS window controls instead of custom traffic-light controls from the design mockups.
+
+The application uses system materials, controls, focus behavior, and reduced-motion behavior.
+
+Text can increase the height of progress cards and recovery sheets when accessibility settings require more space.
+
+The recovery sheet keeps the primary action visible but disabled while the source is unavailable.
+This behavior preserves the mockup hierarchy and exposes the unavailable action to assistive technology.
+
 AppKit can own:
 
 - Large tables.

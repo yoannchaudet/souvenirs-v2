@@ -15,6 +15,7 @@ pub const CATALOG_CREATE_METHOD: &str = "catalog.create";
 pub const CATALOG_OPEN_METHOD: &str = "catalog.open";
 pub const IMPORT_SCAN_METHOD: &str = "import.scan";
 pub const IMPORT_REVIEW_METHOD: &str = "import.review";
+pub const OPERATION_INSPECT_METHOD: &str = "operation.inspect";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Request {
@@ -43,6 +44,8 @@ pub enum RequestPayload {
     ScanImport(ImportScanParameters),
     #[serde(rename = "import.review")]
     ReviewImport(ImportReviewParameters),
+    #[serde(rename = "operation.inspect")]
+    InspectOperation(CatalogPathParameters),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -61,6 +64,14 @@ pub struct CancelOperationParameters {
 #[serde(deny_unknown_fields)]
 pub struct StartOperationParameters {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -187,6 +198,7 @@ pub enum ResponseResult {
     Catalog(CatalogResult),
     ImportScan(ImportScanResult),
     ImportReview(Box<ImportReviewResult>),
+    OperationInspection(OperationInspectionResult),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -245,6 +257,21 @@ pub struct ImportReviewResult {
     pub operation_count: usize,
     pub required_space_bytes: u64,
     pub can_start: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct OperationInspectionResult {
+    pub operation: Option<UnfinishedOperationResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct UnfinishedOperationResult {
+    pub operation_id: String,
+    pub collection_name: String,
+    pub source_name: String,
+    pub copied_count: usize,
+    pub total_count: usize,
+    pub source_available: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -443,12 +470,13 @@ mod tests {
                         | RequestPayload::ValidateCatalog(_)
                         | RequestPayload::CreateCatalog(_)
                         | RequestPayload::OpenCatalog(_)
+                        | RequestPayload::InspectOperation(_)
                 ));
                 request_count += 1;
             }
         }
-        assert_eq!(request_count, 3);
-        assert_eq!(engine_message_count, 9);
+        assert_eq!(request_count, 4);
+        assert_eq!(engine_message_count, 10);
 
         let schema_value =
             serde_json::to_value(protocol_schema()).expect("schema should serialize");

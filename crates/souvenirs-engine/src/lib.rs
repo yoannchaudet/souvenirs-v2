@@ -5,14 +5,15 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 use souvenirs_application::{
     CatalogIntent as ApplicationIntent, CatalogService, DateResolution, DestinationMode,
-    ImportPlanningService, ImportReviewRequest,
+    ImportPlanningService, ImportReviewRequest, OperationInspectionService,
 };
 use souvenirs_protocol::{
     CatalogIntent, CatalogResult, EngineMessage, HandshakeResult, ImportDateResolution,
-    ImportDestinationMode, ImportReviewResult, ImportScanResult, ProtocolError, Request,
-    RequestPayload, ResponseResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD,
-    CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD,
-    IMPORT_SCAN_METHOD, PROTOCOL_VERSION,
+    ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationInspectionResult,
+    ProtocolError, Request, RequestPayload, ResponseResult, UnfinishedOperationResult,
+    CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD,
+    COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, OPERATION_INSPECT_METHOD,
+    PROTOCOL_VERSION,
 };
 
 pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -107,6 +108,7 @@ impl Connection {
                             CATALOG_OPEN_METHOD.to_owned(),
                             IMPORT_SCAN_METHOD.to_owned(),
                             IMPORT_REVIEW_METHOD.to_owned(),
+                            OPERATION_INSPECT_METHOD.to_owned(),
                         ],
                     }),
                 )
@@ -167,6 +169,27 @@ impl Connection {
                     ),
                 }),
             ),
+            RequestPayload::InspectOperation(parameters) => {
+                match OperationInspectionService::unfinished(parameters.path) {
+                    Ok(operation) => EngineMessage::success(
+                        request.id,
+                        ResponseResult::OperationInspection(OperationInspectionResult {
+                            operation: operation.map(|operation| UnfinishedOperationResult {
+                                operation_id: operation.operation_id,
+                                collection_name: operation.collection_name,
+                                source_name: operation.source_name,
+                                copied_count: operation.copied_count,
+                                total_count: operation.total_count,
+                                source_available: operation.source_available,
+                            }),
+                        }),
+                    ),
+                    Err(error) => EngineMessage::error(
+                        Some(request.id),
+                        ProtocolError::new(error.code(), error.to_string()),
+                    ),
+                }
+            }
         }
     }
 }
@@ -351,7 +374,8 @@ mod tests {
                     "catalog.create",
                     "catalog.open",
                     "import.scan",
-                    "import.review"
+                    "import.review",
+                    "operation.inspect"
                 ]
             })
         );
