@@ -65,6 +65,7 @@ impl Scenario {
         fs::write(&source, b"verified bytes").unwrap();
         let manifest = format!("{}  original.bin\n", digest(b"verified bytes")).into_bytes();
 
+        assert_ne!(failpoint, Failpoint::JournalCreated);
         if failpoint == Failpoint::PlanPersisted {
             let error = OperationJournal::create_failing_at(
                 &layout,
@@ -193,6 +194,43 @@ impl Scenario {
                 contents: self.manifest.clone(),
             }],
         }
+    }
+}
+
+#[test]
+fn recovery_discards_an_interrupted_final_append_before_continuing() {
+    for tail in [
+        br#"{"kind":"transition","transition":{"kind":"directory_created""#.as_slice(),
+        br#"{"kind":"outcome","outcome":"completed""#.as_slice(),
+    ] {
+        let (_temporary, layout, lock) = initialized_catalog();
+        let journal =
+            OperationJournal::create(&layout, &lock, "tail", &json!({"confirmed": true})).unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(tail).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let outcome = layout
+            .recover_operation(&lock, &path, RecoveryRequest::default())
+            .unwrap();
+
+        assert_eq!(outcome, RecoveryOutcome::Completed);
+        assert_eq!(
+            souvenirs_storage::read_operation_records(&path).unwrap(),
+            vec![
+                OperationRecord::Plan {
+                    operation_id: "tail".into(),
+                    plan: json!({"confirmed": true}),
+                },
+                OperationRecord::Outcome {
+                    outcome: souvenirs_storage::OperationOutcome::Completed,
+                },
+            ]
+        );
+        assert!(fs::read(&path).unwrap().ends_with(b"\n"));
     }
 }
 

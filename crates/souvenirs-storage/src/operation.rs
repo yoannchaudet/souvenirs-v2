@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use time::macros::format_description;
@@ -147,10 +148,15 @@ impl OperationJournal {
         plan: &impl Serialize,
         initial_failpoint: Option<Failpoint>,
     ) -> Result<Self, OperationJournalError> {
+        static JOURNAL_CREATION: Mutex<()> = Mutex::new(());
+        let _creation = JOURNAL_CREATION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         ensure_lock(layout, lock)?;
-        ensure_no_unfinished_journal(layout)?;
-        validate_identifier("operation", &operation_id)?;
+        validate_new_operation_identifier(&operation_id)?;
         let plan = serde_json::to_value(plan).map_err(OperationJournalError::SerializePlan)?;
+        ensure_no_unfinished_journal(layout)?;
         let catalog_root =
             fs::canonicalize(layout.root()).map_err(|source| OperationJournalError::Io {
                 action: "resolve operation catalog root",
@@ -193,6 +199,7 @@ impl OperationJournal {
         };
         #[cfg(not(feature = "test-failpoints"))]
         let _ = initial_failpoint;
+        journal.check_failpoint(Failpoint::JournalCreated)?;
         journal.append(&OperationRecord::Plan { operation_id, plan })?;
         journal.check_failpoint(Failpoint::PlanPersisted)?;
         Ok(journal)
@@ -245,24 +252,11 @@ impl OperationJournal {
             ));
         }
 
-        let bytes = fs::read(path).map_err(|source| OperationJournalError::Io {
-            action: "read operation journal for recovery",
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let mut records = Vec::new();
-        for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-            records.push(serde_json::from_slice(line).map_err(|source| {
-                OperationJournalError::DeserializeRecord {
-                    path: path.to_path_buf(),
-                    line: index + 1,
-                    source,
-                }
-            })?);
-        }
+        let ParsedOperationRecords {
+            records,
+            complete_length,
+            interrupted_tail,
+        } = read_parsed_operation_records(path, "read operation journal for recovery")?;
         let operation_id = match records.first() {
             Some(OperationRecord::Plan { operation_id, .. }) => operation_id.clone(),
             _ => return Err(OperationJournalError::MissingPlan(path.to_path_buf())),
@@ -279,6 +273,15 @@ impl OperationJournal {
                 path: path.to_path_buf(),
                 source,
             })?;
+        if interrupted_tail {
+            file.set_len(complete_length)
+                .and_then(|()| sync_file(&file))
+                .map_err(|source| OperationJournalError::Io {
+                    action: "discard interrupted operation journal append",
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        }
         let catalog_root =
             fs::canonicalize(layout.root()).map_err(|source| OperationJournalError::Io {
                 action: "resolve operation catalog root",
@@ -479,25 +482,49 @@ pub fn read_operation_records(
             path.to_path_buf(),
         ));
     }
+    Ok(read_parsed_operation_records(path, "read operation journal")?.records)
+}
+
+struct ParsedOperationRecords {
+    records: Vec<OperationRecord>,
+    complete_length: u64,
+    interrupted_tail: bool,
+}
+
+fn read_parsed_operation_records(
+    path: &Path,
+    action: &'static str,
+) -> Result<ParsedOperationRecords, OperationJournalError> {
     let bytes = fs::read(path).map_err(|source| OperationJournalError::Io {
-        action: "read operation journal",
+        action,
         path: path.to_path_buf(),
         source,
     })?;
     let mut records = Vec::new();
-    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+    let mut start = 0;
+    let mut line_number = 1;
+    for (end, _) in bytes.iter().enumerate().filter(|(_, byte)| **byte == b'\n') {
+        let line = &bytes[start..end];
         if line.is_empty() {
+            start = end + 1;
+            line_number += 1;
             continue;
         }
         records.push(serde_json::from_slice(line).map_err(|source| {
             OperationJournalError::DeserializeRecord {
                 path: path.to_path_buf(),
-                line: index + 1,
+                line: line_number,
                 source,
             }
         })?);
+        start = end + 1;
+        line_number += 1;
     }
-    Ok(records)
+    Ok(ParsedOperationRecords {
+        records,
+        complete_length: start as u64,
+        interrupted_tail: start < bytes.len(),
+    })
 }
 
 fn ensure_lock(layout: &CatalogLayout, lock: &CatalogLock) -> Result<(), OperationJournalError> {
@@ -525,7 +552,32 @@ fn ensure_no_unfinished_journal(layout: &CatalogLayout) -> Result<(), OperationJ
         if !is_operation_journal(&path) {
             continue;
         }
-        let finished = journal_has_outcome(&path)?;
+        if journal_tail_has_outcome(&path)? {
+            continue;
+        }
+        if is_initialization_journal(&path) {
+            return Err(OperationJournalError::UnfinishedOperation(path));
+        }
+        let parsed = read_parsed_operation_records(&path, "read operation journal outcome")?;
+        if parsed.records.is_empty() {
+            fs::remove_file(&path).map_err(|source| OperationJournalError::Io {
+                action: "remove interrupted pre-plan operation journal",
+                path: path.clone(),
+                source,
+            })?;
+            sync_directory(&layout.journal_directory()).map_err(|source| {
+                OperationJournalError::Io {
+                    action: "persist interrupted pre-plan journal removal",
+                    path: layout.journal_directory(),
+                    source,
+                }
+            })?;
+            continue;
+        }
+        let finished = parsed
+            .records
+            .last()
+            .is_some_and(|record| matches!(record, OperationRecord::Outcome { .. }));
         if !finished {
             return Err(OperationJournalError::UnfinishedOperation(path));
         }
@@ -541,7 +593,13 @@ fn is_operation_journal(path: &Path) -> bool {
             .is_some_and(|name| name.starts_with("._"))
 }
 
-fn journal_has_outcome(path: &Path) -> Result<bool, OperationJournalError> {
+fn is_initialization_journal(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("-initialize.jsonl"))
+}
+
+fn journal_tail_has_outcome(path: &Path) -> Result<bool, OperationJournalError> {
     const OUTCOME_TAIL_BYTES: u64 = 4 * 1024;
 
     let mut file = File::open(path).map_err(|source| OperationJournalError::Io {
@@ -578,6 +636,17 @@ fn journal_has_outcome(path: &Path) -> Result<bool, OperationJournalError> {
         .is_some_and(|record| matches!(record, OperationRecord::Outcome { .. })))
 }
 
+fn validate_new_operation_identifier(identifier: &str) -> Result<(), OperationJournalError> {
+    validate_identifier("operation", identifier)?;
+    if identifier == "initialize" || identifier.ends_with("-initialize") {
+        return Err(OperationJournalError::ReservedIdentifier {
+            kind: "operation",
+            value: identifier.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_identifier(
     kind: &'static str,
     identifier: &str,
@@ -597,6 +666,7 @@ pub(crate) fn validate_identifier(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failpoint {
+    JournalCreated,
     PlanPersisted,
     DirectoryIntentPersisted,
     DirectoryPersisted,
@@ -637,6 +707,10 @@ pub enum OperationJournalError {
     },
     Lock(LockError),
     MissingPlan(PathBuf),
+    ReservedIdentifier {
+        kind: &'static str,
+        value: String,
+    },
     SerializePlan(serde_json::Error),
     SerializeRecord {
         path: PathBuf,
@@ -682,6 +756,10 @@ impl fmt::Display for OperationJournalError {
                 "operation journal does not start with a confirmed plan: {}",
                 path.display()
             ),
+            Self::ReservedIdentifier { kind, value } => write!(
+                formatter,
+                "{kind} identifier is reserved for catalog initialization: {value:?}"
+            ),
             Self::SerializePlan(source) => {
                 write!(formatter, "failed to serialize confirmed operation plan: {source}")
             }
@@ -718,6 +796,7 @@ impl Error for OperationJournalError {
             | Self::InvalidIdentifier { .. }
             | Self::InvalidJournalPath(_)
             | Self::MissingPlan(_)
+            | Self::ReservedIdentifier { .. }
             | Self::UnfinishedOperation(_)
             | Self::WrongCatalogJournal
             | Self::WrongCatalogLock => None,
