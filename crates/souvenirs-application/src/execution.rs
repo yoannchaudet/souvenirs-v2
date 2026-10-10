@@ -314,12 +314,12 @@ impl ImportRecoveryService {
         CatalogService::open(catalog_path)
             .map_err(|error| ImportExecutionError::Catalog(error.to_string()))?;
         let layout = CatalogLayout::new(catalog_path);
-        let (journal_path, plan, published) = unfinished_plan(&layout, operation_id)?;
-        if mode == ImportRecoveryMode::Resume {
-            validate_recovery_sources(&plan, &published)?;
-        }
         let lock = CatalogLock::acquire(&layout)
             .map_err(|error| ImportExecutionError::Conflict(error.to_string()))?;
+        let (journal_path, plan, published) = unfinished_plan(&layout, operation_id)?;
+        if mode == ImportRecoveryMode::Resume {
+            validate_recovery_sources(&layout, &plan, &published)?;
+        }
         let (manifest_contents, cancelled_copy_count) = match mode {
             ImportRecoveryMode::Resume => (plan.manifest.contents.clone(), 0),
             ImportRecoveryMode::Cancel => cancellation_manifest(&layout, &plan, &published)?,
@@ -426,6 +426,7 @@ struct ExecutionManifest {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct JournalCopyState {
+    staged_path: Option<PathBuf>,
     sha256: Option<String>,
     size_bytes: Option<u64>,
     published: bool,
@@ -583,13 +584,25 @@ fn unfinished_plan(
                     continue;
                 };
                 match transition {
+                    souvenirs_storage::DurableTransition::CopyStarted {
+                        destination,
+                        staged_path,
+                        ..
+                    } => {
+                        published
+                            .entry(destination.clone())
+                            .or_default()
+                            .staged_path = Some(staged_path.clone());
+                    }
                     souvenirs_storage::DurableTransition::CopyVerified {
                         destination,
+                        staged_path,
                         sha256,
                         bytes_copied,
                         ..
                     } => {
                         let state = published.entry(destination.clone()).or_default();
+                        state.staged_path = Some(staged_path.clone());
                         state.sha256 = Some(sha256.clone());
                         state.size_bytes = Some(*bytes_copied);
                     }
@@ -614,21 +627,22 @@ fn unfinished_plan(
 }
 
 fn validate_recovery_sources(
+    layout: &CatalogLayout,
     plan: &ExecutionPlan,
     published: &BTreeMap<PathBuf, JournalCopyState>,
 ) -> Result<(), ImportExecutionError> {
     for copy in &plan.copies {
-        if !published
-            .get(&copy.destination)
-            .is_some_and(|state| state.published)
-        {
-            let (digest, size_bytes) = digest_file(&copy.source)?;
-            if digest != copy.digest || size_bytes != copy.size_bytes {
-                return Err(ImportExecutionError::Storage(format!(
-                    "source changed after operation preparation: {}",
-                    copy.source.display()
-                )));
+        if let Some(state) = published.get(&copy.destination) {
+            if state.published || verified_copy_can_publish(layout, copy, state)? {
+                continue;
             }
+        }
+        let (digest, size_bytes) = digest_file(&copy.source)?;
+        if digest != copy.digest || size_bytes != copy.size_bytes {
+            return Err(ImportExecutionError::Storage(format!(
+                "source changed after operation preparation: {}",
+                copy.source.display()
+            )));
         }
     }
     Ok(())
@@ -652,6 +666,12 @@ fn cancellation_manifest(
             journal_digest == copy.digest && state.size_bytes == Some(copy.size_bytes);
         if state.published {
             let destination = layout.root().join(&copy.destination);
+            if !destination.is_file() {
+                return Err(ImportExecutionError::Storage(format!(
+                    "published destination is missing during cancellation: {}",
+                    destination.display()
+                )));
+            }
             let (actual_digest, actual_size) = digest_file(&destination)?;
             if !matches_plan || actual_digest != journal_digest || actual_size != copy.size_bytes {
                 return Err(ImportExecutionError::Storage(format!(
@@ -659,7 +679,7 @@ fn cancellation_manifest(
                     destination.display()
                 )));
             }
-        } else if !matches_plan {
+        } else if !verified_copy_can_publish(layout, copy, state)? {
             continue;
         }
         let filename = copy
@@ -671,6 +691,32 @@ fn cancellation_manifest(
         copied_count += 1;
     }
     Ok((encode_manifest(&lines), copied_count))
+}
+
+fn verified_copy_can_publish(
+    layout: &CatalogLayout,
+    copy: &ExecutionCopy,
+    state: &JournalCopyState,
+) -> Result<bool, ImportExecutionError> {
+    let matches_plan = state.sha256.as_deref() == Some(copy.digest.as_str())
+        && state.size_bytes == Some(copy.size_bytes);
+    if !matches_plan {
+        return Ok(false);
+    }
+    let destination = layout.root().join(&copy.destination);
+    if destination.is_file() {
+        let (digest, size_bytes) = digest_file(&destination)?;
+        return Ok(digest == copy.digest && size_bytes == copy.size_bytes);
+    }
+    let Some(staged_path) = state.staged_path.as_deref() else {
+        return Ok(false);
+    };
+    let staged_path = layout.root().join(staged_path);
+    if !staged_path.is_file() {
+        return Ok(false);
+    }
+    let (digest, size_bytes) = digest_file(&staged_path)?;
+    Ok(digest == copy.digest && size_bytes == copy.size_bytes)
 }
 
 fn existing_manifest(path: &Path) -> Result<BTreeMap<String, String>, ImportExecutionError> {
@@ -774,7 +820,7 @@ mod tests {
     use std::fs;
     use std::fs::OpenOptions;
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use tempfile::tempdir;
 
@@ -786,6 +832,22 @@ mod tests {
     use souvenirs_storage::{
         CatalogLayout, CatalogLock, DurableTransition, OperationJournal, OperationRecord,
     };
+
+    fn append_transitions(
+        journal_path: &Path,
+        transitions: impl IntoIterator<Item = DurableTransition>,
+    ) {
+        let mut journal_file = OpenOptions::new().append(true).open(journal_path).unwrap();
+        for transition in transitions {
+            serde_json::to_writer(
+                &mut journal_file,
+                &OperationRecord::Transition { transition },
+            )
+            .unwrap();
+            journal_file.write_all(b"\n").unwrap();
+        }
+        journal_file.sync_all().unwrap();
+    }
 
     #[test]
     fn executes_prepared_import_and_writes_manifest() {
@@ -1023,16 +1085,7 @@ mod tests {
                 bytes_copied: first.size_bytes,
             },
         ];
-        let mut journal_file = OpenOptions::new().append(true).open(journal_path).unwrap();
-        for transition in transitions {
-            serde_json::to_writer(
-                &mut journal_file,
-                &OperationRecord::Transition { transition },
-            )
-            .unwrap();
-            journal_file.write_all(b"\n").unwrap();
-        }
-        journal_file.sync_all().unwrap();
+        append_transitions(&journal_path, transitions);
 
         let (outcome, result) = ImportRecoveryService::recover(
             &fixture.catalog,
@@ -1052,6 +1105,138 @@ mod tests {
             fs::read_to_string(layout.root().join(&prepared.plan.manifest.path)).unwrap();
         assert!(manifest.contains(&first.digest));
         assert!(manifest.contains(first.destination.file_name().unwrap().to_str().unwrap()));
+    }
+
+    #[test]
+    fn cancellation_does_not_manifest_a_missing_verified_stage() {
+        let fixture = fixture();
+        let prepared = ImportExecutionService::prepare(fixture.request()).unwrap();
+        let first = &prepared.plan.copies[0];
+        let layout = CatalogLayout::new(&fixture.catalog);
+        let lock = CatalogLock::acquire(&layout).unwrap();
+        let mut journal =
+            OperationJournal::create(&layout, &lock, prepared.operation_id(), &prepared.plan)
+                .unwrap();
+        for directory in prepared
+            .plan
+            .directories
+            .iter()
+            .filter(|directory| directory.create)
+        {
+            journal
+                .create_destination_directory(&layout, &lock, &directory.step_id, &directory.path)
+                .unwrap();
+        }
+        let journal_path = journal.path().to_path_buf();
+        drop(journal);
+        lock.release().unwrap();
+        let staged_path = PathBuf::from(".souvenirs/staging").join(format!(
+            "{}-{}-{}.copy",
+            prepared.operation_id().len(),
+            prepared.operation_id(),
+            first.step_id
+        ));
+        append_transitions(
+            &journal_path,
+            [
+                DurableTransition::CopyStarted {
+                    step_id: first.step_id.clone(),
+                    source: first.source.clone(),
+                    staged_path: staged_path.clone(),
+                    destination: first.destination.clone(),
+                },
+                DurableTransition::CopyVerified {
+                    step_id: first.step_id.clone(),
+                    staged_path,
+                    destination: first.destination.clone(),
+                    sha256: first.digest.clone(),
+                    bytes_copied: first.size_bytes,
+                },
+            ],
+        );
+
+        let (outcome, result) = ImportRecoveryService::recover(
+            &fixture.catalog,
+            prepared.operation_id(),
+            ImportRecoveryMode::Cancel,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(outcome, RecoveryOutcome::Cancelled);
+        assert_eq!(result.copied_count, 0);
+        assert!(!layout.root().join(&first.destination).exists());
+        assert_eq!(
+            fs::read_to_string(layout.root().join(&prepared.plan.manifest.path)).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn resume_publishes_a_matching_verified_stage_without_the_source() {
+        let fixture = fixture();
+        let prepared = ImportExecutionService::prepare(fixture.request()).unwrap();
+        let first = &prepared.plan.copies[0];
+        let layout = CatalogLayout::new(&fixture.catalog);
+        let lock = CatalogLock::acquire(&layout).unwrap();
+        let mut journal =
+            OperationJournal::create(&layout, &lock, prepared.operation_id(), &prepared.plan)
+                .unwrap();
+        for directory in prepared
+            .plan
+            .directories
+            .iter()
+            .filter(|directory| directory.create)
+        {
+            journal
+                .create_destination_directory(&layout, &lock, &directory.step_id, &directory.path)
+                .unwrap();
+        }
+        let journal_path = journal.path().to_path_buf();
+        drop(journal);
+        lock.release().unwrap();
+        let staged_path = PathBuf::from(".souvenirs/staging").join(format!(
+            "{}-{}-{}.copy",
+            prepared.operation_id().len(),
+            prepared.operation_id(),
+            first.step_id
+        ));
+        let source_bytes = fs::read(&first.source).unwrap();
+        fs::write(layout.root().join(&staged_path), &source_bytes).unwrap();
+        append_transitions(
+            &journal_path,
+            [
+                DurableTransition::CopyStarted {
+                    step_id: first.step_id.clone(),
+                    source: first.source.clone(),
+                    staged_path: staged_path.clone(),
+                    destination: first.destination.clone(),
+                },
+                DurableTransition::CopyVerified {
+                    step_id: first.step_id.clone(),
+                    staged_path,
+                    destination: first.destination.clone(),
+                    sha256: first.digest.clone(),
+                    bytes_copied: first.size_bytes,
+                },
+            ],
+        );
+        fs::remove_file(&first.source).unwrap();
+
+        let (outcome, result) = ImportRecoveryService::recover(
+            &fixture.catalog,
+            prepared.operation_id(),
+            ImportRecoveryMode::Resume,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(outcome, RecoveryOutcome::Completed);
+        assert_eq!(result.copied_count, prepared.plan.copies.len());
+        assert_eq!(
+            fs::read(layout.root().join(&first.destination)).unwrap(),
+            source_bytes
+        );
     }
 
     #[test]
@@ -1108,16 +1293,7 @@ mod tests {
                 sha256: drifted_digest,
             },
         ];
-        let mut journal_file = OpenOptions::new().append(true).open(journal_path).unwrap();
-        for transition in transitions {
-            serde_json::to_writer(
-                &mut journal_file,
-                &OperationRecord::Transition { transition },
-            )
-            .unwrap();
-            journal_file.write_all(b"\n").unwrap();
-        }
-        journal_file.sync_all().unwrap();
+        append_transitions(&journal_path, transitions);
 
         let error = ImportRecoveryService::recover(
             &fixture.catalog,

@@ -111,6 +111,43 @@ fn simulate_interruption_after_first_copy(catalog: &Path, path: &Path) {
     }
 }
 
+fn simulate_interruption_after_first_verification(
+    catalog: &Path,
+    path: &Path,
+    preserve_stage: bool,
+) -> PathBuf {
+    let contents = fs::read_to_string(path).unwrap();
+    let lines = contents.lines().collect::<Vec<_>>();
+    let verified_index = lines
+        .iter()
+        .position(|line| {
+            let record: Value = serde_json::from_str(line).unwrap();
+            record["transition"]["kind"] == "copy_verified"
+        })
+        .expect("journal should contain a verified copy");
+    let verified: Value = serde_json::from_str(lines[verified_index]).unwrap();
+    let step_id = verified["transition"]["step_id"].as_str().unwrap();
+    let started: Value = lines[..verified_index]
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| {
+            record["transition"]["kind"] == "copy_started"
+                && record["transition"]["step_id"] == step_id
+        })
+        .expect("verified copy should have a start record");
+    let source = PathBuf::from(started["transition"]["source"].as_str().unwrap());
+    let destination = catalog.join(verified["transition"]["destination"].as_str().unwrap());
+    let staged = catalog.join(verified["transition"]["staged_path"].as_str().unwrap());
+    if preserve_stage {
+        fs::copy(&destination, &staged).unwrap();
+    }
+    fs::write(path, format!("{}\n", lines[..=verified_index].join("\n"))).unwrap();
+    for entry in fs::read_dir(destination.parent().unwrap()).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    source
+}
+
 #[test]
 fn executes_inspects_and_verifies_without_parsing_human_output() {
     let temporary = TempDir::new().unwrap();
@@ -273,4 +310,87 @@ fn recovery_refuses_a_changed_remaining_source() {
     assert_eq!(output.status.code(), Some(4));
     let error: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(error["error"]["code"], "conflict");
+}
+
+#[test]
+fn cancellation_does_not_manifest_a_missing_verified_stage() {
+    let temporary = TempDir::new().unwrap();
+    let (catalog, _source, plan) = prepare_plan(&temporary, true);
+    let executed = json_stdout(&run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+    ]));
+    let operation_id = executed["result"]["operation_id"].as_str().unwrap();
+    simulate_interruption_after_first_verification(
+        &catalog,
+        &operation_journal(&catalog, operation_id),
+        false,
+    );
+
+    let result = json_stdout(&run(&[
+        "operation",
+        "cancel",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--operation-id",
+        operation_id,
+        "--plan",
+        plan.to_str().unwrap(),
+    ]));
+
+    assert_eq!(result["result"]["outcome"], "cancelled");
+    let integrity = json_stdout(&run(&[
+        "integrity",
+        "check",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    assert_eq!(integrity["result"]["valid"], true);
+    assert_eq!(integrity["result"]["checked_files"], 0);
+}
+
+#[test]
+fn recovery_publishes_a_verified_stage_without_the_source() {
+    let temporary = TempDir::new().unwrap();
+    let (catalog, _source, plan) = prepare_plan(&temporary, true);
+    let executed = json_stdout(&run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+    ]));
+    let operation_id = executed["result"]["operation_id"].as_str().unwrap();
+    let verified_source = simulate_interruption_after_first_verification(
+        &catalog,
+        &operation_journal(&catalog, operation_id),
+        true,
+    );
+    fs::remove_file(verified_source).unwrap();
+
+    let result = json_stdout(&run(&[
+        "operation",
+        "recover",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--operation-id",
+        operation_id,
+        "--plan",
+        plan.to_str().unwrap(),
+    ]));
+
+    assert_eq!(result["result"]["outcome"], "completed");
+    let integrity = json_stdout(&run(&[
+        "integrity",
+        "check",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    assert_eq!(integrity["result"]["valid"], true);
+    assert_eq!(integrity["result"]["checked_files"], 2);
 }
