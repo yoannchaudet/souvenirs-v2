@@ -55,6 +55,10 @@ build-release:
 protocol-schema:
     cargo run -p souvenirs-protocol --example generate_schema
 
+# Regenerate the committed import plan schema.
+import-plan-schema:
+    cargo run -p souvenirs-cli --example generate_import_plan_schema
+
 # Check formatting, static analysis, and tests.
 check:
     cargo fmt --all -- --check

@@ -213,6 +213,7 @@ The handshake reports the engine version, protocol version, compatible client ve
 
 The Rust types generate a committed JSON Schema.
 Swift protocol fixtures must validate against this schema.
+Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v1.json`.
 
 ### Engine
 
@@ -268,7 +269,15 @@ Tests and agents must not parse human-readable output.
 
 Every mutation uses an immutable, serializable plan.
 
-A plan contains:
+The saved import plan is a versioned envelope.
+The envelope contains `schema_version`, `confirmed`, `source_root`, and `import_plan`.
+
+The import plan contains a plan document and its digest.
+The version 1 digest payload is the complete `PlanDocument`.
+The digest excludes the `digest` field because that field contains the result.
+The digest excludes the saved-plan envelope because that envelope wraps the import plan.
+
+The plan document contains:
 
 - A schema version.
 - A unique identifier.
@@ -281,7 +290,34 @@ A plan contains:
 - Planned filesystem steps.
 - Required free space.
 - Creation time.
-- A digest of the complete plan.
+
+Version 1 normalizes ordered collections before serialization:
+
+- Manifest fingerprints use path order.
+- Items use item identifier order.
+- Item files use source path, then source file identifier order.
+- Unhandled content uses source path, then source file identifier order.
+- Ambiguous sidecar candidates use identifier order.
+- Steps use sequence order.
+
+The digest is SHA-256 over the normalized plan document.
+The digest input uses compact UTF-8 JSON from the exact workspace-pinned `serde_json` version.
+Rust field order and enum representation define JSON member order.
+Version 1 preserves null values and uses the serializer's string, number, and escape encoding.
+
+Changes to fields, member order, enum representation, normalization, encoding, or digest algorithm require a new plan schema version.
+Readers must not reinterpret version 1 data with a later digest contract.
+
+The saved-plan `confirmed` field is not part of the digest.
+Execution must reject the plan unless this field is `true`.
+
+The saved-plan `source_root` field is not part of the digest.
+Initial import execution resolves planned source paths below this root.
+Initial import execution must compare each transferred or excluded item file with its planned size and digest.
+Changing the root is valid only when these planned files still match.
+
+Run `just import-plan-schema` to regenerate `crates/souvenirs-cli/schema/import-plan/v1.json`.
+The committed schema describes the complete saved-plan envelope.
 
 The CLI can save a plan to a file.
 Execution accepts the exact saved plan.
