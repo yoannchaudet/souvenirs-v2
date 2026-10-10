@@ -13,6 +13,8 @@ pub const CANCEL_OPERATION_METHOD: &str = "operation.cancel";
 pub const CATALOG_VALIDATE_METHOD: &str = "catalog.validate";
 pub const CATALOG_CREATE_METHOD: &str = "catalog.create";
 pub const CATALOG_OPEN_METHOD: &str = "catalog.open";
+pub const IMPORT_SCAN_METHOD: &str = "import.scan";
+pub const IMPORT_REVIEW_METHOD: &str = "import.review";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Request {
@@ -37,6 +39,10 @@ pub enum RequestPayload {
     CreateCatalog(CreateCatalogParameters),
     #[serde(rename = "catalog.open")]
     OpenCatalog(CatalogPathParameters),
+    #[serde(rename = "import.scan")]
+    ScanImport(ImportScanParameters),
+    #[serde(rename = "import.review")]
+    ReviewImport(ImportReviewParameters),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -82,6 +88,37 @@ pub struct CatalogPathParameters {
 pub struct CreateCatalogParameters {
     pub path: String,
     pub display_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportScanParameters {
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportReviewParameters {
+    pub catalog_path: String,
+    pub source_path: String,
+    pub collection_name: String,
+    pub destination_mode: ImportDestinationMode,
+    pub accepted_date: String,
+    pub date_resolution: Option<ImportDateResolution>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportDestinationMode {
+    Create,
+    Existing,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportDateResolution {
+    AsShown,
+    ConvertFromUtc,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -148,6 +185,8 @@ pub enum ResponseResult {
     OperationAccepted(OperationAccepted),
     CancellationAccepted(CancellationAccepted),
     Catalog(CatalogResult),
+    ImportScan(ImportScanResult),
+    ImportReview(Box<ImportReviewResult>),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -174,6 +213,38 @@ pub struct CatalogResult {
     pub volume_name: String,
     pub display_name: Option<String>,
     pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct ImportScanResult {
+    pub source_path: String,
+    pub source_name: String,
+    pub file_count: usize,
+    pub media_count: usize,
+    pub photo_count: usize,
+    pub video_count: usize,
+    pub unsupported_count: usize,
+    pub uncertain_time_count: usize,
+    pub total_bytes: u64,
+    pub suggested_collection_name: String,
+    pub suggested_accepted_date: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct ImportReviewResult {
+    pub scan: ImportScanResult,
+    pub collection_name: String,
+    pub destination_mode: ImportDestinationMode,
+    pub destination_path: String,
+    pub accepted_date: String,
+    pub date_resolution: Option<ImportDateResolution>,
+    pub required_decision_count: usize,
+    pub transfer_count: usize,
+    pub skipped_count: usize,
+    pub left_on_source_count: usize,
+    pub operation_count: usize,
+    pub required_space_bytes: u64,
+    pub can_start: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

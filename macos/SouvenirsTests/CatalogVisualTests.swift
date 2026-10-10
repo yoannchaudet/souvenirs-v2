@@ -39,6 +39,18 @@ final class CatalogVisualTests: XCTestCase {
             size: NSSize(width: 920, height: 620),
             name: "catalog-ready"
         )
+
+        if case .catalog(let catalog) = model.route {
+            model.beginImport(from: "/Volumes/EOS_DIGITAL", into: catalog)
+            for _ in 0..<10 where model.importPlanning?.review == nil {
+                await Task.yield()
+            }
+            try capture(
+                ContentView(engineStatus: .ready(engineVersion: "0.1.0"), model: model),
+                size: NSSize(width: 920, height: 640),
+                name: "import-review"
+            )
+        }
     }
 
     private func capture<ViewType: View>(
@@ -90,6 +102,48 @@ private final class VisualCatalogEngine: CatalogEngineClient {
 
     func openCatalog(path: String) async throws -> EngineSupervisor.CatalogLocation {
         location(path)
+    }
+
+    func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
+        .init(
+            sourcePath: sourcePath,
+            sourceName: "EOS_DIGITAL",
+            fileCount: 17,
+            mediaCount: 12,
+            photoCount: 8,
+            videoCount: 4,
+            unsupportedCount: 2,
+            uncertainTimeCount: 4,
+            totalBytes: 41_000_000_000,
+            suggestedCollectionName: "Dolomites",
+            suggestedAcceptedDate: "2026-10-10"
+        )
+    }
+
+    func reviewImport(
+        catalogPath: String,
+        sourcePath: String,
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
+    ) async throws -> EngineSupervisor.ImportReview {
+        let scan = try await scanImport(sourcePath: sourcePath)
+        return .init(
+            scan: scan,
+            collectionName: collectionName,
+            destinationMode: destinationMode,
+            destinationPath: "\(catalogPath)/2026/\(acceptedDate) \(collectionName)",
+            acceptedDate: acceptedDate,
+            dateResolution: dateResolution,
+            requiredDecisionCount: dateResolution == nil ? 1 : 0,
+            transferCount: 12,
+            skippedCount: 0,
+            leftOnSourceCount: 2,
+            operationCount: 14,
+            requiredSpaceBytes: 41_000_000_000,
+            canStart: dateResolution != nil
+        )
     }
 
     private func location(_ path: String) -> EngineSupervisor.CatalogLocation {

@@ -3,10 +3,11 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
 use souvenirs_protocol::{
-    CancellationAccepted, CatalogResult, EngineMessage, HandshakeResult, OperationAccepted,
-    OperationEvent, OperationEventPayload, ProtocolError, Request, RequestPayload, ResponseResult,
-    CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD,
-    COMPATIBLE_CLIENT_VERSION, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    CancellationAccepted, CatalogResult, EngineMessage, HandshakeResult, ImportReviewResult,
+    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload, ProtocolError,
+    Request, RequestPayload, ResponseResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD,
+    CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD,
+    IMPORT_SCAN_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 fn main() {
@@ -34,6 +35,8 @@ enum Scenario {
     MalformedResponse,
     CatalogFlow,
     CatalogError,
+    ImportFlow,
+    ImportError,
 }
 
 fn parse_scenario() -> Result<Scenario, String> {
@@ -57,6 +60,8 @@ fn parse_scenario() -> Result<Scenario, String> {
         Some("malformed-response") => Scenario::MalformedResponse,
         Some("catalog-flow") => Scenario::CatalogFlow,
         Some("catalog-error") => Scenario::CatalogError,
+        Some("import-flow") => Scenario::ImportFlow,
+        Some("import-error") => Scenario::ImportError,
         _ => return Err(usage()),
     };
     if arguments.next().is_some() {
@@ -78,6 +83,8 @@ fn usage() -> String {
         "  malformed-response",
         "  catalog-flow",
         "  catalog-error",
+        "  import-flow",
+        "  import-error",
     ]
     .join("\n")
 }
@@ -119,6 +126,8 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     CATALOG_VALIDATE_METHOD.to_owned(),
                     CATALOG_CREATE_METHOD.to_owned(),
                     CATALOG_OPEN_METHOD.to_owned(),
+                    IMPORT_SCAN_METHOD.to_owned(),
+                    IMPORT_REVIEW_METHOD.to_owned(),
                 ],
             }),
         ),
@@ -255,6 +264,65 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 }
             }
         }
+        Scenario::ImportFlow => {
+            while let Some(request) = next_request(&mut input, &mut output)? {
+                match request.payload {
+                    RequestPayload::OpenCatalog(parameters) => {
+                        catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::ScanImport(parameters) => {
+                        import_scan_result(&mut output, request.id, parameters.source_path)?;
+                    }
+                    RequestPayload::ReviewImport(parameters) => {
+                        let scan = fake_scan(parameters.source_path);
+                        let can_start = parameters.date_resolution.is_some();
+                        write_message(
+                            &mut output,
+                            &EngineMessage::success(
+                                request.id,
+                                ResponseResult::ImportReview(Box::new(ImportReviewResult {
+                                    scan,
+                                    collection_name: parameters.collection_name.clone(),
+                                    destination_mode: parameters.destination_mode,
+                                    destination_path: format!(
+                                        "{}/2026/{} {}",
+                                        parameters.catalog_path,
+                                        parameters.accepted_date,
+                                        parameters.collection_name
+                                    ),
+                                    accepted_date: parameters.accepted_date,
+                                    date_resolution: parameters.date_resolution,
+                                    required_decision_count: usize::from(!can_start),
+                                    transfer_count: 12,
+                                    skipped_count: 3,
+                                    left_on_source_count: 2,
+                                    operation_count: 14,
+                                    required_space_bytes: 41_000_000_000,
+                                    can_start,
+                                })),
+                            ),
+                        )?;
+                    }
+                    _ => reject_request(&mut output, request)?,
+                }
+            }
+        }
+        Scenario::ImportError => {
+            while let Some(request) = next_request(&mut input, &mut output)? {
+                match request.payload {
+                    RequestPayload::OpenCatalog(parameters) => {
+                        catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::ScanImport(_) => write_protocol_error(
+                        &mut output,
+                        request.id,
+                        "source_unavailable",
+                        "The source is no longer available. Reconnect it and try again.",
+                    )?,
+                    _ => reject_request(&mut output, request)?,
+                }
+            }
+        }
     }
 
     Ok(())
@@ -323,13 +391,45 @@ fn reject_request(output: &mut impl Write, request: Request) -> io::Result<()> {
         ),
         RequestPayload::ValidateCatalog(_)
         | RequestPayload::CreateCatalog(_)
-        | RequestPayload::OpenCatalog(_) => write_protocol_error(
+        | RequestPayload::OpenCatalog(_)
+        | RequestPayload::ScanImport(_)
+        | RequestPayload::ReviewImport(_) => write_protocol_error(
             output,
             request.id,
             "unsupported_catalog_request",
             "Catalog requests are not supported in this scenario.",
         ),
     }
+}
+
+fn fake_scan(source_path: String) -> ImportScanResult {
+    ImportScanResult {
+        source_path,
+        source_name: "EOS_DIGITAL".to_owned(),
+        file_count: 17,
+        media_count: 12,
+        photo_count: 8,
+        video_count: 4,
+        unsupported_count: 2,
+        uncertain_time_count: 4,
+        total_bytes: 41_000_000_000,
+        suggested_collection_name: "Dolomites".to_owned(),
+        suggested_accepted_date: "2026-10-10".to_owned(),
+    }
+}
+
+fn import_scan_result(
+    output: &mut impl Write,
+    request_id: String,
+    source_path: String,
+) -> io::Result<()> {
+    write_message(
+        output,
+        &EngineMessage::success(
+            request_id,
+            ResponseResult::ImportScan(fake_scan(source_path)),
+        ),
+    )
 }
 
 fn catalog_result(output: &mut impl Write, request_id: String, path: String) -> io::Result<()> {

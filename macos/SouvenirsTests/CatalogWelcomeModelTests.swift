@@ -120,6 +120,21 @@ private final class FakeCatalogEngine: CatalogEngineClient {
         try result(path)
     }
 
+    func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
+        throw TestError(message: "Not implemented in catalog tests.")
+    }
+
+    func reviewImport(
+        catalogPath: String,
+        sourcePath: String,
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
+    ) async throws -> EngineSupervisor.ImportReview {
+        throw TestError(message: "Not implemented in catalog tests.")
+    }
+
     private func result(_ path: String) throws -> EngineSupervisor.CatalogLocation {
         if let error { throw error }
         return .init(

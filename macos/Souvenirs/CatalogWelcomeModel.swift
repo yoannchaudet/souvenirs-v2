@@ -9,6 +9,15 @@ protocol CatalogEngineClient: AnyObject {
         displayName: String
     ) async throws -> EngineSupervisor.CatalogLocation
     func openCatalog(path: String) async throws -> EngineSupervisor.CatalogLocation
+    func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan
+    func reviewImport(
+        catalogPath: String,
+        sourcePath: String,
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
+    ) async throws -> EngineSupervisor.ImportReview
 }
 
 extension EngineAppModel: CatalogEngineClient {
@@ -28,6 +37,28 @@ extension EngineAppModel: CatalogEngineClient {
 
     func openCatalog(path: String) async throws -> EngineSupervisor.CatalogLocation {
         try await supervisor.openCatalog(path: path)
+    }
+
+    func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
+        try await supervisor.scanImport(sourcePath: sourcePath)
+    }
+
+    func reviewImport(
+        catalogPath: String,
+        sourcePath: String,
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
+    ) async throws -> EngineSupervisor.ImportReview {
+        try await supervisor.reviewImport(
+            catalogPath: catalogPath,
+            sourcePath: sourcePath,
+            collectionName: collectionName,
+            destinationMode: destinationMode,
+            acceptedDate: acceptedDate,
+            dateResolution: dateResolution
+        )
     }
 }
 
@@ -60,6 +91,7 @@ final class CatalogWelcomeModel: ObservableObject {
     @Published private(set) var validation: Validation = .none
     @Published private(set) var isWorking = false
     @Published private(set) var recents: [RecentCatalog]
+    @Published private(set) var importPlanning: ImportPlanningModel?
     @Published var presentedError: String?
     @Published private(set) var presentedErrorTitle = "Souvenirs couldn’t open this catalog"
 
@@ -158,6 +190,20 @@ final class CatalogWelcomeModel: ObservableObject {
         persistRecents()
     }
 
+    func beginImport(from sourcePath: String, into catalog: RecentCatalog) {
+        let planning = ImportPlanningModel(
+            engine: engine,
+            catalog: catalog,
+            sourcePath: sourcePath
+        )
+        importPlanning = planning
+        Task { await planning.load() }
+    }
+
+    func dismissImport() {
+        importPlanning = nil
+    }
+
     private func showCatalog(
         _ location: EngineSupervisor.CatalogLocation,
         name: String
@@ -178,6 +224,133 @@ final class CatalogWelcomeModel: ObservableObject {
         if let data = try? JSONEncoder().encode(recents) {
             defaults.set(data, forKey: Self.recentsKey)
         }
+    }
+
+    private func userMessage(for error: Error) -> String {
+        if case EngineSupervisor.SupervisorError.protocolError(_, let message) = error {
+            return message
+        }
+        return error.localizedDescription
+    }
+}
+
+@MainActor
+final class ImportPlanningModel: ObservableObject {
+    @Published private(set) var scan: EngineSupervisor.ImportScan?
+    @Published private(set) var review: EngineSupervisor.ImportReview?
+    @Published var collectionName = ""
+    @Published private(set) var destinationMode: EngineSupervisor.ImportDestinationMode = .create
+    @Published private(set) var dateResolution: EngineSupervisor.ImportDateResolution?
+    @Published private(set) var isLoading = false
+    @Published private(set) var errorMessage: String?
+    @Published var showsDetails = false
+    @Published private(set) var isPrepared = false
+
+    let catalog: RecentCatalog
+    let sourcePath: String
+    @Published private(set) var acceptedDate = ""
+    private let engine: CatalogEngineClient
+    private var reviewGeneration = 0
+
+    init(
+        engine: CatalogEngineClient,
+        catalog: RecentCatalog,
+        sourcePath: String
+    ) {
+        self.engine = engine
+        self.catalog = catalog
+        self.sourcePath = sourcePath
+    }
+
+    var canStart: Bool {
+        guard let review else { return false }
+        return review.canStart
+            && review.collectionName == collectionName
+            && review.destinationMode == destinationMode
+            && review.acceptedDate == acceptedDate
+            && review.dateResolution == dateResolution
+            && !isLoading
+            && errorMessage == nil
+    }
+
+    var title: String {
+        guard let scan else { return "Reading this source…" }
+        return "\(scan.mediaCount) new photos and videos will be copied into \(destinationDescription)"
+    }
+
+    var destinationDescription: String {
+        if collectionName.isEmpty { return "a new collection" }
+        return "“\(collectionName)”"
+    }
+
+    func load() async {
+        isLoading = true
+        errorMessage = nil
+        do {
+            let scan = try await engine.scanImport(sourcePath: sourcePath)
+            self.scan = scan
+            collectionName = scan.suggestedCollectionName
+            acceptedDate = scan.suggestedAcceptedDate
+            await refreshReview()
+        } catch {
+            isLoading = false
+            errorMessage = userMessage(for: error)
+        }
+    }
+
+    func refreshReview() async {
+        guard scan != nil else { return }
+        reviewGeneration += 1
+        let generation = reviewGeneration
+        let collectionName = collectionName
+        let destinationMode = destinationMode
+        let acceptedDate = acceptedDate
+        let dateResolution = dateResolution
+        isLoading = true
+        errorMessage = nil
+        isPrepared = false
+        do {
+            let result = try await engine.reviewImport(
+                catalogPath: catalog.path,
+                sourcePath: sourcePath,
+                collectionName: collectionName,
+                destinationMode: destinationMode,
+                acceptedDate: acceptedDate,
+                dateResolution: dateResolution
+            )
+            guard generation == reviewGeneration else { return }
+            review = result
+        } catch {
+            guard generation == reviewGeneration else { return }
+            review = nil
+            errorMessage = userMessage(for: error)
+        }
+        if generation == reviewGeneration {
+            isLoading = false
+        }
+    }
+
+    func collectionNameChanged() {
+        reviewGeneration += 1
+        review = nil
+        errorMessage = nil
+        isLoading = false
+        isPrepared = false
+    }
+
+    func setDestinationMode(_ mode: EngineSupervisor.ImportDestinationMode) async {
+        destinationMode = mode
+        await refreshReview()
+    }
+
+    func resolveDate(_ resolution: EngineSupervisor.ImportDateResolution) async {
+        dateResolution = resolution
+        await refreshReview()
+    }
+
+    func prepareExecution() {
+        guard canStart else { return }
+        isPrepared = true
     }
 
     private func userMessage(for error: Error) -> String {

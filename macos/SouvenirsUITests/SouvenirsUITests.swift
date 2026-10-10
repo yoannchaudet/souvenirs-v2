@@ -45,6 +45,46 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
+    func testReviewsImportAndResolvesRequiredDecision() throws {
+        let app = launch(scenario: "import-flow")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
+        app.buttons["choose-import-folder"].click()
+
+        XCTAssertTrue(app.descendants(matching: .any)["import-review-sheet"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["import-review-title"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["import-date-decision"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["start-import"].isEnabled)
+
+        app.descendants(matching: .any)["date-as-shown"].click()
+        let start = app.descendants(matching: .any)["start-import"]
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: start
+        )
+        waitForExpectations(timeout: 3)
+        app.descendants(matching: .any)["import-details"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["import-operation-summary"].exists)
+    }
+
+    @MainActor
+    func testImportSourceFailureBlocksPlanning() throws {
+        let app = launch(scenario: "import-error")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
+        app.buttons["choose-import-folder"].click()
+
+        XCTAssertTrue(
+            app.staticTexts["import-planning-error"].waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["start-import"].isEnabled)
+    }
+
+    @MainActor
     private func launch(scenario: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
