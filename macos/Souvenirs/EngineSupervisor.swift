@@ -28,6 +28,13 @@ public actor EngineSupervisor {
         public let operationID: String
     }
 
+    public struct CatalogLocation: Codable, Equatable, Sendable {
+        public let path: String
+        public let volumeName: String
+        public let displayName: String?
+        public let detail: String
+    }
+
     public struct OperationEvent: Equatable, Sendable {
         public enum Payload: Equatable, Sendable {
             case started(name: String)
@@ -420,6 +427,47 @@ public actor EngineSupervisor {
             )
         }
         return CancellationAccepted(operationID: result.operationID)
+    }
+
+    public func validateCatalog(path: String, intent: String) async throws -> CatalogLocation {
+        let result: CatalogResult = try await sendRequest(
+            method: "catalog.validate",
+            parameters: CatalogValidationParameters(path: path, intent: intent),
+            timeout: requestTimeout
+        )
+        return try catalogLocation(from: result)
+    }
+
+    public func createCatalog(path: String, displayName: String) async throws -> CatalogLocation {
+        let result: CatalogResult = try await sendRequest(
+            method: "catalog.create",
+            parameters: CreateCatalogParameters(path: path, displayName: displayName),
+            timeout: requestTimeout
+        )
+        return try catalogLocation(from: result)
+    }
+
+    public func openCatalog(path: String) async throws -> CatalogLocation {
+        let result: CatalogResult = try await sendRequest(
+            method: "catalog.open",
+            parameters: CatalogPathParameters(path: path),
+            timeout: requestTimeout
+        )
+        return try catalogLocation(from: result)
+    }
+
+    private func catalogLocation(from result: CatalogResult) throws -> CatalogLocation {
+        guard result.type == "catalog" else {
+            throw SupervisorError.malformedResponse(
+                "The response result type is not catalog"
+            )
+        }
+        return CatalogLocation(
+            path: result.path,
+            volumeName: result.volumeName,
+            displayName: result.displayName,
+            detail: result.detail
+        )
     }
 
     public func events(
@@ -1304,6 +1352,25 @@ private struct CancelOperationParameters: Encodable, Sendable {
     }
 }
 
+private struct CatalogValidationParameters: Encodable, Sendable {
+    let path: String
+    let intent: String
+}
+
+private struct CatalogPathParameters: Encodable, Sendable {
+    let path: String
+}
+
+private struct CreateCatalogParameters: Encodable, Sendable {
+    let path: String
+    let displayName: String
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case displayName = "display_name"
+    }
+}
+
 private struct SuccessResponse<Result: Decodable>: Decodable {
     let kind: String
     let id: String?
@@ -1357,6 +1424,22 @@ private struct CancellationAcceptedResult: Decodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case type
         case operationID = "operation_id"
+    }
+}
+
+private struct CatalogResult: Decodable, Sendable {
+    let type: String
+    let path: String
+    let volumeName: String
+    let displayName: String?
+    let detail: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case path
+        case volumeName = "volume_name"
+        case displayName = "display_name"
+        case detail
     }
 }
 

@@ -6,22 +6,66 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
-    func testAppLaunches() throws {
-        let app = XCUIApplication()
-        app.launchArguments = ["-ApplePersistenceIgnoreState", "YES"]
-        app.launch()
+    func testCreatesCatalogWithFakeEngine() throws {
+        let app = launch(scenario: "catalog-flow")
 
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
-        let readyStatus = app.staticTexts.matching(
-            NSPredicate(
-                format: "identifier == %@ AND value == %@",
-                "engine-status",
-                "Engine ready"
-            )
-        ).firstMatch
+        XCTAssertTrue(app.staticTexts["engine-status"].waitForExistence(timeout: 5))
+        app.buttons["create-catalog"].click()
+        XCTAssertTrue(app.textFields["catalog-name"].waitForExistence(timeout: 2))
+
+        app.buttons["choose-catalog-location"].click()
         XCTAssertTrue(
-            readyStatus.waitForExistence(timeout: 10),
-            "The engine did not reach the ready state."
+            app.staticTexts["catalog-location-valid"].waitForExistence(timeout: 3)
         )
+        let create = app.buttons["confirm-create-catalog"]
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: create
+        )
+        waitForExpectations(timeout: 3)
+        app.buttons["confirm-create-catalog"].click()
+
+        XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["catalog-health"].exists)
+    }
+
+    @MainActor
+    func testStorageValidationFailureIsActionable() throws {
+        let app = launch(scenario: "catalog-error")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["create-catalog"].click()
+        app.buttons["choose-catalog-location"].click()
+
+        XCTAssertTrue(
+            app.staticTexts["catalog-location-error"].waitForExistence(timeout: 3)
+        )
+        XCTAssertFalse(app.buttons["confirm-create-catalog"].isEnabled)
+    }
+
+    @MainActor
+    private func launch(scenario: String) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-NSQuitAlwaysKeepsWindows", "NO"
+        ]
+        app.launchEnvironment["SOUVENIRS_ENGINE_EXECUTABLE"] =
+            repositoryRoot.appendingPathComponent(
+                "target/debug/souvenirs-fake-engine"
+            ).path
+        app.launchEnvironment["SOUVENIRS_FAKE_ENGINE_SCENARIO"] = scenario
+        app.launchEnvironment["SOUVENIRS_UI_TEST_DIRECTORY"] =
+            "/Volumes/photos/Family Catalog"
+        app.launch()
+        return app
+    }
+
+    private var repositoryRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 }

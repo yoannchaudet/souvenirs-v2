@@ -3,9 +3,10 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
 use souvenirs_protocol::{
-    CancellationAccepted, EngineMessage, HandshakeResult, OperationAccepted, OperationEvent,
-    OperationEventPayload, ProtocolError, Request, RequestPayload, ResponseResult,
-    CANCEL_OPERATION_METHOD, COMPATIBLE_CLIENT_VERSION, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    CancellationAccepted, CatalogResult, EngineMessage, HandshakeResult, OperationAccepted,
+    OperationEvent, OperationEventPayload, ProtocolError, Request, RequestPayload, ResponseResult,
+    CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD,
+    COMPATIBLE_CLIENT_VERSION, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 fn main() {
@@ -31,6 +32,8 @@ enum Scenario {
     CancellationRace,
     UnexpectedTermination,
     MalformedResponse,
+    CatalogFlow,
+    CatalogError,
 }
 
 fn parse_scenario() -> Result<Scenario, String> {
@@ -52,6 +55,8 @@ fn parse_scenario() -> Result<Scenario, String> {
         Some("cancellation-race") => Scenario::CancellationRace,
         Some("unexpected-termination") => Scenario::UnexpectedTermination,
         Some("malformed-response") => Scenario::MalformedResponse,
+        Some("catalog-flow") => Scenario::CatalogFlow,
+        Some("catalog-error") => Scenario::CatalogError,
         _ => return Err(usage()),
     };
     if arguments.next().is_some() {
@@ -71,6 +76,8 @@ fn usage() -> String {
         "  cancellation-race",
         "  unexpected-termination",
         "  malformed-response",
+        "  catalog-flow",
+        "  catalog-error",
     ]
     .join("\n")
 }
@@ -109,6 +116,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 capabilities: vec![
                     START_OPERATION_METHOD.to_owned(),
                     CANCEL_OPERATION_METHOD.to_owned(),
+                    CATALOG_VALIDATE_METHOD.to_owned(),
+                    CATALOG_CREATE_METHOD.to_owned(),
+                    CATALOG_OPEN_METHOD.to_owned(),
                 ],
             }),
         ),
@@ -216,6 +226,35 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
             output.write_all(b"{not-json}\n")?;
             output.flush()?;
         }
+        Scenario::CatalogFlow => {
+            while let Some(request) = next_request(&mut input, &mut output)? {
+                match request.payload {
+                    RequestPayload::ValidateCatalog(parameters) => {
+                        catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::CreateCatalog(parameters) => {
+                        catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::OpenCatalog(parameters) => {
+                        catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    _ => reject_request(&mut output, request)?,
+                }
+            }
+        }
+        Scenario::CatalogError => {
+            while let Some(request) = next_request(&mut input, &mut output)? {
+                match request.payload {
+                    RequestPayload::ValidateCatalog(_) => write_protocol_error(
+                        &mut output,
+                        request.id,
+                        "synchronized_folder",
+                        "This synchronized folder cannot hold a catalog because it may rename files on its own.",
+                    )?,
+                    _ => reject_request(&mut output, request)?,
+                }
+            }
+        }
     }
 
     Ok(())
@@ -282,7 +321,30 @@ fn reject_request(output: &mut impl Write, request: Request) -> io::Result<()> {
             "operation_not_found",
             &format!("Operation {:?} was not found.", parameters.operation_id),
         ),
+        RequestPayload::ValidateCatalog(_)
+        | RequestPayload::CreateCatalog(_)
+        | RequestPayload::OpenCatalog(_) => write_protocol_error(
+            output,
+            request.id,
+            "unsupported_catalog_request",
+            "Catalog requests are not supported in this scenario.",
+        ),
     }
+}
+
+fn catalog_result(output: &mut impl Write, request_id: String, path: String) -> io::Result<()> {
+    write_message(
+        output,
+        &EngineMessage::success(
+            request_id,
+            ResponseResult::Catalog(CatalogResult {
+                path,
+                volume_name: "photos-nas.local".to_owned(),
+                display_name: Some("Family Catalog".to_owned()),
+                detail: "Catalog format 2".to_owned(),
+            }),
+        ),
+    )
 }
 
 fn write_protocol_error(

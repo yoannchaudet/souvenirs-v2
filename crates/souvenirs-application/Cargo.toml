@@ -8,7 +8,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 souvenirs-domain = { path = "../souvenirs-domain" }
+souvenirs-storage = { path = "../souvenirs-storage" }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

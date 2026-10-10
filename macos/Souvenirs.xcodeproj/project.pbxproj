@@ -272,7 +272,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\n\ncd \"$SRCROOT/..\"\nif [ \"$ENGINE_CARGO_PROFILE\" = \"release\" ]; then\n    cargo build --locked --release --package souvenirs-engine --bin souvenirs-engine\nelse\n    cargo build --locked --package souvenirs-engine --bin souvenirs-engine\nfi\n";
+			shellScript = "set -eu\n\ncd \"$SRCROOT/..\"\nif [ \"$ENGINE_CARGO_PROFILE\" = \"release\" ]; then\n    cargo build --locked --release --package souvenirs-engine --bins\nelse\n    cargo build --locked --package souvenirs-engine --bins\nfi\n";
 		};
 		D00000000000000000000002 /* Embed Rust Engine */ = {
 			isa = PBXShellScriptBuildPhase;

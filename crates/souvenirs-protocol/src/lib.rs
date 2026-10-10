@@ -10,6 +10,9 @@ pub const COMPATIBLE_CLIENT_VERSION: &str = "0.1.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
 pub const START_OPERATION_METHOD: &str = "operation.start";
 pub const CANCEL_OPERATION_METHOD: &str = "operation.cancel";
+pub const CATALOG_VALIDATE_METHOD: &str = "catalog.validate";
+pub const CATALOG_CREATE_METHOD: &str = "catalog.create";
+pub const CATALOG_OPEN_METHOD: &str = "catalog.open";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Request {
@@ -28,6 +31,12 @@ pub enum RequestPayload {
     StartOperation(StartOperationParameters),
     #[serde(rename = "operation.cancel")]
     CancelOperation(CancelOperationParameters),
+    #[serde(rename = "catalog.validate")]
+    ValidateCatalog(CatalogParameters),
+    #[serde(rename = "catalog.create")]
+    CreateCatalog(CreateCatalogParameters),
+    #[serde(rename = "catalog.open")]
+    OpenCatalog(CatalogPathParameters),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -46,6 +55,33 @@ pub struct CancelOperationParameters {
 #[serde(deny_unknown_fields)]
 pub struct StartOperationParameters {
     pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogParameters {
+    pub path: String,
+    pub intent: CatalogIntent,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogIntent {
+    Create,
+    Open,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogPathParameters {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateCatalogParameters {
+    pub path: String,
+    pub display_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -111,6 +147,7 @@ pub enum ResponseResult {
     Handshake(HandshakeResult),
     OperationAccepted(OperationAccepted),
     CancellationAccepted(CancellationAccepted),
+    Catalog(CatalogResult),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -129,6 +166,14 @@ pub struct OperationAccepted {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct CancellationAccepted {
     pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct CatalogResult {
+    pub path: String,
+    pub volume_name: String,
+    pub display_name: Option<String>,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -324,6 +369,9 @@ mod tests {
                     RequestPayload::Handshake(_)
                         | RequestPayload::StartOperation(_)
                         | RequestPayload::CancelOperation(_)
+                        | RequestPayload::ValidateCatalog(_)
+                        | RequestPayload::CreateCatalog(_)
+                        | RequestPayload::OpenCatalog(_)
                 ));
                 request_count += 1;
             }
