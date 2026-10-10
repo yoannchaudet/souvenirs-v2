@@ -26,6 +26,42 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn journal_creation_failpoint_leaves_a_recoverable_pre_plan_journal() {
+    let (_temporary, layout, lock) = initialized_catalog();
+
+    let error = OperationJournal::create_failing_at(
+        &layout,
+        &lock,
+        "created",
+        &json!({"confirmed": true}),
+        Failpoint::JournalCreated,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        OperationJournalError::Failpoint(Failpoint::JournalCreated)
+    ));
+    let interrupted = fs::read_dir(layout.journal_directory())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-created.jsonl")
+        })
+        .unwrap();
+    assert_eq!(fs::metadata(&interrupted).unwrap().len(), 0);
+
+    let next =
+        OperationJournal::create(&layout, &lock, "next", &json!({"confirmed": true})).unwrap();
+
+    assert!(!interrupted.exists());
+    assert_eq!(next.operation_id(), "next");
+}
+
+#[test]
 fn plan_failpoint_leaves_the_confirmed_plan_as_the_first_record() {
     let (_temporary, layout, lock) = initialized_catalog();
 

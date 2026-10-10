@@ -1,10 +1,12 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, DurableTransition, ManifestReplacementError,
-    ManifestReplacementRequest, OperationJournal, OperationOutcome, OperationRecord,
+    read_operation_records, CatalogConfig, CatalogLayout, CatalogLock, DurableTransition,
+    ManifestReplacementError, ManifestReplacementRequest, OperationJournal, OperationJournalError,
+    OperationOutcome, OperationRecord,
 };
 use tempfile::TempDir;
 
@@ -116,6 +118,122 @@ fn completed_journal_allows_the_next_mutation() {
     let next = journal(&layout, &lock, "import-next");
 
     assert_eq!(next.operation_id(), "import-next");
+}
+
+#[test]
+fn interrupted_pre_plan_append_is_removed_before_the_next_mutation() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let interrupted = layout
+        .journal_directory()
+        .join("20260101-000000-interrupted.jsonl");
+    fs::write(
+        &interrupted,
+        br#"{"kind":"plan","operation_id":"interrupted""#,
+    )
+    .unwrap();
+
+    let next = journal(&layout, &lock, "import-next");
+
+    assert!(!interrupted.exists());
+    assert_eq!(next.operation_id(), "import-next");
+}
+
+#[test]
+fn plan_with_an_interrupted_tail_still_blocks_the_next_mutation() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let journal = journal(&layout, &lock, "unfinished-tail");
+    let path = journal.path().to_path_buf();
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(br#"{"kind":"transition""#).unwrap();
+    file.sync_all().unwrap();
+
+    let error =
+        OperationJournal::create(&layout, &lock, "import-next", &json!({"confirmed": true}))
+            .unwrap_err();
+
+    assert!(matches!(
+        error,
+        OperationJournalError::UnfinishedOperation(blocking) if blocking == path
+    ));
+    assert!(path.exists());
+}
+
+#[test]
+fn malformed_durable_pre_plan_record_is_not_removed() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let corrupt = layout
+        .journal_directory()
+        .join("20260101-000000-corrupt.jsonl");
+    fs::write(&corrupt, b"{not json}\n").unwrap();
+
+    let error =
+        OperationJournal::create(&layout, &lock, "import-next", &json!({"confirmed": true}))
+            .unwrap_err();
+
+    assert!(matches!(
+        error,
+        OperationJournalError::DeserializeRecord { path, line: 1, .. } if path == corrupt
+    ));
+    assert!(corrupt.exists());
+}
+
+#[test]
+fn initialization_journal_names_are_reserved_for_new_operations() {
+    let (_temporary, layout, lock) = initialized_catalog();
+
+    for operation_id in ["initialize", "import-initialize"] {
+        let error =
+            OperationJournal::create(&layout, &lock, operation_id, &json!({"confirmed": true}))
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationJournalError::ReservedIdentifier {
+                kind: "operation",
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn shared_reader_ignores_only_an_unterminated_final_append() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let journal = journal(&layout, &lock, "interrupted-tail");
+    let expected = read_operation_records(journal.path()).unwrap();
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(journal.path())
+        .unwrap();
+    file.write_all(br#"{"kind":"transition","transition":{"kind":"directory_created""#)
+        .unwrap();
+    file.sync_all().unwrap();
+
+    assert_eq!(read_operation_records(journal.path()).unwrap(), expected);
+}
+
+#[test]
+fn shared_reader_rejects_malformed_durable_records() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let journal = journal(&layout, &lock, "corrupt");
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(journal.path())
+        .unwrap();
+    file.write_all(b"{not json}\n").unwrap();
+    serde_json::to_writer(
+        &mut file,
+        &OperationRecord::Outcome {
+            outcome: OperationOutcome::Completed,
+        },
+    )
+    .unwrap();
+    file.write_all(b"\n").unwrap();
+    file.sync_all().unwrap();
+
+    assert!(matches!(
+        read_operation_records(journal.path()),
+        Err(OperationJournalError::DeserializeRecord { line: 2, .. })
+    ));
 }
 
 #[test]
