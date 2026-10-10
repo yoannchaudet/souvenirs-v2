@@ -218,7 +218,7 @@ The date must fit the dated range or the ongoing part's year.
 Each date in each collection directory has one counter namespace across all media.
 Compound members and sidecars share a counter.
 New counters start at `001` and widen beyond three digits.
-New items are allocated in accepted-datetime order, then source path order.
+New items are allocated in accepted-datetime order, then component-wise source path order.
 Allocation continues above that date's highest existing counter.
 
 Gaps are valid and must not be filled.

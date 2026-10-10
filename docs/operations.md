@@ -81,7 +81,7 @@ A plan reports two kinds:
 | Several identical originals within the source | Import all. | Import one copy per digest. |
 
 Skipped files stay at the source.
-"One copy per digest" keeps the copy with the earliest accepted datetime, then the first source path in byte order.
+"One copy per digest" keeps the copy with the earliest accepted datetime, then the first component-wise source path.
 The journal records every skipped file and the catalog path it duplicates.
 Duplicate detection uses the [index](storage.md#index) for catalog content and the copy digest for sources.
 
