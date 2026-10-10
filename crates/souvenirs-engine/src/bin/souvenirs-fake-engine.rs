@@ -261,6 +261,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::OpenCatalog(parameters) => {
                         catalog_result(&mut output, request.id, parameters.path)?;
                     }
+                    RequestPayload::InspectOperation(_) => {
+                        operation_inspection(&mut output, request.id, None)?;
+                    }
                     _ => reject_request(&mut output, request)?,
                 }
             }
@@ -283,6 +286,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 match request.payload {
                     RequestPayload::OpenCatalog(parameters) => {
                         catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::InspectOperation(_) => {
+                        operation_inspection(&mut output, request.id, None)?;
                     }
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
@@ -326,6 +332,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 match request.payload {
                     RequestPayload::OpenCatalog(parameters) => {
                         catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::InspectOperation(_) => {
+                        operation_inspection(&mut output, request.id, None)?;
                     }
                     RequestPayload::ScanImport(_) => write_protocol_error(
                         &mut output,
