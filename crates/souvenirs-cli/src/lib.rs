@@ -21,7 +21,11 @@ use souvenirs_domain::plan::{
     PlanItemDisposition, PlanStep, PlanStepKind, PlanTimestamp, SourceSnapshot, UnhandledContent,
     UnhandledContentFinding, IMPORT_PLAN_SCHEMA_VERSION,
 };
-use souvenirs_storage::{CatalogConfig, CatalogLayout, FORMAT_VERSION};
+use souvenirs_storage::{
+    CatalogConfig, CatalogLayout, CatalogLock, ManifestReplacementRequest, OperationJournal,
+    OperationOutcome, OperationRecord, RecoveryCopy, RecoveryDirectory, RecoveryManifest,
+    RecoveryMode, RecoveryOutcome, RecoveryRequest, FORMAT_VERSION,
+};
 use time::{Date, PrimitiveDateTime};
 
 pub const EXIT_SUCCESS: u8 = 0;
@@ -43,6 +47,8 @@ struct Cli {
 enum Command {
     Catalog(CatalogArgs),
     Import(ImportArgs),
+    Operation(OperationArgs),
+    Integrity(IntegrityArgs),
 }
 
 #[derive(Debug, Args)]
@@ -93,12 +99,78 @@ enum ImportCommand {
         #[arg(long)]
         confirm: bool,
     },
+    Execute {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        progress: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum DestinationMode {
     Create,
     Existing,
+}
+
+#[derive(Debug, Args)]
+struct OperationArgs {
+    #[command(subcommand)]
+    command: OperationCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum OperationCommand {
+    Status {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+    },
+    Recover {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long, value_enum, default_value = "resume")]
+        mode: RecoveryChoice,
+        #[arg(long)]
+        progress: Option<PathBuf>,
+    },
+    Cancel {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        progress: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RecoveryChoice {
+    Resume,
+    Cancel,
+}
+
+#[derive(Debug, Args)]
+struct IntegrityArgs {
+    #[command(subcommand)]
+    command: IntegrityCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrityCommand {
+    Check {
+        #[arg(long)]
+        catalog: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -160,6 +232,15 @@ pub struct StoredPlan {
     pub import_plan: ImportPlan,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStoredPlan {
+    schema_version: u32,
+    confirmed: bool,
+    source_root: PathBuf,
+    import_plan: serde_json::Value,
+}
+
 #[derive(Debug, Serialize)]
 struct CatalogInitialized {
     catalog: PathBuf,
@@ -198,6 +279,72 @@ struct PlanResult {
     transfer_count: usize,
     unhandled_count: usize,
     required_space_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionResult {
+    operation_id: String,
+    outcome: &'static str,
+    completed_steps: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct OperationStatusResult {
+    operation_id: String,
+    state: &'static str,
+    transition_count: usize,
+    journal: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct RecoveryResult {
+    operation_id: String,
+    outcome: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct IntegrityResult {
+    catalog: PathBuf,
+    valid: bool,
+    checked_files: usize,
+    checked_manifests: usize,
+    findings: Vec<IntegrityFinding>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum IntegrityFinding {
+    MissingManifest {
+        collection: PathBuf,
+    },
+    MissingFile {
+        path: PathBuf,
+    },
+    UnexpectedFile {
+        path: PathBuf,
+    },
+    DigestMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressEvent {
+    version: u32,
+    operation_id: String,
+    sequence: u32,
+    event: &'static str,
+    step: Option<u32>,
+}
+
+struct ProgressWriter {
+    file: Option<File>,
+    operation_id: String,
+    sequence: u32,
+    terminal: bool,
 }
 
 #[derive(Debug)]
@@ -292,6 +439,39 @@ fn execute(cli: Cli) -> Result<(), CliError> {
                 accepted_at,
                 confirm,
             ),
+            ImportCommand::Execute {
+                catalog,
+                plan,
+                progress,
+            } => import_execute(&catalog, &plan, progress.as_deref()),
+        },
+        Command::Operation(args) => match args.command {
+            OperationCommand::Status {
+                catalog,
+                operation_id,
+            } => operation_status(&catalog, &operation_id),
+            OperationCommand::Recover {
+                catalog,
+                operation_id,
+                plan,
+                mode,
+                progress,
+            } => operation_recover(&catalog, &operation_id, &plan, mode, progress.as_deref()),
+            OperationCommand::Cancel {
+                catalog,
+                operation_id,
+                plan,
+                progress,
+            } => operation_recover(
+                &catalog,
+                &operation_id,
+                &plan,
+                RecoveryChoice::Cancel,
+                progress.as_deref(),
+            ),
+        },
+        Command::Integrity(args) => match args.command {
+            IntegrityCommand::Check { catalog } => integrity_check(&catalog),
         },
     }
 }
@@ -642,6 +822,711 @@ fn import_plan(
             required_space_bytes,
         },
     )
+}
+
+fn import_execute(
+    catalog: &Path,
+    plan_path: &Path,
+    progress_path: Option<&Path>,
+) -> Result<(), CliError> {
+    let layout = require_catalog(catalog)?;
+    let stored = read_stored_plan(plan_path)?;
+    if !stored.confirmed {
+        return Err(CliError::conflict(
+            "import plan is not confirmed; create it with --confirm",
+        ));
+    }
+    validate_plan_state(&layout, &stored)?;
+    let operation_id = stored.import_plan.document().plan_id.as_str().to_owned();
+    let mut progress = ProgressWriter::new(progress_path, &operation_id)?;
+    progress.write("started", None)?;
+
+    let lock = CatalogLock::acquire(&layout)
+        .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
+    let mut journal = OperationJournal::create(&layout, &lock, &operation_id, &stored.import_plan)
+        .map_err(|error| CliError::conflict(format!("create operation journal: {error}")))?;
+
+    let mut completed_steps = 0_usize;
+    for step in &stored.import_plan.document().steps {
+        progress.write("step_started", Some(step.sequence))?;
+        match &step.action {
+            PlanStepKind::CreateDirectory { path } => {
+                journal
+                    .create_destination_directory(
+                        &layout,
+                        &lock,
+                        &format!("step-{}", step.sequence),
+                        pathbuf(path),
+                    )
+                    .map_err(|error| CliError::operation(error.to_string()))?;
+            }
+            PlanStepKind::CopyFile {
+                source_file_id,
+                destination,
+                expected_digest,
+                size_bytes,
+            } => {
+                let source = source_path_for_id(&stored, source_file_id)?;
+                let copied = layout
+                    .copy_verified(
+                        &lock,
+                        &mut journal,
+                        source,
+                        pathbuf(destination),
+                        &format!("step-{}", step.sequence),
+                    )
+                    .map_err(|error| CliError::operation(error.to_string()))?;
+                if copied.sha256 != expected_digest.as_str() || copied.bytes_copied != *size_bytes {
+                    return Err(CliError::operation(format!(
+                        "verified copy result does not match plan step {}",
+                        step.sequence
+                    )));
+                }
+            }
+            PlanStepKind::WriteManifest {
+                path,
+                previous_digest,
+                resulting_digest,
+                resulting_size_bytes,
+            } => {
+                let contents = manifest_contents_for_step(&layout, &stored.import_plan, path)?;
+                if contents.len() as u64 != *resulting_size_bytes
+                    || ContentDigest::from_bytes(&contents) != *resulting_digest
+                {
+                    return Err(CliError::conflict(format!(
+                        "manifest contents drifted from plan step {}",
+                        step.sequence
+                    )));
+                }
+                layout
+                    .replace_manifest(
+                        &lock,
+                        &mut journal,
+                        ManifestReplacementRequest {
+                            path: &pathbuf(path),
+                            previous_sha256: previous_digest.as_ref().map(ContentDigest::as_str),
+                            resulting_sha256: resulting_digest.as_str(),
+                            step_id: &format!("step-{}", step.sequence),
+                        },
+                        &contents,
+                    )
+                    .map_err(|error| CliError::operation(error.to_string()))?;
+            }
+        }
+        completed_steps += 1;
+        progress.write("step_completed", Some(step.sequence))?;
+    }
+    journal
+        .complete(&layout, &lock)
+        .map_err(|error| CliError::operation(error.to_string()))?;
+    lock.release()
+        .map_err(|error| CliError::operation(format!("release catalog lock: {error}")))?;
+    progress.write("completed", None)?;
+
+    write_result(
+        "import.execute",
+        ExecutionResult {
+            operation_id,
+            outcome: "completed",
+            completed_steps,
+        },
+    )
+}
+
+fn operation_status(catalog: &Path, operation_id: &str) -> Result<(), CliError> {
+    let layout = require_catalog(catalog)?;
+    let (journal, records) = find_operation_journal(&layout, operation_id)?;
+    let state = match records.last() {
+        Some(OperationRecord::Outcome {
+            outcome: OperationOutcome::Completed,
+        }) => "completed",
+        Some(OperationRecord::Outcome {
+            outcome: OperationOutcome::Cancelled,
+        }) => "cancelled",
+        _ => "interrupted",
+    };
+    let transition_count = records
+        .iter()
+        .filter(|record| matches!(record, OperationRecord::Transition { .. }))
+        .count();
+    write_result(
+        "operation.status",
+        OperationStatusResult {
+            operation_id: operation_id.to_owned(),
+            state,
+            transition_count,
+            journal,
+        },
+    )
+}
+
+fn operation_recover(
+    catalog: &Path,
+    operation_id: &str,
+    plan_path: &Path,
+    mode: RecoveryChoice,
+    progress_path: Option<&Path>,
+) -> Result<(), CliError> {
+    let layout = require_catalog(catalog)?;
+    let stored = read_stored_plan(plan_path)?;
+    if !stored.confirmed {
+        return Err(CliError::conflict(
+            "operation recovery requires the confirmed plan",
+        ));
+    }
+    if stored.import_plan.document().plan_id.as_str() != operation_id {
+        return Err(CliError::invalid_data(
+            "operation identifier does not match the saved plan",
+        ));
+    }
+    let (journal_path, records) = find_operation_journal(&layout, operation_id)?;
+    validate_recovery_state(&layout, &stored, &records, mode)?;
+    let request = recovery_request(&layout, &stored, mode)?;
+    let mut progress = ProgressWriter::new(progress_path, operation_id)?;
+    progress.write("recovery_started", None)?;
+    let lock = CatalogLock::acquire(&layout)
+        .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
+    let outcome = layout
+        .recover_operation(&lock, journal_path, request)
+        .map_err(|error| CliError::operation(error.to_string()))?;
+    lock.release()
+        .map_err(|error| CliError::operation(format!("release catalog lock: {error}")))?;
+    let outcome_name = match outcome {
+        RecoveryOutcome::Completed => "completed",
+        RecoveryOutcome::Cancelled => "cancelled",
+    };
+    progress.write(outcome_name, None)?;
+    write_result(
+        match mode {
+            RecoveryChoice::Resume => "operation.recover",
+            RecoveryChoice::Cancel => "operation.cancel",
+        },
+        RecoveryResult {
+            operation_id: operation_id.to_owned(),
+            outcome: outcome_name,
+        },
+    )
+}
+
+fn integrity_check(catalog: &Path) -> Result<(), CliError> {
+    let layout = require_catalog(catalog)?;
+    let mut checked_files = 0_usize;
+    let mut checked_manifests = 0_usize;
+    let mut findings = Vec::new();
+    for collection in collection_directories(layout.root())? {
+        let manifest_path = collection.join("SHA256SUMS");
+        if !manifest_path.is_file() {
+            findings.push(IntegrityFinding::MissingManifest {
+                collection: relative_to(layout.root(), &collection)?,
+            });
+            continue;
+        }
+        checked_manifests += 1;
+        let manifest = existing_manifest_lines(&manifest_path)?;
+        let mut actual_files = BTreeSet::new();
+        for entry in fs::read_dir(&collection)
+            .map_err(|error| CliError::io(format!("read collection: {error}")))?
+        {
+            let entry = entry.map_err(|error| CliError::io(error.to_string()))?;
+            if entry
+                .file_type()
+                .map_err(|error| CliError::io(error.to_string()))?
+                .is_file()
+                && entry.file_name() != "SHA256SUMS"
+            {
+                actual_files.insert(
+                    entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| CliError::invalid_data("catalog filename is not UTF-8"))?,
+                );
+            }
+        }
+        for (filename, expected) in &manifest {
+            let path = collection.join(filename);
+            if !path.is_file() {
+                findings.push(IntegrityFinding::MissingFile {
+                    path: relative_to(layout.root(), &path)?,
+                });
+                continue;
+            }
+            let (actual, _) = digest_file(&path)?;
+            checked_files += 1;
+            if actual.as_str() != expected {
+                findings.push(IntegrityFinding::DigestMismatch {
+                    path: relative_to(layout.root(), &path)?,
+                    expected: expected.clone(),
+                    actual: actual.as_str().to_owned(),
+                });
+            }
+        }
+        for filename in actual_files.difference(&manifest.keys().cloned().collect()) {
+            findings.push(IntegrityFinding::UnexpectedFile {
+                path: relative_to(layout.root(), &collection.join(filename))?,
+            });
+        }
+    }
+    write_result(
+        "integrity.check",
+        IntegrityResult {
+            catalog: canonical_path(layout.root())?,
+            valid: findings.is_empty(),
+            checked_files,
+            checked_manifests,
+            findings,
+        },
+    )
+}
+
+fn read_stored_plan(path: &Path) -> Result<StoredPlan, CliError> {
+    let raw: RawStoredPlan = read_json(path)?;
+    if raw.schema_version != 1 {
+        return Err(CliError::invalid_data(format!(
+            "unsupported stored plan schema version {}",
+            raw.schema_version
+        )));
+    }
+    let plan_bytes = serde_json::to_vec(&raw.import_plan)
+        .map_err(|error| CliError::invalid_data(format!("serialize import plan: {error}")))?;
+    let import_plan = ImportPlan::from_json(&plan_bytes)
+        .map_err(|error| CliError::invalid_data(format!("validate import plan: {error}")))?;
+    Ok(StoredPlan {
+        schema_version: raw.schema_version,
+        confirmed: raw.confirmed,
+        source_root: raw.source_root,
+        import_plan,
+    })
+}
+
+fn validate_plan_state(layout: &CatalogLayout, stored: &StoredPlan) -> Result<(), CliError> {
+    let plan = stored.import_plan.document();
+    let catalog_id = digest_text(&canonical_path(layout.root())?.to_string_lossy());
+    if catalog_id != plan.catalog.catalog_id {
+        return Err(CliError::conflict("plan belongs to a different catalog"));
+    }
+    for manifest in &plan.catalog.manifests {
+        let path = join_components(layout.root(), &manifest.path);
+        let (actual, _) = digest_file(&path)?;
+        if actual != manifest.digest {
+            return Err(CliError::conflict(format!(
+                "catalog manifest changed after planning: {}",
+                path.display()
+            )));
+        }
+    }
+    for item in &plan.items {
+        for file in &item.files {
+            let path = join_components(&stored.source_root, &file.source_path);
+            let (actual, size) = digest_file(&path)?;
+            if actual != file.digest || size != file.size_bytes {
+                return Err(CliError::conflict(format!(
+                    "source file changed after planning: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    for step in &plan.steps {
+        if let PlanStepKind::CopyFile { destination, .. } = &step.action {
+            let path = join_components(layout.root(), destination);
+            if path.exists() {
+                return Err(CliError::conflict(format!(
+                    "planned destination is occupied: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn source_path_for_id(stored: &StoredPlan, source_file_id: &str) -> Result<PathBuf, CliError> {
+    stored
+        .import_plan
+        .document()
+        .items
+        .iter()
+        .flat_map(|item| &item.files)
+        .find(|file| file.source_file_id == source_file_id)
+        .map(|file| join_components(&stored.source_root, &file.source_path))
+        .ok_or_else(|| CliError::invalid_data("plan copy references an unknown source file"))
+}
+
+fn manifest_contents_for_step(
+    layout: &CatalogLayout,
+    plan: &ImportPlan,
+    manifest_path: &[String],
+) -> Result<Vec<u8>, CliError> {
+    let absolute = join_components(layout.root(), manifest_path);
+    let mut lines = existing_manifest_lines(&absolute)?;
+    let parent = &manifest_path[..manifest_path.len() - 1];
+    for step in &plan.document().steps {
+        if let PlanStepKind::CopyFile {
+            destination,
+            expected_digest,
+            ..
+        } = &step.action
+        {
+            if destination[..destination.len() - 1] == *parent {
+                lines.insert(
+                    destination
+                        .last()
+                        .expect("copy destination has filename")
+                        .clone(),
+                    expected_digest.as_str().to_owned(),
+                );
+            }
+        }
+    }
+    Ok(encode_manifest(&lines))
+}
+
+fn recovery_request(
+    layout: &CatalogLayout,
+    stored: &StoredPlan,
+    mode: RecoveryChoice,
+) -> Result<RecoveryRequest, CliError> {
+    let mut request = RecoveryRequest {
+        mode: match mode {
+            RecoveryChoice::Resume => RecoveryMode::Resume,
+            RecoveryChoice::Cancel => RecoveryMode::CancelRemainingCopies,
+        },
+        ..RecoveryRequest::default()
+    };
+    for step in &stored.import_plan.document().steps {
+        let step_id = format!("step-{}", step.sequence);
+        match &step.action {
+            PlanStepKind::CreateDirectory { path } => {
+                request.directories.push(RecoveryDirectory {
+                    step_id,
+                    path: pathbuf(path),
+                });
+            }
+            PlanStepKind::CopyFile {
+                source_file_id,
+                destination,
+                ..
+            } => request.copies.push(RecoveryCopy {
+                step_id,
+                source: source_path_for_id(stored, source_file_id)?,
+                destination: pathbuf(destination),
+            }),
+            PlanStepKind::WriteManifest {
+                path,
+                previous_digest,
+                resulting_digest,
+                ..
+            } => {
+                let contents =
+                    manifest_contents_for_recovery(layout, &stored.import_plan, path, mode)?;
+                if mode == RecoveryChoice::Resume
+                    && ContentDigest::from_bytes(&contents) != *resulting_digest
+                {
+                    return Err(CliError::conflict(
+                        "recovery manifest no longer matches the confirmed plan",
+                    ));
+                }
+                request.manifests.push(RecoveryManifest {
+                    step_id,
+                    path: pathbuf(path),
+                    previous_sha256: previous_digest
+                        .as_ref()
+                        .map(|digest| digest.as_str().to_owned()),
+                    contents,
+                });
+            }
+        }
+    }
+    Ok(request)
+}
+
+fn manifest_contents_for_recovery(
+    layout: &CatalogLayout,
+    plan: &ImportPlan,
+    manifest_path: &[String],
+    mode: RecoveryChoice,
+) -> Result<Vec<u8>, CliError> {
+    if mode == RecoveryChoice::Resume {
+        return manifest_contents_for_step(layout, plan, manifest_path);
+    }
+    let absolute = join_components(layout.root(), manifest_path);
+    let mut lines = existing_manifest_lines(&absolute)?;
+    let parent = &manifest_path[..manifest_path.len() - 1];
+    for step in &plan.document().steps {
+        if let PlanStepKind::CopyFile {
+            destination,
+            expected_digest,
+            ..
+        } = &step.action
+        {
+            if destination[..destination.len() - 1] != *parent {
+                continue;
+            }
+            let destination_path = join_components(layout.root(), destination);
+            if !destination_path.exists() {
+                continue;
+            }
+            let (actual, _) = digest_file(&destination_path)?;
+            if actual != *expected_digest {
+                return Err(CliError::conflict(format!(
+                    "published destination differs from the confirmed plan: {}",
+                    destination_path.display()
+                )));
+            }
+            lines.insert(
+                destination
+                    .last()
+                    .expect("copy destination has filename")
+                    .clone(),
+                expected_digest.as_str().to_owned(),
+            );
+        }
+    }
+    Ok(encode_manifest(&lines))
+}
+
+fn validate_recovery_state(
+    layout: &CatalogLayout,
+    stored: &StoredPlan,
+    records: &[OperationRecord],
+    mode: RecoveryChoice,
+) -> Result<(), CliError> {
+    let plan = stored.import_plan.document();
+    let catalog_id = digest_text(&canonical_path(layout.root())?.to_string_lossy());
+    if catalog_id != plan.catalog.catalog_id {
+        return Err(CliError::conflict(
+            "recovery plan belongs to a different catalog",
+        ));
+    }
+    let expected_plan = serde_json::to_value(&stored.import_plan)
+        .map_err(|error| CliError::invalid_data(format!("serialize recovery plan: {error}")))?;
+    match records.first() {
+        Some(OperationRecord::Plan { plan, .. }) if plan == &expected_plan => {}
+        Some(OperationRecord::Plan { .. }) => {
+            return Err(CliError::conflict(
+                "saved plan does not match the operation journal",
+            ));
+        }
+        _ => {
+            return Err(CliError::invalid_data(
+                "operation journal has no plan record",
+            ))
+        }
+    }
+
+    for step in &plan.steps {
+        match &step.action {
+            PlanStepKind::CopyFile {
+                source_file_id,
+                destination,
+                expected_digest,
+                size_bytes,
+            } => {
+                let destination_path = join_components(layout.root(), destination);
+                if destination_path.exists() {
+                    let (actual, size) = digest_file(&destination_path)?;
+                    if actual != *expected_digest || size != *size_bytes {
+                        return Err(CliError::conflict(format!(
+                            "published destination differs from the confirmed plan: {}",
+                            destination_path.display()
+                        )));
+                    }
+                } else if mode == RecoveryChoice::Resume {
+                    let source = source_path_for_id(stored, source_file_id)?;
+                    let (actual, size) = digest_file(&source)?;
+                    if actual != *expected_digest || size != *size_bytes {
+                        return Err(CliError::conflict(format!(
+                            "source file changed before recovery: {}",
+                            source.display()
+                        )));
+                    }
+                }
+            }
+            PlanStepKind::WriteManifest {
+                path,
+                previous_digest,
+                resulting_digest,
+                ..
+            } => {
+                let manifest_path = join_components(layout.root(), path);
+                if manifest_path.exists() {
+                    let (actual, _) = digest_file(&manifest_path)?;
+                    if Some(&actual) != previous_digest.as_ref() && actual != *resulting_digest {
+                        return Err(CliError::conflict(format!(
+                            "catalog manifest changed outside the operation: {}",
+                            manifest_path.display()
+                        )));
+                    }
+                } else if previous_digest.is_some() {
+                    return Err(CliError::conflict(format!(
+                        "catalog manifest disappeared before recovery: {}",
+                        manifest_path.display()
+                    )));
+                }
+            }
+            PlanStepKind::CreateDirectory { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn find_operation_journal(
+    layout: &CatalogLayout,
+    operation_id: &str,
+) -> Result<(PathBuf, Vec<OperationRecord>), CliError> {
+    for path in jsonl_files(&layout.journal_directory())? {
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| CliError::io(format!("read operation journal: {error}")))?;
+        let mut records = Vec::new();
+        for (index, line) in contents.lines().enumerate() {
+            match serde_json::from_str::<OperationRecord>(line) {
+                Ok(record) => records.push(record),
+                Err(error)
+                    if matches!(
+                        records.first(),
+                        Some(OperationRecord::Plan {
+                            operation_id: recorded,
+                            ..
+                        }) if recorded == operation_id
+                    ) =>
+                {
+                    return Err(CliError::invalid_data(format!(
+                        "operation journal {} line {} is invalid: {error}",
+                        path.display(),
+                        index + 1
+                    )));
+                }
+                Err(_) => {
+                    records.clear();
+                    break;
+                }
+            }
+        }
+        if matches!(
+            records.first(),
+            Some(OperationRecord::Plan {
+                operation_id: recorded,
+                ..
+            }) if recorded == operation_id
+        ) {
+            return Ok((path, records));
+        }
+    }
+    Err(CliError::not_found(format!(
+        "operation journal not found: {operation_id}"
+    )))
+}
+
+impl ProgressWriter {
+    fn new(path: Option<&Path>, operation_id: &str) -> Result<Self, CliError> {
+        let file = path
+            .map(|path| {
+                ensure_output_absent(path)?;
+                File::options()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map_err(|error| {
+                        CliError::io(format!("create progress file {}: {error}", path.display()))
+                    })
+            })
+            .transpose()?;
+        Ok(Self {
+            file,
+            operation_id: operation_id.to_owned(),
+            sequence: 0,
+            terminal: false,
+        })
+    }
+
+    fn write(&mut self, event: &'static str, step: Option<u32>) -> Result<(), CliError> {
+        let Some(file) = &mut self.file else {
+            return Ok(());
+        };
+        self.sequence += 1;
+        if matches!(event, "completed" | "cancelled" | "failed") {
+            self.terminal = true;
+        }
+        serde_json::to_writer(
+            &mut *file,
+            &ProgressEvent {
+                version: 1,
+                operation_id: self.operation_id.clone(),
+                sequence: self.sequence,
+                event,
+                step,
+            },
+        )
+        .map_err(|error| CliError::io(format!("write progress event: {error}")))?;
+        file.write_all(b"\n")
+            .and_then(|()| file.flush())
+            .map_err(|error| CliError::io(format!("flush progress event: {error}")))
+    }
+}
+
+impl Drop for ProgressWriter {
+    fn drop(&mut self) {
+        if self.terminal {
+            return;
+        }
+        let Some(file) = &mut self.file else {
+            return;
+        };
+        self.sequence += 1;
+        let _ = serde_json::to_writer(
+            &mut *file,
+            &ProgressEvent {
+                version: 1,
+                operation_id: self.operation_id.clone(),
+                sequence: self.sequence,
+                event: "failed",
+                step: None,
+            },
+        );
+        let _ = file.write_all(b"\n");
+        let _ = file.flush();
+    }
+}
+
+fn collection_directories(root: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let mut collections = Vec::new();
+    for year in
+        fs::read_dir(root).map_err(|error| CliError::io(format!("read catalog root: {error}")))?
+    {
+        let year = year.map_err(|error| CliError::io(error.to_string()))?;
+        if !year
+            .file_type()
+            .map_err(|error| CliError::io(error.to_string()))?
+            .is_dir()
+            || year.file_name().to_string_lossy().starts_with('.')
+        {
+            continue;
+        }
+        for collection in
+            fs::read_dir(year.path()).map_err(|error| CliError::io(error.to_string()))?
+        {
+            let collection = collection.map_err(|error| CliError::io(error.to_string()))?;
+            if collection
+                .file_type()
+                .map_err(|error| CliError::io(error.to_string()))?
+                .is_dir()
+            {
+                collections.push(collection.path());
+            }
+        }
+    }
+    collections.sort();
+    Ok(collections)
+}
+
+fn relative_to(root: &Path, path: &Path) -> Result<PathBuf, CliError> {
+    path.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .map_err(|_| CliError::operation("catalog path escaped its root"))
+}
+
+fn pathbuf(components: &[String]) -> PathBuf {
+    components.iter().collect()
 }
 
 fn require_catalog(path: &Path) -> Result<CatalogLayout, CliError> {
