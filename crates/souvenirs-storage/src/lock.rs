@@ -21,6 +21,8 @@ pub struct LockHolder {
     pub machine_id: String,
     pub boot_id: String,
     pub process_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start_id: Option<String>,
     pub started_at_unix_seconds: u64,
     pub nonce: String,
 }
@@ -31,6 +33,7 @@ pub trait LockEnvironment {
     fn boot_id(&self) -> Result<String, LockError>;
     fn process_id(&self) -> u32;
     fn process_is_running(&self, process_id: u32) -> Result<bool, LockError>;
+    fn process_start_id(&self, process_id: u32) -> Result<Option<String>, LockError>;
     fn unix_seconds(&self) -> Result<u64, LockError>;
     fn nonce(&self) -> Result<String, LockError>;
 }
@@ -80,7 +83,18 @@ impl LockEnvironment for SystemLockEnvironment {
                 action: "inspect lock process",
                 source,
             })?;
-        Ok(output.status.success() && !output.stdout.is_empty())
+        match (output.status.code(), output.stdout.is_empty()) {
+            (Some(0), false) => Ok(true),
+            (Some(1), true) => Ok(false),
+            _ => Err(LockError::Environment {
+                action: "inspect lock process",
+                source: io::Error::other(format!("ps exited with {}", output.status)),
+            }),
+        }
+    }
+
+    fn process_start_id(&self, process_id: u32) -> Result<Option<String>, LockError> {
+        system_process_start_id(process_id)
     }
 
     fn unix_seconds(&self) -> Result<u64, LockError> {
@@ -123,14 +137,7 @@ impl CatalogLock {
         layout: &CatalogLayout,
         environment: &impl LockEnvironment,
     ) -> Result<Self, LockError> {
-        let holder = LockHolder {
-            host: environment.host_name()?,
-            machine_id: environment.machine_id()?,
-            boot_id: environment.boot_id()?,
-            process_id: environment.process_id(),
-            started_at_unix_seconds: environment.unix_seconds()?,
-            nonce: environment.nonce()?,
-        };
+        let holder = current_holder(environment)?;
         let path = layout.lock_path();
 
         match write_holder_exclusively(&path, &holder) {
@@ -156,6 +163,10 @@ impl CatalogLock {
             return Err(LockError::Busy(Box::new(existing)));
         }
 
+        let confirmed = read_holder(&path)?;
+        if confirmed != existing {
+            return Err(LockError::Busy(Box::new(confirmed)));
+        }
         remove_and_persist(&path)?;
         if let Err(error) = write_holder_exclusively(&path, &holder) {
             if matches!(
@@ -292,14 +303,7 @@ impl TakeoverGuard {
         layout: &CatalogLayout,
         environment: &impl LockEnvironment,
     ) -> Result<Self, LockError> {
-        let holder = LockHolder {
-            host: environment.host_name()?,
-            machine_id: environment.machine_id()?,
-            boot_id: environment.boot_id()?,
-            process_id: environment.process_id(),
-            started_at_unix_seconds: environment.unix_seconds()?,
-            nonce: environment.nonce()?,
-        };
+        let holder = current_holder(environment)?;
         let path = layout.lock_takeover_path();
         let local_claim = LocalTakeoverClaim::acquire(layout)?;
         let mut file = OpenOptions::new()
@@ -365,10 +369,33 @@ fn holder_is_live(
     if existing.machine_id != contender.machine_id {
         return Ok(true);
     }
-    if environment.process_is_running(existing.process_id)? {
-        return Ok(true);
+    if existing.boot_id != contender.boot_id {
+        return Ok(false);
     }
-    Ok(false)
+
+    if !environment.process_is_running(existing.process_id)? {
+        return Ok(false);
+    }
+    let Some(recorded_start_id) = existing.process_start_id.as_deref() else {
+        return Ok(true);
+    };
+    let Some(observed_start_id) = environment.process_start_id(existing.process_id)? else {
+        return Ok(true);
+    };
+    Ok(observed_start_id == recorded_start_id)
+}
+
+fn current_holder(environment: &impl LockEnvironment) -> Result<LockHolder, LockError> {
+    let process_id = environment.process_id();
+    Ok(LockHolder {
+        host: environment.host_name()?,
+        machine_id: environment.machine_id()?,
+        boot_id: environment.boot_id()?,
+        process_id,
+        process_start_id: environment.process_start_id(process_id)?,
+        started_at_unix_seconds: environment.unix_seconds()?,
+        nonce: environment.nonce()?,
+    })
 }
 
 fn canonical_takeover_path(layout: &CatalogLayout) -> Result<PathBuf, LockError> {
@@ -662,6 +689,63 @@ fn normalized_boot_id(value: String) -> Result<String, LockError> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn system_process_start_id(process_id: u32) -> Result<Option<String>, LockError> {
+    let path = PathBuf::from(format!("/proc/{process_id}/stat"));
+    let value = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(LockError::Environment {
+                action: "read process identity",
+                source,
+            })
+        }
+    };
+    let fields = value
+        .rsplit_once(") ")
+        .map(|(_, fields)| fields)
+        .ok_or_else(|| LockError::Environment {
+            action: "read process identity",
+            source: io::Error::new(io::ErrorKind::InvalidData, "invalid /proc process record"),
+        })?;
+    let start_ticks = fields
+        .split_whitespace()
+        .nth(19)
+        .ok_or_else(|| LockError::Environment {
+            action: "read process identity",
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "process start field is unavailable",
+            ),
+        })?;
+    Ok(Some(format!("linux:{start_ticks}")))
+}
+
+#[cfg(target_os = "macos")]
+fn system_process_start_id(process_id: u32) -> Result<Option<String>, LockError> {
+    use proc_pidinfo::{proc_pidinfo, Pid, ProcBSDInfo};
+
+    proc_pidinfo::<ProcBSDInfo>(Pid(process_id))
+        .map_err(|source| LockError::Environment {
+            action: "read process identity",
+            source,
+        })
+        .map(|info| {
+            info.map(|info| {
+                format!(
+                    "macos:{}:{:06}",
+                    info.pbi_start_tvsec, info.pbi_start_tvusec
+                )
+            })
+        })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn system_process_start_id(_process_id: u32) -> Result<Option<String>, LockError> {
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CatalogLock, LockEnvironment, LockError, LockHolder, TakeoverGuard};
@@ -671,21 +755,19 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeEnvironment {
-        host: &'static str,
-        machine_id: &'static str,
         boot_id: &'static str,
         process_id: u32,
-        running_processes: Vec<u32>,
+        processes: Vec<(u32, Option<&'static str>)>,
         nonce: &'static str,
     }
 
     impl LockEnvironment for FakeEnvironment {
         fn host_name(&self) -> Result<String, LockError> {
-            Ok(self.host.to_owned())
+            Ok("computer".to_owned())
         }
 
         fn machine_id(&self) -> Result<String, LockError> {
-            Ok(self.machine_id.to_owned())
+            Ok("machine-a".to_owned())
         }
 
         fn boot_id(&self) -> Result<String, LockError> {
@@ -697,7 +779,21 @@ mod tests {
         }
 
         fn process_is_running(&self, process_id: u32) -> Result<bool, LockError> {
-            Ok(self.running_processes.contains(&process_id))
+            Ok(self
+                .processes
+                .iter()
+                .any(|(candidate, _)| *candidate == process_id))
+        }
+
+        fn process_start_id(&self, process_id: u32) -> Result<Option<String>, LockError> {
+            match self
+                .processes
+                .iter()
+                .find(|(candidate, _)| *candidate == process_id)
+            {
+                Some((_, Some(start_id))) => Ok(Some((*start_id).to_owned())),
+                Some((_, None)) | None => Ok(None),
+            }
         }
 
         fn unix_seconds(&self) -> Result<u64, LockError> {
@@ -707,6 +803,40 @@ mod tests {
         fn nonce(&self) -> Result<String, LockError> {
             Ok(self.nonce.to_owned())
         }
+    }
+
+    fn environment(
+        boot_id: &'static str,
+        process_id: u32,
+        nonce: &'static str,
+        processes: &[(u32, Option<&'static str>)],
+    ) -> FakeEnvironment {
+        FakeEnvironment {
+            boot_id,
+            process_id,
+            processes: processes.to_vec(),
+            nonce,
+        }
+    }
+
+    fn holder(boot_id: &str, process_id: u32, process_start_id: Option<&str>) -> LockHolder {
+        LockHolder {
+            host: "computer".to_owned(),
+            machine_id: "machine-a".to_owned(),
+            boot_id: boot_id.to_owned(),
+            process_id,
+            process_start_id: process_start_id.map(str::to_owned),
+            started_at_unix_seconds: 1,
+            nonce: "holder".to_owned(),
+        }
+    }
+
+    fn write_holder(layout: &CatalogLayout, holder: &LockHolder) {
+        fs::write(
+            layout.lock_path(),
+            format!("{}\n", serde_json::to_string(holder).unwrap()),
+        )
+        .unwrap();
     }
 
     fn initialized_catalog(name: &str) -> (TempDirectory, CatalogLayout) {
@@ -719,22 +849,13 @@ mod tests {
     #[test]
     fn exclusive_lock_reports_the_current_holder() {
         let (_temporary, layout) = initialized_catalog("lock-busy");
-        let first_environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 41,
-            running_processes: vec![41],
-            nonce: "first",
-        };
-        let contender_environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![41, 42],
-            nonce: "second",
-        };
+        let first_environment = environment("boot-a", 41, "first", &[(41, Some("process-41"))]);
+        let contender_environment = environment(
+            "boot-a",
+            42,
+            "second",
+            &[(41, Some("process-41")), (42, Some("process-42"))],
+        );
         let first = CatalogLock::acquire_with(&layout, &first_environment).unwrap();
 
         let error = CatalogLock::acquire_with(&layout, &contender_environment).unwrap_err();
@@ -748,27 +869,8 @@ mod tests {
     #[test]
     fn removes_stale_lock_from_dead_process_on_same_host() {
         let (_temporary, layout) = initialized_catalog("lock-stale");
-        let stale = LockHolder {
-            host: "computer".to_owned(),
-            machine_id: "machine-a".to_owned(),
-            boot_id: "boot-a".to_owned(),
-            process_id: 41,
-            started_at_unix_seconds: 1,
-            nonce: "stale".to_owned(),
-        };
-        fs::write(
-            layout.lock_path(),
-            format!("{}\n", serde_json::to_string(&stale).unwrap()),
-        )
-        .unwrap();
-        let environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![42],
-            nonce: "replacement",
-        };
+        write_holder(&layout, &holder("boot-a", 41, Some("process-41")));
+        let environment = environment("boot-a", 42, "replacement", &[(42, Some("process-42"))]);
 
         let acquired = CatalogLock::acquire_with(&layout, &environment).unwrap();
 
@@ -777,29 +879,21 @@ mod tests {
     }
 
     #[test]
-    fn removes_same_machine_lock_from_an_earlier_boot_when_recorded_pid_is_dead() {
+    fn removes_same_machine_lock_from_an_earlier_boot_when_pid_is_reused() {
         let (_temporary, layout) = initialized_catalog("lock-reboot");
-        let stale = LockHolder {
-            host: "computer".to_owned(),
-            machine_id: "machine-a".to_owned(),
-            boot_id: "boot-before-restart".to_owned(),
-            process_id: 41,
-            started_at_unix_seconds: 1,
-            nonce: "stale".to_owned(),
-        };
-        fs::write(
-            layout.lock_path(),
-            format!("{}\n", serde_json::to_string(&stale).unwrap()),
-        )
-        .unwrap();
-        let environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-after-restart",
-            process_id: 42,
-            running_processes: vec![42],
-            nonce: "replacement",
-        };
+        write_holder(
+            &layout,
+            &holder("boot-before-restart", 41, Some("original-process")),
+        );
+        let environment = environment(
+            "boot-after-restart",
+            42,
+            "replacement",
+            &[
+                (41, Some("reused-process")),
+                (42, Some("contender-process")),
+            ],
+        );
 
         let acquired = CatalogLock::acquire_with(&layout, &environment).unwrap();
 
@@ -808,54 +902,95 @@ mod tests {
     }
 
     #[test]
-    fn boot_identity_mismatch_never_steals_from_a_live_process() {
-        let (_temporary, layout) = initialized_catalog("lock-boot-mismatch-live");
-        let holder = LockHolder {
-            host: "computer".to_owned(),
-            machine_id: "machine-a".to_owned(),
-            boot_id: "unexpected-boot-id".to_owned(),
-            process_id: 41,
-            started_at_unix_seconds: 1,
-            nonce: "live".to_owned(),
-        };
-        fs::write(
-            layout.lock_path(),
-            format!("{}\n", serde_json::to_string(&holder).unwrap()),
-        )
-        .unwrap();
-        let environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![41, 42],
-            nonce: "contender",
-        };
+    fn removes_same_boot_lock_when_pid_is_reused() {
+        let (_temporary, layout) = initialized_catalog("lock-pid-reused");
+        write_holder(&layout, &holder("boot-a", 41, Some("original-process")));
+        let environment = environment(
+            "boot-a",
+            42,
+            "replacement",
+            &[
+                (41, Some("reused-process")),
+                (42, Some("contender-process")),
+            ],
+        );
+
+        let acquired = CatalogLock::acquire_with(&layout, &environment).unwrap();
+
+        assert_eq!(
+            acquired.holder().process_start_id.as_deref(),
+            Some("contender-process")
+        );
+    }
+
+    #[test]
+    fn live_original_process_reports_the_recorded_holder() {
+        let (_temporary, layout) = initialized_catalog("lock-original-live");
+        let original = holder("boot-a", 41, Some("original-process"));
+        write_holder(&layout, &original);
+        let environment = environment(
+            "boot-a",
+            42,
+            "contender",
+            &[
+                (41, Some("original-process")),
+                (42, Some("contender-process")),
+            ],
+        );
 
         let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
 
-        assert!(matches!(error, LockError::Busy(actual) if *actual == holder));
+        assert!(matches!(error, LockError::Busy(actual) if *actual == original));
+    }
+
+    #[test]
+    fn unavailable_same_boot_identity_refuses_automatic_removal() {
+        let (_temporary, layout) = initialized_catalog("lock-identity-unavailable");
+        let original = holder("boot-a", 41, Some("original-process"));
+        write_holder(&layout, &original);
+        let environment = environment(
+            "boot-a",
+            42,
+            "contender",
+            &[(41, None), (42, Some("contender-process"))],
+        );
+
+        let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
+
+        assert!(matches!(error, LockError::Busy(actual) if *actual == original));
+        assert!(layout.lock_path().exists());
+    }
+
+    #[test]
+    fn legacy_live_lock_without_process_identity_remains_busy() {
+        let (_temporary, layout) = initialized_catalog("lock-legacy-live");
+        let legacy = holder("boot-a", 41, None);
+        write_holder(&layout, &legacy);
+        let environment = environment(
+            "boot-a",
+            42,
+            "contender",
+            &[
+                (41, Some("unknown-live-process")),
+                (42, Some("contender-process")),
+            ],
+        );
+
+        let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
+
+        assert!(matches!(error, LockError::Busy(actual) if *actual == legacy));
     }
 
     #[test]
     fn takeover_guard_serializes_stale_lock_removal() {
         let (_temporary, layout) = initialized_catalog("takeover-guard");
-        let first_environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 41,
-            running_processes: vec![41],
-            nonce: "first",
-        };
-        let second_environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![41, 42],
-            nonce: "second",
-        };
+        let first_environment = environment("boot-a", 41, "first", &[(41, Some("process-41"))]);
+        let second_environment = environment(
+            "boot-a",
+            42,
+            "second",
+            &[(41, Some("process-41")), (42, Some("process-42"))],
+        );
         let _first = TakeoverGuard::acquire(&layout, &first_environment).unwrap();
 
         let error = TakeoverGuard::acquire(&layout, &second_environment).unwrap_err();
@@ -866,33 +1001,55 @@ mod tests {
     #[test]
     fn foreign_lock_requires_explicit_exact_removal() {
         let (_temporary, layout) = initialized_catalog("lock-foreign");
-        let holder = LockHolder {
+        let foreign = LockHolder {
             host: "other-computer".to_owned(),
             machine_id: "machine-b".to_owned(),
             boot_id: "boot-b".to_owned(),
             process_id: 41,
+            process_start_id: Some("foreign-process".to_owned()),
             started_at_unix_seconds: 1,
             nonce: "foreign".to_owned(),
         };
-        fs::write(
-            layout.lock_path(),
-            format!("{}\n", serde_json::to_string(&holder).unwrap()),
-        )
-        .unwrap();
-        let environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![42],
-            nonce: "local",
-        };
+        write_holder(&layout, &foreign);
+        let environment = environment("boot-a", 42, "local", &[(42, Some("process-42"))]);
 
         let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
-        assert!(matches!(error, LockError::Busy(actual) if *actual == holder));
+        assert!(matches!(error, LockError::Busy(actual) if *actual == foreign));
 
-        CatalogLock::remove_existing_with(&layout, &holder, &environment).unwrap();
+        CatalogLock::remove_existing_with(&layout, &foreign, &environment).unwrap();
         assert!(!layout.lock_path().exists());
+    }
+
+    #[test]
+    fn explicit_removal_works_when_current_process_identity_is_unavailable() {
+        let (_temporary, layout) = initialized_catalog("lock-remove-without-identity");
+        let foreign = LockHolder {
+            host: "other-computer".to_owned(),
+            machine_id: "machine-b".to_owned(),
+            boot_id: "boot-b".to_owned(),
+            process_id: 41,
+            process_start_id: Some("foreign-process".to_owned()),
+            started_at_unix_seconds: 1,
+            nonce: "foreign".to_owned(),
+        };
+        write_holder(&layout, &foreign);
+        let environment = environment("boot-a", 42, "local", &[(42, None)]);
+
+        CatalogLock::remove_existing_with(&layout, &foreign, &environment).unwrap();
+
+        assert!(!layout.lock_path().exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_process_start_identity_is_stable_for_the_current_process() {
+        let process_id = std::process::id();
+
+        let first = super::system_process_start_id(process_id).unwrap();
+        let second = super::system_process_start_id(process_id).unwrap();
+
+        assert!(first.is_some());
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -903,6 +1060,7 @@ mod tests {
             machine_id: "machine-b".to_owned(),
             boot_id: "boot-b".to_owned(),
             process_id: 41,
+            process_start_id: Some("foreign-process".to_owned()),
             started_at_unix_seconds: 1,
             nonce: "expected".to_owned(),
         };
@@ -915,14 +1073,7 @@ mod tests {
             format!("{}\n", serde_json::to_string(&actual).unwrap()),
         )
         .unwrap();
-        let environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![42],
-            nonce: "local",
-        };
+        let environment = environment("boot-a", 42, "local", &[(42, Some("process-42"))]);
 
         let error =
             CatalogLock::remove_existing_with(&layout, &expected, &environment).unwrap_err();
@@ -940,14 +1091,7 @@ mod tests {
     #[test]
     fn release_removes_only_the_owned_lock() {
         let (_temporary, layout) = initialized_catalog("lock-release");
-        let environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![42],
-            nonce: "owned",
-        };
+        let environment = environment("boot-a", 42, "owned", &[(42, Some("process-42"))]);
         let acquired = CatalogLock::acquire_with(&layout, &environment).unwrap();
 
         acquired.release().unwrap();
@@ -960,14 +1104,7 @@ mod tests {
         let (_temporary, layout) = initialized_catalog("lock-corrupt");
         let corrupt = b"{partial";
         fs::write(layout.lock_path(), corrupt).unwrap();
-        let environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![42],
-            nonce: "local",
-        };
+        let environment = environment("boot-a", 42, "local", &[(42, Some("process-42"))]);
 
         let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
         assert!(matches!(
@@ -983,14 +1120,7 @@ mod tests {
     fn corrupt_lock_removal_refuses_changed_contents() {
         let (_temporary, layout) = initialized_catalog("lock-corrupt-changed");
         fs::write(layout.lock_path(), b"new contents").unwrap();
-        let environment = FakeEnvironment {
-            host: "computer",
-            machine_id: "machine-a",
-            boot_id: "boot-a",
-            process_id: 42,
-            running_processes: vec![42],
-            nonce: "local",
-        };
+        let environment = environment("boot-a", 42, "local", &[(42, Some("process-42"))]);
 
         let error =
             CatalogLock::remove_corrupt_existing_with(&layout, b"old contents", &environment)
