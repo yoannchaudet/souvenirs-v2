@@ -1,0 +1,15 @@
+[package]
+name = "souvenirs-engine"
+description = "Supervised process engine for the Souvenirs macOS application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+souvenirs-protocol = { path = "../souvenirs-protocol" }
+
+[lints]
+workspace = true

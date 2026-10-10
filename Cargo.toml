@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "crates/souvenirs-application",
+    "crates/souvenirs-cli",
+    "crates/souvenirs-domain",
+    "crates/souvenirs-engine",
+    "crates/souvenirs-metadata",
+    "crates/souvenirs-protocol",
+    "crates/souvenirs-storage",
+    "crates/souvenirs-test-support",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+repository = "https://github.com/yoannchaudet/souvenirs-v2"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
