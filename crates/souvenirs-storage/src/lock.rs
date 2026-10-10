@@ -1,0 +1,979 @@
+use std::collections::HashSet;
+use std::error::Error;
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use rustix::fs::FlockOperation;
+use serde::{Deserialize, Serialize};
+
+use crate::catalog::CatalogLayout;
+use crate::durability::{sync_file, sync_parent};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockHolder {
+    pub host: String,
+    pub machine_id: String,
+    pub boot_id: String,
+    pub process_id: u32,
+    pub started_at_unix_seconds: u64,
+    pub nonce: String,
+}
+
+pub trait LockEnvironment {
+    fn host_name(&self) -> Result<String, LockError>;
+    fn machine_id(&self) -> Result<String, LockError>;
+    fn boot_id(&self) -> Result<String, LockError>;
+    fn process_id(&self) -> u32;
+    fn process_is_running(&self, process_id: u32) -> Result<bool, LockError>;
+    fn unix_seconds(&self) -> Result<u64, LockError>;
+    fn nonce(&self) -> Result<String, LockError>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemLockEnvironment;
+
+impl LockEnvironment for SystemLockEnvironment {
+    fn host_name(&self) -> Result<String, LockError> {
+        let output =
+            Command::new("hostname")
+                .output()
+                .map_err(|source| LockError::Environment {
+                    action: "read host name",
+                    source,
+                })?;
+        if !output.status.success() {
+            return Err(LockError::HostNameUnavailable);
+        }
+        let host = String::from_utf8(output.stdout)
+            .map_err(|_| LockError::HostNameUnavailable)?
+            .trim()
+            .to_owned();
+        if host.is_empty() {
+            return Err(LockError::HostNameUnavailable);
+        }
+        Ok(host)
+    }
+
+    fn machine_id(&self) -> Result<String, LockError> {
+        system_machine_id()
+    }
+
+    fn boot_id(&self) -> Result<String, LockError> {
+        system_boot_id()
+    }
+
+    fn process_id(&self) -> u32 {
+        std::process::id()
+    }
+
+    fn process_is_running(&self, process_id: u32) -> Result<bool, LockError> {
+        let output = Command::new("ps")
+            .args(["-p", &process_id.to_string(), "-o", "pid="])
+            .output()
+            .map_err(|source| LockError::Environment {
+                action: "inspect lock process",
+                source,
+            })?;
+        Ok(output.status.success() && !output.stdout.is_empty())
+    }
+
+    fn unix_seconds(&self) -> Result<u64, LockError> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .map_err(|source| LockError::Clock {
+                details: source.to_string(),
+            })
+    }
+
+    fn nonce(&self) -> Result<String, LockError> {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|source| LockError::Clock {
+                details: source.to_string(),
+            })?;
+        Ok(format!(
+            "{}-{}-{}",
+            std::process::id(),
+            duration.as_secs(),
+            duration.subsec_nanos()
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct CatalogLock {
+    path: PathBuf,
+    holder: LockHolder,
+    released: bool,
+}
+
+impl CatalogLock {
+    pub fn acquire(layout: &CatalogLayout) -> Result<Self, LockError> {
+        Self::acquire_with(layout, &SystemLockEnvironment)
+    }
+
+    pub fn acquire_with(
+        layout: &CatalogLayout,
+        environment: &impl LockEnvironment,
+    ) -> Result<Self, LockError> {
+        let holder = LockHolder {
+            host: environment.host_name()?,
+            machine_id: environment.machine_id()?,
+            boot_id: environment.boot_id()?,
+            process_id: environment.process_id(),
+            started_at_unix_seconds: environment.unix_seconds()?,
+            nonce: environment.nonce()?,
+        };
+        let path = layout.lock_path();
+
+        match write_holder_exclusively(&path, &holder) {
+            Ok(()) => {
+                return Ok(Self {
+                    path,
+                    holder,
+                    released: false,
+                })
+            }
+            Err(LockError::Io { source, .. }) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+
+        let existing = read_holder(&path)?;
+        if holder_is_live(&existing, &holder, environment)? {
+            return Err(LockError::Busy(Box::new(existing)));
+        }
+
+        let _takeover = TakeoverGuard::acquire(layout, environment)?;
+        let existing = read_holder(&path)?;
+        if holder_is_live(&existing, &holder, environment)? {
+            return Err(LockError::Busy(Box::new(existing)));
+        }
+
+        remove_and_persist(&path)?;
+        if let Err(error) = write_holder_exclusively(&path, &holder) {
+            if matches!(
+                &error,
+                LockError::Io { source, .. }
+                    if source.kind() == io::ErrorKind::AlreadyExists
+            ) {
+                return Err(LockError::Busy(Box::new(read_holder(&path)?)));
+            }
+            return Err(error);
+        }
+        Ok(Self {
+            path,
+            holder,
+            released: false,
+        })
+    }
+
+    pub fn holder(&self) -> &LockHolder {
+        &self.holder
+    }
+
+    pub fn release(mut self) -> Result<(), LockError> {
+        self.release_inner()?;
+        self.released = true;
+        Ok(())
+    }
+
+    pub fn remove_existing(layout: &CatalogLayout, expected: &LockHolder) -> Result<(), LockError> {
+        Self::remove_existing_with(layout, expected, &SystemLockEnvironment)
+    }
+
+    pub fn remove_existing_with(
+        layout: &CatalogLayout,
+        expected: &LockHolder,
+        environment: &impl LockEnvironment,
+    ) -> Result<(), LockError> {
+        let _takeover = TakeoverGuard::acquire(layout, environment)?;
+        let actual = read_holder(&layout.lock_path())?;
+        if &actual != expected {
+            return Err(LockError::Changed {
+                expected: Box::new(expected.clone()),
+                actual: Box::new(actual),
+            });
+        }
+        remove_and_persist(&layout.lock_path())
+    }
+
+    pub fn remove_corrupt_existing(
+        layout: &CatalogLayout,
+        expected_contents: &[u8],
+    ) -> Result<(), LockError> {
+        Self::remove_corrupt_existing_with(layout, expected_contents, &SystemLockEnvironment)
+    }
+
+    pub fn remove_corrupt_existing_with(
+        layout: &CatalogLayout,
+        expected_contents: &[u8],
+        environment: &impl LockEnvironment,
+    ) -> Result<(), LockError> {
+        let _takeover = TakeoverGuard::acquire(layout, environment)?;
+        let actual = read_lock_bytes(&layout.lock_path())?;
+        if actual != expected_contents {
+            return Err(LockError::CorruptChanged {
+                expected: expected_contents.to_vec().into_boxed_slice(),
+                actual: actual.into_boxed_slice(),
+            });
+        }
+        remove_and_persist(&layout.lock_path())
+    }
+
+    fn release_inner(&self) -> Result<(), LockError> {
+        let actual = match read_holder(&self.path) {
+            Ok(holder) => holder,
+            Err(LockError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(())
+            }
+            Err(error) => return Err(error),
+        };
+        if actual != self.holder {
+            return Err(LockError::Changed {
+                expected: Box::new(self.holder.clone()),
+                actual: Box::new(actual),
+            });
+        }
+        remove_and_persist(&self.path)
+    }
+}
+
+impl Drop for CatalogLock {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = self.release_inner();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TakeoverGuard {
+    _file: File,
+    _local_claim: LocalTakeoverClaim,
+}
+
+#[derive(Debug)]
+struct LocalTakeoverClaim {
+    path: PathBuf,
+}
+
+impl TakeoverGuard {
+    fn acquire(
+        layout: &CatalogLayout,
+        environment: &impl LockEnvironment,
+    ) -> Result<Self, LockError> {
+        let holder = LockHolder {
+            host: environment.host_name()?,
+            machine_id: environment.machine_id()?,
+            boot_id: environment.boot_id()?,
+            process_id: environment.process_id(),
+            started_at_unix_seconds: environment.unix_seconds()?,
+            nonce: environment.nonce()?,
+        };
+        let path = layout.lock_takeover_path();
+        let local_claim = LocalTakeoverClaim::acquire(layout)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| LockError::Io {
+                action: "open lock takeover guard",
+                path: path.clone(),
+                source,
+            })?;
+        if let Err(source) = rustix::fs::fcntl_lock(&file, FlockOperation::NonBlockingLockExclusive)
+        {
+            return Err(if source == rustix::io::Errno::WOULDBLOCK {
+                LockError::TakeoverBusy
+            } else {
+                LockError::Io {
+                    action: "acquire lock takeover guard",
+                    path,
+                    source: io::Error::from(source),
+                }
+            });
+        }
+        file.set_len(0).map_err(|source| LockError::Io {
+            action: "truncate lock takeover guard",
+            path: path.clone(),
+            source,
+        })?;
+        write_holder(&mut file, &path, &holder)?;
+        sync_parent(&path).map_err(|source| LockError::Io {
+            action: "persist lock takeover guard",
+            path,
+            source,
+        })?;
+        Ok(Self {
+            _file: file,
+            _local_claim: local_claim,
+        })
+    }
+}
+
+impl LocalTakeoverClaim {
+    fn acquire(layout: &CatalogLayout) -> Result<Self, LockError> {
+        let path = canonical_takeover_path(layout)?;
+        claim_local_takeover(&path)?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for LocalTakeoverClaim {
+    fn drop(&mut self) {
+        release_local_takeover(&self.path);
+    }
+}
+
+fn holder_is_live(
+    existing: &LockHolder,
+    contender: &LockHolder,
+    environment: &impl LockEnvironment,
+) -> Result<bool, LockError> {
+    if existing.machine_id != contender.machine_id {
+        return Ok(true);
+    }
+    if environment.process_is_running(existing.process_id)? {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn canonical_takeover_path(layout: &CatalogLayout) -> Result<PathBuf, LockError> {
+    let state_directory =
+        fs::canonicalize(layout.state_directory()).map_err(|source| LockError::Io {
+            action: "canonicalize lock takeover directory",
+            path: layout.state_directory(),
+            source,
+        })?;
+    Ok(state_directory.join("lock.takeover"))
+}
+
+fn local_takeovers() -> &'static Mutex<HashSet<PathBuf>> {
+    static TAKEOVERS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    TAKEOVERS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn claim_local_takeover(path: &Path) -> Result<(), LockError> {
+    let mut takeovers = local_takeovers()
+        .lock()
+        .map_err(|_| LockError::TakeoverStatePoisoned)?;
+    if !takeovers.insert(path.to_path_buf()) {
+        return Err(LockError::TakeoverBusy);
+    }
+    Ok(())
+}
+
+fn release_local_takeover(path: &Path) {
+    if let Ok(mut takeovers) = local_takeovers().lock() {
+        takeovers.remove(path);
+    }
+}
+
+fn write_holder_exclusively(path: &Path, holder: &LockHolder) -> Result<(), LockError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|source| LockError::Io {
+            action: "create lock exclusively",
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    let result = write_holder(&mut file, path, holder);
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result?;
+    sync_parent(path).map_err(|source| LockError::Io {
+        action: "persist lock directory",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_holder(file: &mut File, path: &Path, holder: &LockHolder) -> Result<(), LockError> {
+    serde_json::to_writer(&mut *file, holder).map_err(|source| LockError::Serialize {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.write_all(b"\n")
+        .and_then(|()| sync_file(file))
+        .map_err(|source| LockError::Io {
+            action: "write and persist lock",
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn read_holder(path: &Path) -> Result<LockHolder, LockError> {
+    let bytes = read_lock_bytes(path)?;
+    serde_json::from_slice(&bytes).map_err(|source| LockError::Corrupt {
+        path: path.to_path_buf(),
+        contents: bytes.into_boxed_slice(),
+        source,
+    })
+}
+
+fn read_lock_bytes(path: &Path) -> Result<Vec<u8>, LockError> {
+    fs::read(path).map_err(|source| LockError::Io {
+        action: "read lock",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn remove_and_persist(path: &Path) -> Result<(), LockError> {
+    fs::remove_file(path).map_err(|source| LockError::Io {
+        action: "remove lock",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    sync_parent(path).map_err(|source| LockError::Io {
+        action: "persist lock removal",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[derive(Debug)]
+pub enum LockError {
+    Busy(Box<LockHolder>),
+    BootIdUnavailable,
+    Changed {
+        expected: Box<LockHolder>,
+        actual: Box<LockHolder>,
+    },
+    Clock {
+        details: String,
+    },
+    Corrupt {
+        path: PathBuf,
+        contents: Box<[u8]>,
+        source: serde_json::Error,
+    },
+    CorruptChanged {
+        expected: Box<[u8]>,
+        actual: Box<[u8]>,
+    },
+    Environment {
+        action: &'static str,
+        source: io::Error,
+    },
+    HostNameUnavailable,
+    MachineIdUnavailable,
+    Io {
+        action: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+    Serialize {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    TakeoverBusy,
+    TakeoverStatePoisoned,
+}
+
+impl fmt::Display for LockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy(holder) => write!(
+                formatter,
+                "catalog is busy: {} process {} holds the lock since {}",
+                holder.host, holder.process_id, holder.started_at_unix_seconds
+            ),
+            Self::BootIdUnavailable => formatter.write_str("boot identifier is unavailable"),
+            Self::Changed { expected, actual } => write!(
+                formatter,
+                "catalog lock changed from {} process {} to {} process {}; refusing removal",
+                expected.host, expected.process_id, actual.host, actual.process_id
+            ),
+            Self::Clock { details } => {
+                write!(formatter, "failed to read the system clock: {details}")
+            }
+            Self::Corrupt { path, source, .. } => {
+                write!(
+                    formatter,
+                    "catalog lock {} is corrupt: {source}",
+                    path.display()
+                )
+            }
+            Self::CorruptChanged { .. } => formatter
+                .write_str("catalog lock contents changed; refusing removal of the corrupt lock"),
+            Self::Environment { action, source } => write!(formatter, "{action}: {source}"),
+            Self::HostNameUnavailable => formatter.write_str("host name is unavailable"),
+            Self::MachineIdUnavailable => {
+                formatter.write_str("stable machine identifier is unavailable")
+            }
+            Self::Io {
+                action,
+                path,
+                source,
+            } => write!(formatter, "{action} at {}: {source}", path.display()),
+            Self::Serialize { path, source } => {
+                write!(
+                    formatter,
+                    "failed to serialize lock {}: {source}",
+                    path.display()
+                )
+            }
+            Self::TakeoverBusy => formatter.write_str("lock takeover is busy"),
+            Self::TakeoverStatePoisoned => {
+                formatter.write_str("local lock takeover state is unavailable")
+            }
+        }
+    }
+}
+
+impl Error for LockError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Corrupt { source, .. } | Self::Serialize { source, .. } => Some(source),
+            Self::Environment { source, .. } | Self::Io { source, .. } => Some(source),
+            Self::Busy(_)
+            | Self::BootIdUnavailable
+            | Self::Changed { .. }
+            | Self::Clock { .. }
+            | Self::CorruptChanged { .. }
+            | Self::HostNameUnavailable
+            | Self::MachineIdUnavailable
+            | Self::TakeoverBusy
+            | Self::TakeoverStatePoisoned => None,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn system_machine_id() -> Result<String, LockError> {
+    let value = fs::read_to_string("/etc/machine-id").map_err(|source| LockError::Environment {
+        action: "read machine identifier",
+        source,
+    })?;
+    normalized_machine_id(value)
+}
+
+#[cfg(target_os = "macos")]
+fn system_machine_id() -> Result<String, LockError> {
+    let output = Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .map_err(|source| LockError::Environment {
+            action: "read machine identifier",
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(LockError::MachineIdUnavailable);
+    }
+    let output = String::from_utf8(output.stdout).map_err(|_| LockError::MachineIdUnavailable)?;
+    let value = output
+        .lines()
+        .find_map(|line| line.split_once("\"IOPlatformUUID\" = \""))
+        .and_then(|(_, value)| value.strip_suffix('"'))
+        .ok_or(LockError::MachineIdUnavailable)?;
+    normalized_machine_id(value.to_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn system_machine_id() -> Result<String, LockError> {
+    SystemLockEnvironment.host_name()
+}
+
+fn normalized_machine_id(value: String) -> Result<String, LockError> {
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        Err(LockError::MachineIdUnavailable)
+    } else {
+        Ok(value)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn system_boot_id() -> Result<String, LockError> {
+    let value = fs::read_to_string("/proc/sys/kernel/random/boot_id").map_err(|source| {
+        LockError::Environment {
+            action: "read boot identifier",
+            source,
+        }
+    })?;
+    normalized_boot_id(value)
+}
+
+#[cfg(target_os = "macos")]
+fn system_boot_id() -> Result<String, LockError> {
+    let output = Command::new("sysctl")
+        .args(["-n", "kern.bootsessionuuid"])
+        .output()
+        .map_err(|source| LockError::Environment {
+            action: "read boot identifier",
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(LockError::BootIdUnavailable);
+    }
+    let value = String::from_utf8(output.stdout).map_err(|_| LockError::BootIdUnavailable)?;
+    normalized_boot_id(value)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn system_boot_id() -> Result<String, LockError> {
+    Err(LockError::BootIdUnavailable)
+}
+
+fn normalized_boot_id(value: String) -> Result<String, LockError> {
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        Err(LockError::BootIdUnavailable)
+    } else {
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CatalogLock, LockEnvironment, LockError, LockHolder, TakeoverGuard};
+    use crate::catalog::{CatalogConfig, CatalogLayout};
+    use crate::test_support::TempDirectory;
+    use std::fs;
+
+    #[derive(Clone)]
+    struct FakeEnvironment {
+        host: &'static str,
+        machine_id: &'static str,
+        boot_id: &'static str,
+        process_id: u32,
+        running_processes: Vec<u32>,
+        nonce: &'static str,
+    }
+
+    impl LockEnvironment for FakeEnvironment {
+        fn host_name(&self) -> Result<String, LockError> {
+            Ok(self.host.to_owned())
+        }
+
+        fn machine_id(&self) -> Result<String, LockError> {
+            Ok(self.machine_id.to_owned())
+        }
+
+        fn boot_id(&self) -> Result<String, LockError> {
+            Ok(self.boot_id.to_owned())
+        }
+
+        fn process_id(&self) -> u32 {
+            self.process_id
+        }
+
+        fn process_is_running(&self, process_id: u32) -> Result<bool, LockError> {
+            Ok(self.running_processes.contains(&process_id))
+        }
+
+        fn unix_seconds(&self) -> Result<u64, LockError> {
+            Ok(1_700_000_000)
+        }
+
+        fn nonce(&self) -> Result<String, LockError> {
+            Ok(self.nonce.to_owned())
+        }
+    }
+
+    fn initialized_catalog(name: &str) -> (TempDirectory, CatalogLayout) {
+        let temporary = TempDirectory::new(name);
+        let layout =
+            CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap();
+        (temporary, layout)
+    }
+
+    #[test]
+    fn exclusive_lock_reports_the_current_holder() {
+        let (_temporary, layout) = initialized_catalog("lock-busy");
+        let first_environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 41,
+            running_processes: vec![41],
+            nonce: "first",
+        };
+        let contender_environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![41, 42],
+            nonce: "second",
+        };
+        let first = CatalogLock::acquire_with(&layout, &first_environment).unwrap();
+
+        let error = CatalogLock::acquire_with(&layout, &contender_environment).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LockError::Busy(holder) if *holder == *first.holder()
+        ));
+    }
+
+    #[test]
+    fn removes_stale_lock_from_dead_process_on_same_host() {
+        let (_temporary, layout) = initialized_catalog("lock-stale");
+        let stale = LockHolder {
+            host: "computer".to_owned(),
+            machine_id: "machine-a".to_owned(),
+            boot_id: "boot-a".to_owned(),
+            process_id: 41,
+            started_at_unix_seconds: 1,
+            nonce: "stale".to_owned(),
+        };
+        fs::write(
+            layout.lock_path(),
+            format!("{}\n", serde_json::to_string(&stale).unwrap()),
+        )
+        .unwrap();
+        let environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![42],
+            nonce: "replacement",
+        };
+
+        let acquired = CatalogLock::acquire_with(&layout, &environment).unwrap();
+
+        assert_eq!(acquired.holder().process_id, 42);
+        assert_eq!(acquired.holder().nonce, "replacement");
+    }
+
+    #[test]
+    fn removes_same_machine_lock_from_an_earlier_boot_when_recorded_pid_is_dead() {
+        let (_temporary, layout) = initialized_catalog("lock-reboot");
+        let stale = LockHolder {
+            host: "computer".to_owned(),
+            machine_id: "machine-a".to_owned(),
+            boot_id: "boot-before-restart".to_owned(),
+            process_id: 41,
+            started_at_unix_seconds: 1,
+            nonce: "stale".to_owned(),
+        };
+        fs::write(
+            layout.lock_path(),
+            format!("{}\n", serde_json::to_string(&stale).unwrap()),
+        )
+        .unwrap();
+        let environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-after-restart",
+            process_id: 42,
+            running_processes: vec![42],
+            nonce: "replacement",
+        };
+
+        let acquired = CatalogLock::acquire_with(&layout, &environment).unwrap();
+
+        assert_eq!(acquired.holder().boot_id, "boot-after-restart");
+        assert_eq!(acquired.holder().process_id, 42);
+    }
+
+    #[test]
+    fn boot_identity_mismatch_never_steals_from_a_live_process() {
+        let (_temporary, layout) = initialized_catalog("lock-boot-mismatch-live");
+        let holder = LockHolder {
+            host: "computer".to_owned(),
+            machine_id: "machine-a".to_owned(),
+            boot_id: "unexpected-boot-id".to_owned(),
+            process_id: 41,
+            started_at_unix_seconds: 1,
+            nonce: "live".to_owned(),
+        };
+        fs::write(
+            layout.lock_path(),
+            format!("{}\n", serde_json::to_string(&holder).unwrap()),
+        )
+        .unwrap();
+        let environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![41, 42],
+            nonce: "contender",
+        };
+
+        let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
+
+        assert!(matches!(error, LockError::Busy(actual) if *actual == holder));
+    }
+
+    #[test]
+    fn takeover_guard_serializes_stale_lock_removal() {
+        let (_temporary, layout) = initialized_catalog("takeover-guard");
+        let first_environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 41,
+            running_processes: vec![41],
+            nonce: "first",
+        };
+        let second_environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![41, 42],
+            nonce: "second",
+        };
+        let _first = TakeoverGuard::acquire(&layout, &first_environment).unwrap();
+
+        let error = TakeoverGuard::acquire(&layout, &second_environment).unwrap_err();
+
+        assert!(matches!(error, LockError::TakeoverBusy));
+    }
+
+    #[test]
+    fn foreign_lock_requires_explicit_exact_removal() {
+        let (_temporary, layout) = initialized_catalog("lock-foreign");
+        let holder = LockHolder {
+            host: "other-computer".to_owned(),
+            machine_id: "machine-b".to_owned(),
+            boot_id: "boot-b".to_owned(),
+            process_id: 41,
+            started_at_unix_seconds: 1,
+            nonce: "foreign".to_owned(),
+        };
+        fs::write(
+            layout.lock_path(),
+            format!("{}\n", serde_json::to_string(&holder).unwrap()),
+        )
+        .unwrap();
+        let environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![42],
+            nonce: "local",
+        };
+
+        let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
+        assert!(matches!(error, LockError::Busy(actual) if *actual == holder));
+
+        CatalogLock::remove_existing_with(&layout, &holder, &environment).unwrap();
+        assert!(!layout.lock_path().exists());
+    }
+
+    #[test]
+    fn explicit_removal_refuses_changed_lock() {
+        let (_temporary, layout) = initialized_catalog("lock-changed");
+        let expected = LockHolder {
+            host: "other-computer".to_owned(),
+            machine_id: "machine-b".to_owned(),
+            boot_id: "boot-b".to_owned(),
+            process_id: 41,
+            started_at_unix_seconds: 1,
+            nonce: "expected".to_owned(),
+        };
+        let actual = LockHolder {
+            nonce: "actual".to_owned(),
+            ..expected.clone()
+        };
+        fs::write(
+            layout.lock_path(),
+            format!("{}\n", serde_json::to_string(&actual).unwrap()),
+        )
+        .unwrap();
+        let environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![42],
+            nonce: "local",
+        };
+
+        let error =
+            CatalogLock::remove_existing_with(&layout, &expected, &environment).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LockError::Changed {
+                expected: observed_expected,
+                actual: observed_actual,
+            } if *observed_expected == expected && *observed_actual == actual
+        ));
+        assert!(layout.lock_path().exists());
+    }
+
+    #[test]
+    fn release_removes_only_the_owned_lock() {
+        let (_temporary, layout) = initialized_catalog("lock-release");
+        let environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![42],
+            nonce: "owned",
+        };
+        let acquired = CatalogLock::acquire_with(&layout, &environment).unwrap();
+
+        acquired.release().unwrap();
+
+        assert!(!layout.lock_path().exists());
+    }
+
+    #[test]
+    fn corrupt_lock_can_be_removed_only_with_exact_confirmed_contents() {
+        let (_temporary, layout) = initialized_catalog("lock-corrupt");
+        let corrupt = b"{partial";
+        fs::write(layout.lock_path(), corrupt).unwrap();
+        let environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![42],
+            nonce: "local",
+        };
+
+        let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
+        assert!(matches!(
+            error,
+            LockError::Corrupt { contents, .. } if contents.as_ref() == corrupt
+        ));
+
+        CatalogLock::remove_corrupt_existing_with(&layout, corrupt, &environment).unwrap();
+        assert!(!layout.lock_path().exists());
+    }
+
+    #[test]
+    fn corrupt_lock_removal_refuses_changed_contents() {
+        let (_temporary, layout) = initialized_catalog("lock-corrupt-changed");
+        fs::write(layout.lock_path(), b"new contents").unwrap();
+        let environment = FakeEnvironment {
+            host: "computer",
+            machine_id: "machine-a",
+            boot_id: "boot-a",
+            process_id: 42,
+            running_processes: vec![42],
+            nonce: "local",
+        };
+
+        let error =
+            CatalogLock::remove_corrupt_existing_with(&layout, b"old contents", &environment)
+                .unwrap_err();
+
+        assert!(matches!(error, LockError::CorruptChanged { .. }));
+        assert!(layout.lock_path().exists());
+    }
+}
