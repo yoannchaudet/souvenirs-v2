@@ -210,6 +210,12 @@ The engine emits ordered progress events for that operation.
 
 The first request performs a handshake.
 The handshake reports the engine version, protocol version, compatible client version, and capabilities.
+The `compatible_client_version` value is the oldest macOS client version that the engine supports.
+Client versions contain three unsigned decimal components without leading zeros.
+Each component fits in an unsigned 64-bit integer.
+A macOS client accepts the engine when its client version is equal to or newer than this minimum.
+A client rejects an engine that requires a newer client version.
+The protocol version remains the wire compatibility boundary.
 
 The Rust types generate a committed JSON Schema.
 Swift protocol fixtures must validate against this schema.

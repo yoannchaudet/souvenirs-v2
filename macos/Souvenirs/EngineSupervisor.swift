@@ -232,7 +232,7 @@ public actor EngineSupervisor {
             case .incompatibleProtocol(let expected, let actual):
                 return "The engine returned protocol version \(actual); expected \(expected)"
             case .incompatibleClientVersion(let expected, let actual):
-                return "The engine supports client version \(actual); expected \(expected)"
+                return "The engine requires client version \(actual) or newer; this client is \(expected)"
             case .protocolError(let code, let message):
                 return "The engine returned protocol error \(code): \(message)"
             case .operationStreamAlreadyRequested(let operationID):
@@ -471,7 +471,17 @@ public actor EngineSupervisor {
                 actual: result.protocolVersion
             )
         }
-        guard result.compatibleClientVersion == Self.protocolClientVersion else {
+        guard let clientVersion = ClientVersion(Self.protocolClientVersion) else {
+            preconditionFailure("The configured client version must be valid")
+        }
+        guard let minimumClientVersion = ClientVersion(
+            result.compatibleClientVersion
+        ) else {
+            throw SupervisorError.malformedResponse(
+                "The compatible_client_version is not a valid major.minor.patch version"
+            )
+        }
+        guard clientVersion >= minimumClientVersion else {
             throw SupervisorError.incompatibleClientVersion(
                 expected: Self.protocolClientVersion,
                 actual: result.compatibleClientVersion
@@ -1565,6 +1575,49 @@ private struct HandshakeParameters: Encodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case clientVersion = "client_version"
+    }
+}
+
+struct ClientVersion: Comparable {
+    let major: UInt64
+    let minor: UInt64
+    let patch: UInt64
+
+    init?(_ value: String) {
+        let components = value.split(
+            separator: ".",
+            omittingEmptySubsequences: false
+        )
+        guard components.count == 3,
+              let major = Self.parse(components[0]),
+              let minor = Self.parse(components[1]),
+              let patch = Self.parse(components[2])
+        else {
+            return nil
+        }
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+    }
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        if lhs.major != rhs.major {
+            return lhs.major < rhs.major
+        }
+        if lhs.minor != rhs.minor {
+            return lhs.minor < rhs.minor
+        }
+        return lhs.patch < rhs.patch
+    }
+
+    private static func parse(_ component: Substring) -> UInt64? {
+        guard !component.isEmpty,
+              (component.count == 1 || component.first != "0"),
+              component.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 })
+        else {
+            return nil
+        }
+        return UInt64(component)
     }
 }
 

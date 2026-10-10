@@ -3,11 +3,11 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
 use souvenirs_protocol::{
-    CancellationAccepted, CatalogResult, EngineMessage, HandshakeResult, ImportReviewResult,
-    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
+    CancellationAccepted, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
+    ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
     OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
     UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
-    CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD,
+    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
     OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
@@ -117,12 +117,12 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
             );
         }
     };
-    if parameters.client_version.trim().is_empty() {
+    if parameters.client_version.parse::<ClientVersion>().is_err() {
         return write_protocol_error(
             &mut output,
             handshake.id,
             "invalid_client_version",
-            "Client version must not be empty.",
+            "Client version must use major.minor.patch unsigned decimal syntax.",
         );
     }
     write_message(
@@ -132,7 +132,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
             ResponseResult::Handshake(HandshakeResult {
                 engine_version: env!("CARGO_PKG_VERSION").to_owned(),
                 protocol_version: PROTOCOL_VERSION,
-                compatible_client_version: COMPATIBLE_CLIENT_VERSION.to_owned(),
+                compatible_client_version: MINIMUM_CLIENT_VERSION.to_owned(),
                 capabilities: vec![
                     START_OPERATION_METHOD.to_owned(),
                     CANCEL_OPERATION_METHOD.to_owned(),

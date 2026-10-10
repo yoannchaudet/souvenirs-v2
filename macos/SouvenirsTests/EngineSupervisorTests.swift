@@ -117,7 +117,23 @@ final class EngineSupervisorTests: XCTestCase {
         try await supervisor.stop()
     }
 
-    func testHandshakeRejectsIncompatibleClientVersion() async throws {
+    func testHandshakeAcceptsNewerClientVersion() async throws {
+        let executable = try makeHandshakeFixture(
+            response:
+                """
+                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.0.10","capabilities":[]}}
+                """
+        )
+        let supervisor = EngineSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+
+        let handshake = try await supervisor.handshake()
+
+        XCTAssertEqual(handshake.compatibleClientVersion, "0.0.10")
+        try await supervisor.stop()
+    }
+
+    func testHandshakeRejectsClientOlderThanMinimumVersion() async throws {
         let executable = try makeHandshakeFixture(
             response:
                 """
@@ -138,6 +154,59 @@ final class EngineSupervisorTests: XCTestCase {
         }
 
         try await supervisor.stop()
+    }
+
+    func testHandshakeRejectsMalformedMinimumClientVersion() async throws {
+        let executable = try makeHandshakeFixture(
+            response:
+                """
+                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.01.0","capabilities":[]}}
+                """
+        )
+        let supervisor = EngineSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+
+        do {
+            _ = try await supervisor.handshake()
+            XCTFail("Expected the malformed client version to be reported")
+        } catch let error as EngineSupervisor.SupervisorError {
+            XCTAssertEqual(
+                error,
+                .malformedResponse(
+                    "The compatible_client_version is not a valid major.minor.patch version"
+                )
+            )
+        }
+
+        try await supervisor.stop()
+    }
+
+    func testClientVersionComparisonUsesNumericComponents() throws {
+        let older = try XCTUnwrap(ClientVersion("0.9.10"))
+        let newer = try XCTUnwrap(ClientVersion("0.10.0"))
+        let patch = try XCTUnwrap(ClientVersion("0.10.1"))
+
+        XCTAssertLessThan(older, newer)
+        XCTAssertLessThan(newer, patch)
+        XCTAssertEqual(
+            ClientVersion("1.2.3"),
+            ClientVersion("1.2.3")
+        )
+    }
+
+    func testClientVersionRejectsMalformedSyntax() {
+        for version in [
+            "",
+            "1",
+            "1.2",
+            "1.2.3.4",
+            "1.02.3",
+            "1.a.3",
+            "-1.2.3",
+            "18446744073709551616.0.0",
+        ] {
+            XCTAssertNil(ClientVersion(version), "\(version) should be rejected")
+        }
     }
 
     func testHandshakeParsesSharedGoldenFixture() async throws {
