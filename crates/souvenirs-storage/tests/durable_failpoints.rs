@@ -5,8 +5,8 @@ use std::fs;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, Failpoint, ManifestReplacementRequest,
-    OperationJournal, OperationJournalError, VerifiedCopyError,
+    CatalogConfig, CatalogLayout, CatalogLock, CopyExpectation, Failpoint,
+    ManifestReplacementRequest, OperationJournal, OperationJournalError, VerifiedCopyError,
 };
 use tempfile::TempDir;
 
@@ -23,6 +23,13 @@ fn journal(layout: &CatalogLayout, lock: &CatalogLock, id: &str) -> OperationJou
 
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn expectation(bytes: &[u8]) -> CopyExpectation {
+    CopyExpectation {
+        sha256: digest(bytes),
+        size_bytes: bytes.len() as u64,
+    }
 }
 
 #[test]
@@ -139,7 +146,14 @@ fn copy_publication_intent_failpoint_preserves_verified_stage() {
     journal.fail_at(Failpoint::CopyPublicationIntentPersisted);
 
     let error = layout
-        .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy1")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "copy1",
+            expectation(b"verified"),
+        )
         .unwrap_err();
 
     assert!(matches!(
@@ -171,7 +185,14 @@ fn copy_published_failpoint_leaves_verified_destination_and_record() {
     journal.fail_at(Failpoint::CopyPublished);
 
     let error = layout
-        .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy1")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "copy1",
+            expectation(b"verified"),
+        )
         .unwrap_err();
 
     assert!(matches!(

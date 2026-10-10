@@ -896,21 +896,19 @@ fn import_execute(
                 size_bytes,
             } => {
                 let source = source_path_for_id(&stored, source_file_id)?;
-                let copied = layout
+                layout
                     .copy_verified(
                         &lock,
                         &mut journal,
                         source,
                         pathbuf(destination),
                         &format!("step-{}", step.sequence),
+                        souvenirs_storage::CopyExpectation {
+                            sha256: expected_digest.as_str().to_owned(),
+                            size_bytes: *size_bytes,
+                        },
                     )
                     .map_err(|error| CliError::operation(error.to_string()))?;
-                if copied.sha256 != expected_digest.as_str() || copied.bytes_copied != *size_bytes {
-                    return Err(CliError::operation(format!(
-                        "verified copy result does not match plan step {}",
-                        step.sequence
-                    )));
-                }
             }
             PlanStepKind::WriteManifest {
                 path,
@@ -1027,13 +1025,13 @@ fn operation_recover(
             "operation identifier does not match the saved plan",
         ));
     }
-    let (journal_path, records) = find_operation_journal(&layout, operation_id)?;
-    validate_recovery_state(&layout, &stored, &records, mode)?;
-    let request = recovery_request(&layout, &stored, mode)?;
-    let mut progress = ProgressWriter::new(progress_path, operation_id)?;
-    progress.write("recovery_started", None)?;
     let lock = CatalogLock::acquire(&layout)
         .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
+    let (journal_path, records) = find_operation_journal(&layout, operation_id)?;
+    validate_recovery_state(&layout, &stored, &records, mode)?;
+    let request = recovery_request(&layout, &stored, mode, &records)?;
+    let mut progress = ProgressWriter::new(progress_path, operation_id)?;
+    progress.write("recovery_started", None)?;
     let outcome = layout
         .recover_operation(&lock, journal_path, request)
         .map_err(|error| CliError::operation(error.to_string()))?;
@@ -1233,6 +1231,7 @@ fn recovery_request(
     layout: &CatalogLayout,
     stored: &StoredPlan,
     mode: RecoveryChoice,
+    records: &[OperationRecord],
 ) -> Result<RecoveryRequest, CliError> {
     let mut request = RecoveryRequest {
         mode: match mode {
@@ -1253,11 +1252,14 @@ fn recovery_request(
             PlanStepKind::CopyFile {
                 source_file_id,
                 destination,
-                ..
+                expected_digest,
+                size_bytes,
             } => request.copies.push(RecoveryCopy {
                 step_id,
                 source: source_path_for_id(stored, source_file_id)?,
                 destination: pathbuf(destination),
+                expected_sha256: expected_digest.as_str().to_owned(),
+                expected_size_bytes: *size_bytes,
             }),
             PlanStepKind::WriteManifest {
                 path,
@@ -1265,8 +1267,13 @@ fn recovery_request(
                 resulting_digest,
                 ..
             } => {
-                let contents =
-                    manifest_contents_for_recovery(layout, &stored.import_plan, path, mode)?;
+                let contents = manifest_contents_for_recovery(
+                    layout,
+                    &stored.import_plan,
+                    path,
+                    mode,
+                    records,
+                )?;
                 if mode == RecoveryChoice::Resume
                     && ContentDigest::from_bytes(&contents) != *resulting_digest
                 {
@@ -1293,6 +1300,7 @@ fn manifest_contents_for_recovery(
     plan: &ImportPlan,
     manifest_path: &[String],
     mode: RecoveryChoice,
+    records: &[OperationRecord],
 ) -> Result<Vec<u8>, CliError> {
     if mode == RecoveryChoice::Resume {
         return manifest_contents_for_step(layout, plan, manifest_path);
@@ -1300,37 +1308,142 @@ fn manifest_contents_for_recovery(
     let absolute = join_components(layout.root(), manifest_path);
     let mut lines = existing_manifest_lines(&absolute)?;
     let parent = &manifest_path[..manifest_path.len() - 1];
+    let copy_states = journal_copy_states(records);
     for step in &plan.document().steps {
         if let PlanStepKind::CopyFile {
             destination,
             expected_digest,
+            size_bytes,
             ..
         } = &step.action
         {
             if destination[..destination.len() - 1] != *parent {
                 continue;
             }
+            let step_id = format!("step-{}", step.sequence);
+            let state = copy_states.get(&step_id);
             let destination_path = join_components(layout.root(), destination);
-            if !destination_path.exists() {
+            let Some(state) = state else {
+                if destination_path.exists() {
+                    return Err(CliError::conflict(format!(
+                        "unverified bytes appeared at copy destination: {}",
+                        destination_path.display()
+                    )));
+                }
                 continue;
-            }
-            let (actual, _) = digest_file(&destination_path)?;
-            if actual != *expected_digest {
+            };
+            let Some(journal_digest) = state.sha256.as_deref() else {
+                continue;
+            };
+            let matches_plan =
+                journal_digest == expected_digest.as_str() && state.size_bytes == Some(*size_bytes);
+            if destination_path.exists() {
+                let (actual, actual_size) = digest_file(&destination_path)?;
+                if !matches_plan || actual.as_str() != journal_digest || actual_size != *size_bytes
+                {
+                    return Err(CliError::conflict(format!(
+                        "published destination differs from the confirmed plan: {}",
+                        destination_path.display()
+                    )));
+                }
+            } else if state.published {
                 return Err(CliError::conflict(format!(
-                    "published destination differs from the confirmed plan: {}",
+                    "published destination is missing during cancellation: {}",
                     destination_path.display()
                 )));
+            } else if !verified_copy_can_publish(
+                layout,
+                state,
+                expected_digest,
+                *size_bytes,
+                &destination_path,
+            )? {
+                continue;
             }
             lines.insert(
                 destination
                     .last()
                     .expect("copy destination has filename")
                     .clone(),
-                expected_digest.as_str().to_owned(),
+                journal_digest.to_owned(),
             );
         }
     }
     Ok(encode_manifest(&lines))
+}
+
+#[derive(Default)]
+struct JournalCopyState {
+    staged_path: Option<PathBuf>,
+    sha256: Option<String>,
+    size_bytes: Option<u64>,
+    published: bool,
+}
+
+fn journal_copy_states(records: &[OperationRecord]) -> BTreeMap<String, JournalCopyState> {
+    let mut states = BTreeMap::<String, JournalCopyState>::new();
+    for record in records {
+        let OperationRecord::Transition { transition } = record else {
+            continue;
+        };
+        match transition {
+            souvenirs_storage::DurableTransition::CopyStarted {
+                step_id,
+                staged_path,
+                ..
+            } => {
+                states.entry(step_id.clone()).or_default().staged_path = Some(staged_path.clone());
+            }
+            souvenirs_storage::DurableTransition::CopyVerified {
+                step_id,
+                staged_path,
+                sha256,
+                bytes_copied,
+                ..
+            } => {
+                let state = states.entry(step_id.clone()).or_default();
+                state.staged_path = Some(staged_path.clone());
+                state.sha256 = Some(sha256.clone());
+                state.size_bytes = Some(*bytes_copied);
+            }
+            souvenirs_storage::DurableTransition::CopyPublished {
+                step_id, sha256, ..
+            } => {
+                let state = states.entry(step_id.clone()).or_default();
+                state.sha256 = Some(sha256.clone());
+                state.published = true;
+            }
+            _ => {}
+        }
+    }
+    states
+}
+
+fn verified_copy_can_publish(
+    layout: &CatalogLayout,
+    state: &JournalCopyState,
+    expected_digest: &ContentDigest,
+    expected_size_bytes: u64,
+    destination_path: &Path,
+) -> Result<bool, CliError> {
+    if state.sha256.as_deref() != Some(expected_digest.as_str())
+        || state.size_bytes != Some(expected_size_bytes)
+    {
+        return Ok(false);
+    }
+    if destination_path.is_file() {
+        let (digest, size_bytes) = digest_file(destination_path)?;
+        return Ok(digest == *expected_digest && size_bytes == expected_size_bytes);
+    }
+    let Some(staged_path) = state.staged_path.as_deref() else {
+        return Ok(false);
+    };
+    let staged_path = layout.root().join(staged_path);
+    if !staged_path.is_file() {
+        return Ok(false);
+    }
+    let (digest, size_bytes) = digest_file(&staged_path)?;
+    Ok(digest == *expected_digest && size_bytes == expected_size_bytes)
 }
 
 fn validate_recovery_state(
@@ -1340,6 +1453,7 @@ fn validate_recovery_state(
     mode: RecoveryChoice,
 ) -> Result<(), CliError> {
     let plan = stored.import_plan.document();
+    let copy_states = journal_copy_states(records);
     let catalog_id = digest_text(&canonical_path(layout.root())?.to_string_lossy());
     if catalog_id != plan.catalog.catalog_id {
         return Err(CliError::conflict(
@@ -1380,6 +1494,18 @@ fn validate_recovery_state(
                         )));
                     }
                 } else if mode == RecoveryChoice::Resume {
+                    let step_id = format!("step-{}", step.sequence);
+                    if let Some(state) = copy_states.get(&step_id) {
+                        if verified_copy_can_publish(
+                            layout,
+                            state,
+                            expected_digest,
+                            *size_bytes,
+                            &destination_path,
+                        )? {
+                            continue;
+                        }
+                    }
                     let source = source_path_for_id(stored, source_file_id)?;
                     let (actual, size) = digest_file(&source)?;
                     if actual != *expected_digest || size != *size_bytes {

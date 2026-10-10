@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, Failpoint, OperationJournal, OperationJournalError,
-    OperationOutcome, OperationRecord, RecoveryCopy, RecoveryDirectory, RecoveryManifest,
-    RecoveryMode, RecoveryOutcome, RecoveryRequest, VerifiedCopyError,
+    CatalogConfig, CatalogLayout, CatalogLock, CopyExpectation, Failpoint, OperationJournal,
+    OperationJournalError, OperationOutcome, OperationRecord, RecoveryCopy, RecoveryDirectory,
+    RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest, VerifiedCopyError,
 };
 use tempfile::{Builder, TempDir};
 
@@ -54,7 +54,17 @@ fn interruption_recovery_preserves_bytes_manifest_and_terminal_outcome() {
     journal.fail_at(Failpoint::CopyPublicationIntentPersisted);
 
     let error = layout
-        .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "copy",
+            CopyExpectation {
+                sha256: digest(contents),
+                size_bytes: contents.len() as u64,
+            },
+        )
         .unwrap_err();
     assert!(matches!(
         error,
@@ -80,6 +90,8 @@ fn interruption_recovery_preserves_bytes_manifest_and_terminal_outcome() {
                     step_id: "copy".into(),
                     source,
                     destination: "2026/original.bin".into(),
+                    expected_sha256: digest(contents),
+                    expected_size_bytes: contents.len() as u64,
                 }],
                 manifests: vec![RecoveryManifest {
                     step_id: "manifest".into(),
@@ -139,7 +151,17 @@ fn verified_copy_never_replaces_an_occupied_destination() {
     fs::write(&destination, b"occupied").unwrap();
 
     let error = layout
-        .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "copy",
+            CopyExpectation {
+                sha256: digest(b"planned"),
+                size_bytes: 7,
+            },
+        )
         .unwrap_err();
 
     assert!(matches!(

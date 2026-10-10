@@ -15,7 +15,7 @@ pub use capabilities::{
 };
 pub use catalog::{CatalogConfig, CatalogInitializationError, CatalogLayout, FORMAT_VERSION};
 pub use catalog_path::CatalogPathError;
-pub use copy::{VerifiedCopy, VerifiedCopyError};
+pub use copy::{CopyExpectation, VerifiedCopy, VerifiedCopyError};
 pub use lock::{CatalogLock, LockEnvironment, LockError, LockHolder, SystemLockEnvironment};
 pub use manifest::{ManifestReplacement, ManifestReplacementError, ManifestReplacementRequest};
 #[cfg(feature = "test-failpoints")]

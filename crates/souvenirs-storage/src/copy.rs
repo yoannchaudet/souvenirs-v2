@@ -26,6 +26,12 @@ pub struct VerifiedCopy {
     pub bytes_copied: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CopyExpectation {
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
 impl CatalogLayout {
     pub fn copy_verified(
         &self,
@@ -34,6 +40,7 @@ impl CatalogLayout {
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
         step_id: &str,
+        expected: CopyExpectation,
     ) -> Result<VerifiedCopy, VerifiedCopyError> {
         journal
             .ensure_active(self, lock)
@@ -70,6 +77,15 @@ impl CatalogLayout {
         }
 
         let sha256 = encode_digest(copy_digest);
+        if sha256 != expected.sha256 || bytes_copied != expected.size_bytes {
+            return Err(VerifiedCopyError::PlannedContentMismatch {
+                staged_path,
+                expected_sha256: expected.sha256,
+                actual_sha256: sha256,
+                expected_size_bytes: expected.size_bytes,
+                actual_size_bytes: bytes_copied,
+            });
+        }
         journal
             .record_transition(DurableTransition::CopyVerified {
                 step_id: step_id.to_owned(),
@@ -354,6 +370,13 @@ pub enum VerifiedCopyError {
     Journal(OperationJournalError),
     Lock(LockError),
     Path(CatalogPathError),
+    PlannedContentMismatch {
+        staged_path: PathBuf,
+        expected_sha256: String,
+        actual_sha256: String,
+        expected_size_bytes: u64,
+        actual_size_bytes: u64,
+    },
     SourceIsNotFile(PathBuf),
     StageOccupied(PathBuf),
 }
@@ -388,6 +411,17 @@ impl fmt::Display for VerifiedCopyError {
             Self::Journal(source) => source.fmt(formatter),
             Self::Lock(source) => write!(formatter, "failed to validate catalog lock: {source}"),
             Self::Path(source) => write!(formatter, "invalid copy destination: {source}"),
+            Self::PlannedContentMismatch {
+                staged_path,
+                expected_sha256,
+                actual_sha256,
+                expected_size_bytes,
+                actual_size_bytes,
+            } => write!(
+                formatter,
+                "staged file {} does not match the confirmed plan: expected SHA-256 {expected_sha256} and {expected_size_bytes} bytes, found SHA-256 {actual_sha256} and {actual_size_bytes} bytes",
+                staged_path.display()
+            ),
             Self::SourceIsNotFile(path) => {
                 write!(formatter, "copy source is not a regular file: {}", path.display())
             }
@@ -409,6 +443,7 @@ impl Error for VerifiedCopyError {
             Self::Path(source) => Some(source),
             Self::DestinationOccupied { .. }
             | Self::DigestMismatch { .. }
+            | Self::PlannedContentMismatch { .. }
             | Self::SourceIsNotFile(_)
             | Self::StageOccupied(_) => None,
         }

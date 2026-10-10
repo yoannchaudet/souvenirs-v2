@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, DurableTransition, Failpoint,
+    CatalogConfig, CatalogLayout, CatalogLock, CopyExpectation, DurableTransition, Failpoint,
     ManifestReplacementRequest, OperationJournal, OperationJournalError, OperationRecord,
     RecoveryCopy, RecoveryDirectory, RecoveryError, RecoveryManifest, RecoveryMode,
     RecoveryOutcome, RecoveryRequest,
@@ -23,6 +23,13 @@ fn initialized_catalog() -> (TempDir, CatalogLayout, CatalogLock) {
 
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn expectation(bytes: &[u8]) -> CopyExpectation {
+    CopyExpectation {
+        sha256: digest(bytes),
+        size_bytes: bytes.len() as u64,
+    }
 }
 
 fn journal_path(layout: &CatalogLayout, suffix: &str) -> PathBuf {
@@ -102,7 +109,14 @@ impl Scenario {
                     | Failpoint::CopyStagePersisted
                     | Failpoint::CopyPublicationIntentPersisted
                     | Failpoint::CopyPublished => layout
-                        .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy")
+                        .copy_verified(
+                            &lock,
+                            &mut journal,
+                            &source,
+                            "2026/original.bin",
+                            "copy",
+                            expectation(b"verified bytes"),
+                        )
                         .is_err(),
                     _ => {
                         layout
@@ -112,6 +126,7 @@ impl Scenario {
                                 &source,
                                 "2026/original.bin",
                                 "copy",
+                                expectation(b"verified bytes"),
                             )
                             .unwrap();
                         false
@@ -186,6 +201,8 @@ impl Scenario {
                 step_id: "copy".into(),
                 source: self.source.clone(),
                 destination: "2026/original.bin".into(),
+                expected_sha256: digest(b"verified bytes"),
+                expected_size_bytes: 14,
             }],
             manifests: vec![RecoveryManifest {
                 step_id: "manifest".into(),
@@ -304,7 +321,14 @@ fn cancellation_publishes_verified_stages_updates_manifest_and_removes_only_owne
         .create_destination_directory(&layout, &lock, "directory", "2026")
         .unwrap();
     layout
-        .copy_verified(&lock, &mut journal, &first, "2026/first.bin", "copy-first")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &first,
+            "2026/first.bin",
+            "copy-first",
+            expectation(b"first"),
+        )
         .unwrap();
     journal.fail_at(Failpoint::CopyStagePersisted);
     assert!(layout
@@ -314,6 +338,7 @@ fn cancellation_publishes_verified_stages_updates_manifest_and_removes_only_owne
             &second,
             "2026/second.bin",
             "copy-second",
+            expectation(b"second"),
         )
         .is_err());
     fs::remove_file(&second).unwrap();
@@ -343,11 +368,15 @@ fn cancellation_publishes_verified_stages_updates_manifest_and_removes_only_owne
                         step_id: "copy-first".into(),
                         source: first,
                         destination: "2026/first.bin".into(),
+                        expected_sha256: digest(b"first"),
+                        expected_size_bytes: 5,
                     },
                     RecoveryCopy {
                         step_id: "copy-second".into(),
                         source: second,
                         destination: "2026/second.bin".into(),
+                        expected_sha256: digest(b"second"),
+                        expected_size_bytes: 6,
                     },
                 ],
                 manifests: vec![RecoveryManifest {
@@ -388,6 +417,65 @@ fn cancellation_publishes_verified_stages_updates_manifest_and_removes_only_owne
 }
 
 #[test]
+fn cancellation_removes_a_verified_stage_that_differs_from_the_confirmed_plan() {
+    let (_catalog, layout, lock) = initialized_catalog();
+    let source_directory = TempDir::new().unwrap();
+    let source = source_directory.path().join("source.bin");
+    fs::write(&source, b"drifted").unwrap();
+    fs::create_dir(layout.root().join("2026")).unwrap();
+    let journal =
+        OperationJournal::create(&layout, &lock, "drifted", &json!({"confirmed": true})).unwrap();
+    let path = journal.path().to_path_buf();
+    drop(journal);
+    let stage: PathBuf = ".souvenirs/staging/7-drifted-copy.copy".into();
+    fs::write(layout.root().join(&stage), b"drifted").unwrap();
+    append_transitions(
+        &path,
+        [
+            DurableTransition::CopyStarted {
+                step_id: "copy".into(),
+                source: source.clone(),
+                staged_path: stage,
+                destination: "2026/original.bin".into(),
+            },
+            DurableTransition::CopyVerified {
+                step_id: "copy".into(),
+                staged_path: ".souvenirs/staging/7-drifted-copy.copy".into(),
+                destination: "2026/original.bin".into(),
+                sha256: digest(b"drifted"),
+                bytes_copied: 7,
+            },
+        ],
+    );
+
+    let outcome = layout
+        .recover_operation(
+            &lock,
+            &path,
+            RecoveryRequest {
+                mode: RecoveryMode::CancelRemainingCopies,
+                directories: vec![],
+                copies: vec![RecoveryCopy {
+                    step_id: "copy".into(),
+                    source,
+                    destination: "2026/original.bin".into(),
+                    expected_sha256: digest(b"planned"),
+                    expected_size_bytes: 7,
+                }],
+                manifests: vec![],
+            },
+        )
+        .unwrap();
+
+    assert_eq!(outcome, RecoveryOutcome::Cancelled);
+    assert!(!layout.root().join("2026/original.bin").exists());
+    assert!(!layout
+        .root()
+        .join(".souvenirs/staging/7-drifted-copy.copy")
+        .exists());
+}
+
+#[test]
 fn recovery_never_overwrites_an_occupied_destination() {
     let (_catalog, layout, lock) = initialized_catalog();
     let sources = TempDir::new().unwrap();
@@ -400,7 +488,14 @@ fn recovery_never_overwrites_an_occupied_destination() {
         .unwrap();
     journal.fail_at(Failpoint::CopyStagePersisted);
     assert!(layout
-        .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy",)
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "copy",
+            expectation(b"planned"),
+        )
         .is_err());
     let destination = layout.root().join("2026/original.bin");
     fs::write(&destination, b"occupied").unwrap();
@@ -421,6 +516,8 @@ fn recovery_never_overwrites_an_occupied_destination() {
                     step_id: "copy".into(),
                     source,
                     destination: "2026/original.bin".into(),
+                    expected_sha256: digest(b"planned"),
+                    expected_size_bytes: 7,
                 }],
                 manifests: vec![],
             },
@@ -527,11 +624,15 @@ fn recovery_preserves_journal_order_for_nested_directories_and_copy_publication(
                         step_id: "z-original".into(),
                         source: "unavailable-original".into(),
                         destination: "2026/collection/original.bin".into(),
+                        expected_sha256: digest(b"original"),
+                        expected_size_bytes: 8,
                     },
                     RecoveryCopy {
                         step_id: "a-sidecar".into(),
                         source: "unavailable-sidecar".into(),
                         destination: "2026/collection/original.bin.xmp".into(),
+                        expected_sha256: digest(b"sidecar"),
+                        expected_size_bytes: 7,
                     },
                 ],
                 manifests: vec![],
@@ -570,7 +671,14 @@ fn staging_cleanup_recovers_after_each_cleanup_failpoint() {
             .unwrap();
         journal.fail_at(Failpoint::CopyIntentPersisted);
         assert!(layout
-            .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy",)
+            .copy_verified(
+                &lock,
+                &mut journal,
+                &source,
+                "2026/original.bin",
+                "copy",
+                expectation(b"partial"),
+            )
             .is_err());
         let stage = layout.staging_directory().join("7-cleanup-copy.copy");
         fs::write(&stage, b"partial").unwrap();
@@ -587,6 +695,8 @@ fn staging_cleanup_recovers_after_each_cleanup_failpoint() {
                 step_id: "copy".into(),
                 source,
                 destination: "2026/original.bin".into(),
+                expected_sha256: digest(b"partial"),
+                expected_size_bytes: 7,
             }],
             manifests: vec![],
         };
@@ -619,7 +729,14 @@ fn cancellation_replaces_a_stale_planned_manifest_with_published_files_only() {
         .create_destination_directory(&layout, &lock, "directory", "2026")
         .unwrap();
     layout
-        .copy_verified(&lock, &mut journal, &source, "2026/first.bin", "copy-first")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/first.bin",
+            "copy-first",
+            expectation(b"first"),
+        )
         .unwrap();
     let stale_manifest = format!(
         "{}  first.bin\n{}  second.bin\n",
@@ -660,6 +777,8 @@ fn cancellation_replaces_a_stale_planned_manifest_with_published_files_only() {
                         step_id: "copy-first".into(),
                         source,
                         destination: "2026/first.bin".into(),
+                        expected_sha256: digest(b"first"),
+                        expected_size_bytes: 5,
                     }],
                     manifests: vec![RecoveryManifest {
                         step_id: "manifest".into(),
