@@ -2,6 +2,7 @@
 
 mod capabilities;
 mod catalog;
+mod copy;
 mod durability;
 mod lock;
 
@@ -9,6 +10,7 @@ pub use capabilities::{
     StorageCapabilities, StorageCapabilityError, VolumeIdentity, WriteSuitability,
 };
 pub use catalog::{CatalogConfig, CatalogInitializationError, CatalogLayout, FORMAT_VERSION};
+pub use copy::{VerifiedCopy, VerifiedCopyError};
 pub use lock::{CatalogLock, LockEnvironment, LockError, LockHolder, SystemLockEnvironment};
 
 #[cfg(test)]

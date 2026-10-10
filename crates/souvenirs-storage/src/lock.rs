@@ -178,6 +178,29 @@ impl CatalogLock {
         &self.holder
     }
 
+    pub(crate) fn guards(&self, layout: &CatalogLayout) -> Result<bool, LockError> {
+        if self.released {
+            return Ok(false);
+        }
+
+        let owned_path = fs::canonicalize(&self.path).map_err(|source| LockError::Io {
+            action: "resolve owned catalog lock",
+            path: self.path.clone(),
+            source,
+        })?;
+        let requested_path =
+            fs::canonicalize(layout.lock_path()).map_err(|source| LockError::Io {
+                action: "resolve requested catalog lock",
+                path: layout.lock_path(),
+                source,
+            })?;
+        if owned_path != requested_path {
+            return Ok(false);
+        }
+
+        Ok(read_holder(&self.path)? == self.holder)
+    }
+
     pub fn release(mut self) -> Result<(), LockError> {
         self.release_inner()?;
         self.released = true;
