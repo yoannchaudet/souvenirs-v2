@@ -783,6 +783,68 @@ mod tests {
     }
 
     #[test]
+    fn differing_basename_compound_can_share_a_multi_suffix_sidecar_name() {
+        let files = vec![
+            file(
+                "still",
+                "image.jpg",
+                "image",
+                "jpg",
+                SourceFileKind::Original(OriginalRole::Jpeg),
+                Some("live"),
+            ),
+            file(
+                "video",
+                "different.mov",
+                "different",
+                "mov",
+                SourceFileKind::Original(OriginalRole::Video),
+                Some("live"),
+            ),
+            file(
+                "standalone",
+                "image.jpg.mp4",
+                "image.jpg",
+                "mp4",
+                SourceFileKind::Original(OriginalRole::Video),
+                None,
+            ),
+            file(
+                "sidecar",
+                "image.jpg.xmp",
+                "image.jpg",
+                "xmp",
+                SourceFileKind::Sidecar {
+                    naming_forms: vec![
+                        SidecarNamingForm::Basename,
+                        SidecarNamingForm::AssetFilename,
+                        SidecarNamingForm::NumberedAssetFilename,
+                    ],
+                },
+                None,
+            ),
+        ];
+
+        let resolution = resolve_directory_relationships(&files);
+
+        assert_eq!(resolution.items.len(), 2);
+        assert!(resolution.items.iter().all(|item| {
+            item.status == RelationshipStatus::NeedsDecision && item.sidecars.is_empty()
+        }));
+        assert!(matches!(
+            resolution.findings.as_slice(),
+            [RelationshipFinding::AmbiguousSidecar {
+                sidecar,
+                candidate_items,
+            }] if sidecar.as_str() == "sidecar"
+                && candidate_items == &[
+                    SourceFileId::new("still").unwrap(),
+                    SourceFileId::new("standalone").unwrap(),
+                ]
+        ));
+    }
+
+    #[test]
     fn overlapping_compound_relationships_require_a_decision() {
         let files = vec![
             file(
