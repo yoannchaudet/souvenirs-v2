@@ -76,9 +76,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 600000000000000000000001 /* Build configuration list for PBXNativeTarget "Souvenirs" */;
 			buildPhases = (
+				D00000000000000000000001 /* Build Rust Engine */,
 				700000000000000000000001 /* Sources */,
 				200000000000000000000001 /* Frameworks */,
 				800000000000000000000001 /* Resources */,
+				D00000000000000000000002 /* Embed Rust Engine */,
 			);
 			buildRules = (
 			);
@@ -249,6 +251,51 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		D00000000000000000000001 /* Build Rust Engine */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../Cargo.lock",
+				"$(SRCROOT)/../Cargo.toml",
+			);
+			name = "Build Rust Engine";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/../target/$(ENGINE_CARGO_PROFILE)/souvenirs-engine",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\n\ncd \"$SRCROOT/..\"\nif [ \"$ENGINE_CARGO_PROFILE\" = \"release\" ]; then\n    cargo build --locked --release --package souvenirs-engine --bin souvenirs-engine\nelse\n    cargo build --locked --package souvenirs-engine --bin souvenirs-engine\nfi\n";
+		};
+		D00000000000000000000002 /* Embed Rust Engine */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../target/$(ENGINE_CARGO_PROFILE)/souvenirs-engine",
+			);
+			name = "Embed Rust Engine";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/souvenirs-engine",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\n\nengine_source=\"$SRCROOT/../target/$ENGINE_CARGO_PROFILE/souvenirs-engine\"\nengine_destination=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/MacOS/souvenirs-engine\"\nmkdir -p \"$(dirname \"$engine_destination\")\"\ninstall -m 755 \"$engine_source\" \"$engine_destination\"\n\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" = \"YES\" ]; then\n    identity=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n    if [ \"${ENABLE_HARDENED_RUNTIME:-NO}\" = \"YES\" ]; then\n        set -- --force --sign \"$identity\" --options runtime\n    else\n        set -- --force --sign \"$identity\"\n    fi\n    # OTHER_CODE_SIGN_FLAGS is supplied by Xcode as command-line arguments.\n    codesign \"$@\" ${OTHER_CODE_SIGN_FLAGS:-} \"$engine_destination\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		700000000000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -409,6 +456,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				ENGINE_CARGO_PROFILE = debug;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Souvenirs;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
@@ -416,6 +465,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.yoannchaudet.Souvenirs;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -431,6 +481,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				ENGINE_CARGO_PROFILE = release;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Souvenirs;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
@@ -438,6 +490,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.yoannchaudet.Souvenirs;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -8,8 +8,20 @@ final class SouvenirsUITests: XCTestCase {
     @MainActor
     func testAppLaunches() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["-ApplePersistenceIgnoreState", "YES"]
         app.launch()
 
-        XCTAssertTrue(app.staticTexts["Souvenirs"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        let readyStatus = app.staticTexts.matching(
+            NSPredicate(
+                format: "identifier == %@ AND value == %@",
+                "engine-status",
+                "Engine ready"
+            )
+        ).firstMatch
+        XCTAssertTrue(
+            readyStatus.waitForExistence(timeout: 10),
+            "The engine did not reach the ready state."
+        )
     }
 }
