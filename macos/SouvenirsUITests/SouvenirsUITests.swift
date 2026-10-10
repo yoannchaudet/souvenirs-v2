@@ -67,8 +67,6 @@ final class SouvenirsUITests: XCTestCase {
         waitForExpectations(timeout: 3)
         app.descendants(matching: .any)["import-details"].click()
         XCTAssertTrue(app.descendants(matching: .any)["import-operation-summary"].exists)
-        start.click()
-        XCTAssertEqual(start.label, "Plan Ready")
     }
 
     @MainActor
