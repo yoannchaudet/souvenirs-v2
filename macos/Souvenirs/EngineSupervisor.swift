@@ -35,6 +35,76 @@ public actor EngineSupervisor {
         public let detail: String
     }
 
+    public enum ImportDestinationMode: String, Codable, Equatable, Sendable {
+        case create
+        case existing
+    }
+
+    public enum ImportDateResolution: String, Codable, Equatable, Sendable {
+        case asShown = "as_shown"
+        case convertFromUTC = "convert_from_utc"
+    }
+
+    public struct ImportScan: Codable, Equatable, Sendable {
+        public let sourcePath: String
+        public let sourceName: String
+        public let fileCount: Int
+        public let mediaCount: Int
+        public let photoCount: Int
+        public let videoCount: Int
+        public let unsupportedCount: Int
+        public let uncertainTimeCount: Int
+        public let totalBytes: UInt64
+        public let suggestedCollectionName: String
+        public let suggestedAcceptedDate: String
+
+        enum CodingKeys: String, CodingKey {
+            case sourcePath = "source_path"
+            case sourceName = "source_name"
+            case fileCount = "file_count"
+            case mediaCount = "media_count"
+            case photoCount = "photo_count"
+            case videoCount = "video_count"
+            case unsupportedCount = "unsupported_count"
+            case uncertainTimeCount = "uncertain_time_count"
+            case totalBytes = "total_bytes"
+            case suggestedCollectionName = "suggested_collection_name"
+            case suggestedAcceptedDate = "suggested_accepted_date"
+        }
+    }
+
+    public struct ImportReview: Codable, Equatable, Sendable {
+        public let scan: ImportScan
+        public let collectionName: String
+        public let destinationMode: ImportDestinationMode
+        public let destinationPath: String
+        public let acceptedDate: String
+        public let dateResolution: ImportDateResolution?
+        public let requiredDecisionCount: Int
+        public let transferCount: Int
+        public let skippedCount: Int
+        public let leftOnSourceCount: Int
+        public let operationCount: Int
+        public let requiredSpaceBytes: UInt64
+        public let canStart: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case scan
+            case collectionName = "collection_name"
+            case destinationMode = "destination_mode"
+            case destinationPath = "destination_path"
+            case acceptedDate = "accepted_date"
+            case dateResolution = "date_resolution"
+            case requiredDecisionCount = "required_decision_count"
+            case transferCount = "transfer_count"
+            case skippedCount = "skipped_count"
+            case leftOnSourceCount = "left_on_source_count"
+            case operationCount = "operation_count"
+            case requiredSpaceBytes = "required_space_bytes"
+            case canStart = "can_start"
+        }
+    }
+
     public struct OperationEvent: Equatable, Sendable {
         public enum Payload: Equatable, Sendable {
             case started(name: String)
@@ -454,6 +524,48 @@ public actor EngineSupervisor {
             timeout: requestTimeout
         )
         return try catalogLocation(from: result)
+    }
+
+    public func scanImport(sourcePath: String) async throws -> ImportScan {
+        let result: ImportScanResult = try await sendRequest(
+            method: "import.scan",
+            parameters: ImportScanParameters(sourcePath: sourcePath),
+            timeout: requestTimeout
+        )
+        guard result.type == "import_scan" else {
+            throw SupervisorError.malformedResponse(
+                "The response result type is not import_scan"
+            )
+        }
+        return result.scan
+    }
+
+    public func reviewImport(
+        catalogPath: String,
+        sourcePath: String,
+        collectionName: String,
+        destinationMode: ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: ImportDateResolution?
+    ) async throws -> ImportReview {
+        let result: ImportReviewResult = try await sendRequest(
+            method: "import.review",
+            parameters: ImportReviewParameters(
+                catalogPath: catalogPath,
+                sourcePath: sourcePath,
+                collectionName: collectionName,
+                destinationMode: destinationMode,
+                acceptedDate: acceptedDate,
+                dateResolution: dateResolution
+            ),
+            timeout: requestTimeout
+        )
+        guard result.type == "import_review" else {
+            throw SupervisorError.malformedResponse(
+                "The response result type is not import_review"
+            )
+        }
+        return result.review
     }
 
     private func catalogLocation(from result: CatalogResult) throws -> CatalogLocation {
@@ -1371,6 +1483,32 @@ private struct CreateCatalogParameters: Encodable, Sendable {
     }
 }
 
+private struct ImportScanParameters: Encodable, Sendable {
+    let sourcePath: String
+
+    enum CodingKeys: String, CodingKey {
+        case sourcePath = "source_path"
+    }
+}
+
+private struct ImportReviewParameters: Encodable, Sendable {
+    let catalogPath: String
+    let sourcePath: String
+    let collectionName: String
+    let destinationMode: EngineSupervisor.ImportDestinationMode
+    let acceptedDate: String
+    let dateResolution: EngineSupervisor.ImportDateResolution?
+
+    enum CodingKeys: String, CodingKey {
+        case catalogPath = "catalog_path"
+        case sourcePath = "source_path"
+        case collectionName = "collection_name"
+        case destinationMode = "destination_mode"
+        case acceptedDate = "accepted_date"
+        case dateResolution = "date_resolution"
+    }
+}
+
 private struct SuccessResponse<Result: Decodable>: Decodable {
     let kind: String
     let id: String?
@@ -1440,6 +1578,104 @@ private struct CatalogResult: Decodable, Sendable {
         case volumeName = "volume_name"
         case displayName = "display_name"
         case detail
+    }
+}
+
+private struct ImportScanResult: Decodable, Sendable {
+    let type: String
+    let sourcePath: String
+    let sourceName: String
+    let fileCount: Int
+    let mediaCount: Int
+    let photoCount: Int
+    let videoCount: Int
+    let unsupportedCount: Int
+    let uncertainTimeCount: Int
+    let totalBytes: UInt64
+    let suggestedCollectionName: String
+    let suggestedAcceptedDate: String
+
+    var scan: EngineSupervisor.ImportScan {
+        .init(
+            sourcePath: sourcePath,
+            sourceName: sourceName,
+            fileCount: fileCount,
+            mediaCount: mediaCount,
+            photoCount: photoCount,
+            videoCount: videoCount,
+            unsupportedCount: unsupportedCount,
+            uncertainTimeCount: uncertainTimeCount,
+            totalBytes: totalBytes,
+            suggestedCollectionName: suggestedCollectionName,
+            suggestedAcceptedDate: suggestedAcceptedDate
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sourcePath = "source_path"
+        case sourceName = "source_name"
+        case fileCount = "file_count"
+        case mediaCount = "media_count"
+        case photoCount = "photo_count"
+        case videoCount = "video_count"
+        case unsupportedCount = "unsupported_count"
+        case uncertainTimeCount = "uncertain_time_count"
+        case totalBytes = "total_bytes"
+        case suggestedCollectionName = "suggested_collection_name"
+        case suggestedAcceptedDate = "suggested_accepted_date"
+    }
+}
+
+private struct ImportReviewResult: Decodable, Sendable {
+    let type: String
+    let scan: EngineSupervisor.ImportScan
+    let collectionName: String
+    let destinationMode: EngineSupervisor.ImportDestinationMode
+    let destinationPath: String
+    let acceptedDate: String
+    let dateResolution: EngineSupervisor.ImportDateResolution?
+    let requiredDecisionCount: Int
+    let transferCount: Int
+    let skippedCount: Int
+    let leftOnSourceCount: Int
+    let operationCount: Int
+    let requiredSpaceBytes: UInt64
+    let canStart: Bool
+
+    var review: EngineSupervisor.ImportReview {
+        .init(
+            scan: scan,
+            collectionName: collectionName,
+            destinationMode: destinationMode,
+            destinationPath: destinationPath,
+            acceptedDate: acceptedDate,
+            dateResolution: dateResolution,
+            requiredDecisionCount: requiredDecisionCount,
+            transferCount: transferCount,
+            skippedCount: skippedCount,
+            leftOnSourceCount: leftOnSourceCount,
+            operationCount: operationCount,
+            requiredSpaceBytes: requiredSpaceBytes,
+            canStart: canStart
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case scan
+        case collectionName = "collection_name"
+        case destinationMode = "destination_mode"
+        case destinationPath = "destination_path"
+        case acceptedDate = "accepted_date"
+        case dateResolution = "date_resolution"
+        case requiredDecisionCount = "required_decision_count"
+        case transferCount = "transfer_count"
+        case skippedCount = "skipped_count"
+        case leftOnSourceCount = "left_on_source_count"
+        case operationCount = "operation_count"
+        case requiredSpaceBytes = "required_space_bytes"
+        case canStart = "can_start"
     }
 }
 

@@ -45,6 +45,48 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
+    func testReviewsImportAndResolvesRequiredDecision() throws {
+        let app = launch(scenario: "import-flow")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
+        app.buttons["choose-import-folder"].click()
+
+        XCTAssertTrue(app.otherElements["import-review-sheet"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["import-review-title"].exists)
+        XCTAssertTrue(app.otherElements["import-date-decision"].exists)
+        XCTAssertFalse(app.buttons["start-import"].isEnabled)
+
+        app.buttons["date-as-shown"].click()
+        let start = app.buttons["start-import"]
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: start
+        )
+        waitForExpectations(timeout: 3)
+        app.disclosureTriangles["import-details"].click()
+        XCTAssertTrue(app.otherElements["import-operation-summary"].exists)
+        start.click()
+        XCTAssertEqual(start.label, "Plan Ready")
+    }
+
+    @MainActor
+    func testImportSourceFailureBlocksPlanning() throws {
+        let app = launch(scenario: "import-error")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
+        app.buttons["choose-import-folder"].click()
+
+        XCTAssertTrue(
+            app.staticTexts["import-planning-error"].waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(app.buttons["start-import"].isEnabled)
+    }
+
+    @MainActor
     private func launch(scenario: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [

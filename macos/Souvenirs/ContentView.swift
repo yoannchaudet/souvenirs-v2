@@ -31,6 +31,17 @@ struct ContentView: View {
         } message: {
             Text(model.presentedError ?? "")
         }
+        .overlay {
+            if let planning = model.importPlanning {
+                ZStack {
+                    Color.black.opacity(0.22).ignoresSafeArea()
+                    ImportPlanningSheet(
+                        model: planning,
+                        onCancel: model.dismissImport
+                    )
+                }
+            }
+        }
     }
 
     private var welcome: some View {
@@ -301,9 +312,12 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.top, 3)
-                Button("Choose a Folder to Import…") {}
+                Button("Choose a Folder to Import…") {
+                    chooseFolder { path in
+                        model.beginImport(from: path, into: catalog)
+                    }
+                }
                     .buttonStyle(.borderedProminent)
-                    .disabled(true)
                     .accessibilityIdentifier("choose-import-folder")
                     .padding(.top, 10)
                 Text("Memory cards appear in the sidebar when you connect them.")
@@ -319,6 +333,7 @@ struct ContentView: View {
                             URL(fileURLWithPath: catalog.path)
                         ])
                     }
+
                     .buttonStyle(.link)
                     .accessibilityIdentifier("show-catalog-in-finder")
                 }
@@ -427,6 +442,258 @@ struct ContentView: View {
     }
 }
 
+private struct ImportPlanningSheet: View {
+    @ObservedObject var model: ImportPlanningModel
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Import from \(model.scan?.sourceName ?? "source")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(model.title)
+                        .font(.system(size: 22, weight: .bold))
+                        .accessibilityIdentifier("import-review-title")
+
+                    if let scan = model.scan {
+                        destinationCard
+                        if scan.uncertainTimeCount > 0 {
+                            dateDecision(scan)
+                        }
+                        summary(scan)
+                        details
+                    } else if model.isLoading {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Scanning without changing the source…")
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 160)
+                        .accessibilityIdentifier("import-scan-progress")
+                    }
+
+                    if let message = model.errorMessage {
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+                            .accessibilityIdentifier("import-planning-error")
+                    }
+                }
+                .padding(24)
+            }
+
+            Divider()
+            HStack {
+                Label(
+                    "Nothing in the source will be changed or deleted.",
+                    systemImage: "checkmark.shield"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("cancel-import-review")
+                Button(model.isPrepared ? "Plan Ready" : "Start Import") {
+                    model.prepareExecution()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!model.canStart || model.isPrepared)
+                .accessibilityIdentifier("start-import")
+            }
+            .padding(16)
+            .background(.regularMaterial)
+        }
+        .frame(width: 620, height: 560)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.28), radius: 34, y: 18)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityIdentifier("import-review-sheet")
+    }
+
+    private var destinationCard: some View {
+        HStack(spacing: 12) {
+            thumbnailGrid
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Collection name")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    TextField("Collection name", text: $model.collectionName)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: model.collectionName) {
+                            model.collectionNameChanged()
+                        }
+                        .onSubmit { Task { await model.refreshReview() } }
+                        .accessibilityIdentifier("import-collection-name")
+                    Button(
+                        model.destinationMode == .create
+                            ? "Add to Existing…" : "Create New…"
+                    ) {
+                        Task {
+                            await model.setDestinationMode(
+                                model.destinationMode == .create ? .existing : .create
+                            )
+                        }
+                    }
+                    .accessibilityIdentifier("import-destination-mode")
+                }
+                Text("\(model.acceptedDate) · from the dates in your photos")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(.background.opacity(0.75), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11).stroke(.separator.opacity(0.55))
+        }
+        .accessibilityIdentifier("import-destination-summary")
+    }
+
+    private func dateDecision(_ scan: EngineSupervisor.ImportScan) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Needs your choice · \(model.review?.requiredDecisionCount ?? 1)")
+                .font(.caption.bold())
+                .foregroundStyle(.orange)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "questionmark")
+                    .font(.caption.bold())
+                    .foregroundStyle(.orange)
+                    .frame(width: 22, height: 22)
+                    .background(.orange.opacity(0.15), in: Circle())
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("\(scan.uncertainTimeCount) videos have an uncertain time")
+                        .font(.callout.bold())
+                    Text("The camera didn’t say which time zone it used.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        decisionButton("As shown", value: .asShown)
+                        decisionButton("Convert from UTC", value: .convertFromUTC)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(.orange.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(.orange, lineWidth: model.dateResolution == nil ? 1.2 : 0)
+        }
+        .accessibilityIdentifier("import-date-decision")
+    }
+
+    private func decisionButton(
+        _ title: String,
+        value: EngineSupervisor.ImportDateResolution
+    ) -> some View {
+        Button {
+            Task { await model.resolveDate(value) }
+        } label: {
+            Label(
+                title,
+                systemImage: model.dateResolution == value
+                    ? "checkmark.circle.fill" : "circle"
+            )
+        }
+        .buttonStyle(.bordered)
+        .tint(model.dateResolution == value ? .accentColor : .secondary)
+        .accessibilityIdentifier(
+            value == .asShown ? "date-as-shown" : "date-convert-utc"
+        )
+    }
+
+    private func summary(_ scan: EngineSupervisor.ImportScan) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(
+                "\(model.review?.transferCount ?? scan.mediaCount) photos and videos will be copied.",
+                systemImage: "square.and.arrow.down"
+            )
+            if scan.unsupportedCount > 0 {
+                Label(
+                    "\(scan.unsupportedCount) unsupported files will stay on the source.",
+                    systemImage: "externaldrive"
+                )
+            }
+            if let review = model.review {
+                Label(
+                    "\(review.operationCount) verified operations · \(bytes(review.requiredSpaceBytes))",
+                    systemImage: "checkmark.circle"
+                )
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .accessibilityIdentifier("import-operation-summary")
+    }
+
+    private var details: some View {
+        DisclosureGroup("Details: destination and checks", isExpanded: $model.showsDetails) {
+            if let review = model.review {
+                HStack(alignment: .top, spacing: 10) {
+                    detailCard(
+                        title: "Where the files go",
+                        lines: [
+                            review.destinationPath,
+                            "Names use date, time, and a stable counter."
+                        ]
+                    )
+                    detailCard(
+                        title: "Checked before starting",
+                        lines: [
+                            "Enough source data was read",
+                            "No existing file will be replaced",
+                            "The source remains read-only"
+                        ]
+                    )
+                }
+                .padding(.top, 8)
+            }
+        }
+        .accessibilityIdentifier("import-details")
+    }
+
+    private func detailCard(title: String, lines: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption.bold())
+            ForEach(lines, id: \.self) { line in
+                Label(line, systemImage: "checkmark")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, minHeight: 90, alignment: .topLeading)
+        .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private var thumbnailGrid: some View {
+        LazyVGrid(columns: [GridItem(.fixed(40)), GridItem(.fixed(40))], spacing: 2) {
+            Color.blue.opacity(0.45)
+            Color.teal.opacity(0.35)
+            Color.green.opacity(0.5)
+            Color.indigo.opacity(0.45)
+        }
+        .frame(width: 82, height: 82)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .accessibilityHidden(true)
+    }
+
+    private func bytes(_ count: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)
+    }
+}
+
+
 #Preview {
     ContentView(
         engineStatus: .ready(engineVersion: "0.1.0"),
@@ -473,6 +740,48 @@ private final class PreviewCatalogEngine: CatalogEngineClient {
             volumeName: "photos-nas.local",
             displayName: "Family Catalog",
             detail: "Catalog format 2"
+        )
+    }
+
+    func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
+        .init(
+            sourcePath: sourcePath,
+            sourceName: "EOS_DIGITAL",
+            fileCount: 17,
+            mediaCount: 12,
+            photoCount: 8,
+            videoCount: 4,
+            unsupportedCount: 2,
+            uncertainTimeCount: 4,
+            totalBytes: 41_000_000_000,
+            suggestedCollectionName: "Dolomites",
+            suggestedAcceptedDate: "2026-10-10"
+        )
+    }
+
+    func reviewImport(
+        catalogPath: String,
+        sourcePath: String,
+        collectionName: String,
+        destinationMode: EngineSupervisor.ImportDestinationMode,
+        acceptedDate: String,
+        dateResolution: EngineSupervisor.ImportDateResolution?
+    ) async throws -> EngineSupervisor.ImportReview {
+        let scan = try await scanImport(sourcePath: sourcePath)
+        return .init(
+            scan: scan,
+            collectionName: collectionName,
+            destinationMode: destinationMode,
+            destinationPath: "\(catalogPath)/2026/\(acceptedDate) \(collectionName)",
+            acceptedDate: acceptedDate,
+            dateResolution: dateResolution,
+            requiredDecisionCount: dateResolution == nil ? 1 : 0,
+            transferCount: scan.mediaCount,
+            skippedCount: 0,
+            leftOnSourceCount: scan.unsupportedCount,
+            operationCount: scan.mediaCount + 2,
+            requiredSpaceBytes: scan.totalBytes,
+            canStart: dateResolution != nil
         )
     }
 }

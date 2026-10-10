@@ -285,6 +285,135 @@
       },
       "additionalProperties": false
     },
+    "ImportDateResolution": {
+      "type": "string",
+      "enum": [
+        "as_shown",
+        "convert_from_utc"
+      ]
+    },
+    "ImportDestinationMode": {
+      "type": "string",
+      "enum": [
+        "create",
+        "existing"
+      ]
+    },
+    "ImportReviewParameters": {
+      "type": "object",
+      "required": [
+        "accepted_date",
+        "catalog_path",
+        "collection_name",
+        "destination_mode",
+        "source_path"
+      ],
+      "properties": {
+        "accepted_date": {
+          "type": "string"
+        },
+        "catalog_path": {
+          "type": "string"
+        },
+        "collection_name": {
+          "type": "string"
+        },
+        "date_resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ImportDateResolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destination_mode": {
+          "$ref": "#/definitions/ImportDestinationMode"
+        },
+        "source_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ImportScanParameters": {
+      "type": "object",
+      "required": [
+        "source_path"
+      ],
+      "properties": {
+        "source_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ImportScanResult": {
+      "type": "object",
+      "required": [
+        "file_count",
+        "media_count",
+        "photo_count",
+        "source_name",
+        "source_path",
+        "suggested_accepted_date",
+        "suggested_collection_name",
+        "total_bytes",
+        "uncertain_time_count",
+        "unsupported_count",
+        "video_count"
+      ],
+      "properties": {
+        "file_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "media_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "photo_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "source_name": {
+          "type": "string"
+        },
+        "source_path": {
+          "type": "string"
+        },
+        "suggested_accepted_date": {
+          "type": "string"
+        },
+        "suggested_collection_name": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "uncertain_time_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "unsupported_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "video_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
     "ProtocolError": {
       "type": "object",
       "required": [
@@ -411,6 +540,42 @@
               "$ref": "#/definitions/CatalogPathParameters"
             }
           }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "import.scan"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/ImportScanParameters"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "import.review"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/ImportReviewParameters"
+            }
+          }
         }
       ],
       "required": [
@@ -530,6 +695,162 @@
             },
             "volume_name": {
               "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "file_count",
+            "media_count",
+            "photo_count",
+            "source_name",
+            "source_path",
+            "suggested_accepted_date",
+            "suggested_collection_name",
+            "total_bytes",
+            "type",
+            "uncertain_time_count",
+            "unsupported_count",
+            "video_count"
+          ],
+          "properties": {
+            "file_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "media_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "photo_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "source_name": {
+              "type": "string"
+            },
+            "source_path": {
+              "type": "string"
+            },
+            "suggested_accepted_date": {
+              "type": "string"
+            },
+            "suggested_collection_name": {
+              "type": "string"
+            },
+            "total_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "import_scan"
+              ]
+            },
+            "uncertain_time_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "unsupported_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "video_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "accepted_date",
+            "can_start",
+            "collection_name",
+            "destination_mode",
+            "destination_path",
+            "left_on_source_count",
+            "operation_count",
+            "required_decision_count",
+            "required_space_bytes",
+            "scan",
+            "skipped_count",
+            "transfer_count",
+            "type"
+          ],
+          "properties": {
+            "accepted_date": {
+              "type": "string"
+            },
+            "can_start": {
+              "type": "boolean"
+            },
+            "collection_name": {
+              "type": "string"
+            },
+            "date_resolution": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImportDateResolution"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "destination_mode": {
+              "$ref": "#/definitions/ImportDestinationMode"
+            },
+            "destination_path": {
+              "type": "string"
+            },
+            "left_on_source_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "operation_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "required_decision_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "required_space_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "scan": {
+              "$ref": "#/definitions/ImportScanResult"
+            },
+            "skipped_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "transfer_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "import_review"
+              ]
             }
           }
         }

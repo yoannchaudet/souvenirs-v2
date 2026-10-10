@@ -3,11 +3,16 @@
 use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
-use souvenirs_application::{CatalogIntent as ApplicationIntent, CatalogService};
+use souvenirs_application::{
+    CatalogIntent as ApplicationIntent, CatalogService, DateResolution, DestinationMode,
+    ImportPlanningService, ImportReviewRequest,
+};
 use souvenirs_protocol::{
-    CatalogIntent, CatalogResult, EngineMessage, HandshakeResult, ProtocolError, Request,
+    CatalogIntent, CatalogResult, EngineMessage, HandshakeResult, ImportDateResolution,
+    ImportDestinationMode, ImportReviewResult, ImportScanResult, ProtocolError, Request,
     RequestPayload, ResponseResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD,
-    CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, PROTOCOL_VERSION,
+    CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD,
+    IMPORT_SCAN_METHOD, PROTOCOL_VERSION,
 };
 
 pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -100,6 +105,8 @@ impl Connection {
                             CATALOG_VALIDATE_METHOD.to_owned(),
                             CATALOG_CREATE_METHOD.to_owned(),
                             CATALOG_OPEN_METHOD.to_owned(),
+                            IMPORT_SCAN_METHOD.to_owned(),
+                            IMPORT_REVIEW_METHOD.to_owned(),
                         ],
                     }),
                 )
@@ -137,6 +144,29 @@ impl Connection {
             RequestPayload::OpenCatalog(parameters) => {
                 catalog_response(request.id, CatalogService::open(parameters.path))
             }
+            RequestPayload::ScanImport(parameters) => import_scan_response(
+                request.id,
+                ImportPlanningService::scan(parameters.source_path),
+            ),
+            RequestPayload::ReviewImport(parameters) => import_review_response(
+                request.id,
+                ImportPlanningService::review(ImportReviewRequest {
+                    catalog_path: parameters.catalog_path.into(),
+                    source_path: parameters.source_path.into(),
+                    collection_name: parameters.collection_name,
+                    destination_mode: match parameters.destination_mode {
+                        ImportDestinationMode::Create => DestinationMode::Create,
+                        ImportDestinationMode::Existing => DestinationMode::Existing,
+                    },
+                    accepted_date: parameters.accepted_date,
+                    date_resolution: parameters.date_resolution.map(
+                        |resolution| match resolution {
+                            ImportDateResolution::AsShown => DateResolution::AsShown,
+                            ImportDateResolution::ConvertFromUtc => DateResolution::ConvertFromUtc,
+                        },
+                    ),
+                }),
+            ),
         }
     }
 }
@@ -157,6 +187,77 @@ fn catalog_response(
                 display_name: location.display_name,
                 detail: location.detail,
             }),
+        ),
+        Err(error) => EngineMessage::error(
+            Some(request_id),
+            ProtocolError::new(error.code(), error.to_string()),
+        ),
+    }
+}
+
+fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportScanResult {
+    ImportScanResult {
+        source_path: scan.source_path.to_string_lossy().into_owned(),
+        source_name: scan.source_name,
+        file_count: scan.file_count,
+        media_count: scan.media_count,
+        photo_count: scan.photo_count,
+        video_count: scan.video_count,
+        unsupported_count: scan.unsupported_count,
+        uncertain_time_count: scan.uncertain_time_count,
+        total_bytes: scan.total_bytes,
+        suggested_collection_name: scan.suggested_collection_name,
+        suggested_accepted_date: scan.suggested_accepted_date,
+    }
+}
+
+fn import_scan_response(
+    request_id: String,
+    result: Result<
+        souvenirs_application::ImportScanSummary,
+        souvenirs_application::ImportPlanningError,
+    >,
+) -> EngineMessage {
+    match result {
+        Ok(scan) => EngineMessage::success(
+            request_id,
+            ResponseResult::ImportScan(import_scan_result(scan)),
+        ),
+        Err(error) => EngineMessage::error(
+            Some(request_id),
+            ProtocolError::new(error.code(), error.to_string()),
+        ),
+    }
+}
+
+fn import_review_response(
+    request_id: String,
+    result: Result<souvenirs_application::ImportReview, souvenirs_application::ImportPlanningError>,
+) -> EngineMessage {
+    match result {
+        Ok(review) => EngineMessage::success(
+            request_id,
+            ResponseResult::ImportReview(Box::new(ImportReviewResult {
+                scan: import_scan_result(review.scan),
+                collection_name: review.collection_name,
+                destination_mode: match review.destination_mode {
+                    DestinationMode::Create => ImportDestinationMode::Create,
+                    DestinationMode::Existing => ImportDestinationMode::Existing,
+                },
+                destination_path: review.destination_path.to_string_lossy().into_owned(),
+                accepted_date: review.accepted_date,
+                date_resolution: review.date_resolution.map(|resolution| match resolution {
+                    DateResolution::AsShown => ImportDateResolution::AsShown,
+                    DateResolution::ConvertFromUtc => ImportDateResolution::ConvertFromUtc,
+                }),
+                required_decision_count: review.required_decision_count,
+                transfer_count: review.transfer_count,
+                skipped_count: review.skipped_count,
+                left_on_source_count: review.left_on_source_count,
+                operation_count: review.operation_count,
+                required_space_bytes: review.required_space_bytes,
+                can_start: review.can_start,
+            })),
         ),
         Err(error) => EngineMessage::error(
             Some(request_id),
@@ -248,7 +349,9 @@ mod tests {
                     "operation.cancel",
                     "catalog.validate",
                     "catalog.create",
-                    "catalog.open"
+                    "catalog.open",
+                    "import.scan",
+                    "import.review"
                 ]
             })
         );
