@@ -38,12 +38,49 @@
             "kind": "unresolved",
             "finding": "ambiguous_sidecar"
           }
+        },
+        {
+          "item_id": "item-2",
+          "files": [
+            {
+              "source_file_id": "file-2",
+              "source_path": [
+                "DCIM",
+                "café \"two\".mov"
+              ],
+              "digest": "d98cf53e0c8b77c14a96358d5b69584225d2f3206cd3b245a88435d92aa9c6f4",
+              "size_bytes": 2,
+              "role": "primary"
+            }
+          ],
+          "accepted_datetime": null,
+          "disposition": {
+            "kind": "unresolved",
+            "finding": "ambiguous_sidecar"
+          }
         }
       ],
-      "unhandled_content": [],
+      "unhandled_content": [
+        {
+          "source_file_id": "sidecar-1",
+          "source_path": [
+            "DCIM",
+            "café.xmp"
+          ],
+          "digest": "0ab7283988e8f49022d126054947f222cbdf0a589511760ca38e306e61c9fbdb",
+          "size_bytes": 3,
+          "finding": {
+            "kind": "ambiguous_sidecar",
+            "candidate_item_ids": [
+              "item-1",
+              "item-2"
+            ]
+          }
+        }
+      ],
       "steps": [],
       "required_space_bytes": 0
     },
-    "digest": "a75a1e5fcf00ab741cb7d0b883f6754edfc624b28056c50b4f139943f39d3c62"
+    "digest": "d3403a2bc0b8d3a3855289d6a1a4c6e9ca4f5005660fdcde546a0e1dc55bff74"
   }
 }

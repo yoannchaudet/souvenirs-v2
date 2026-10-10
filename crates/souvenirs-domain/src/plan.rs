@@ -495,6 +495,18 @@ pub fn constrain_import_plan_schema(
             .as_array_mut()
             .expect("plan item finding schema has enum values");
         values.retain(|value| value != "ambiguous_sidecar");
+    } else {
+        let variants = value["definitions"]["UnhandledContentFinding"]["oneOf"]
+            .as_array_mut()
+            .expect("unhandled content schema has variants");
+        let variant = variants
+            .iter_mut()
+            .find(|variant| {
+                variant["properties"]["kind"]["enum"] == serde_json::json!(["ambiguous_sidecar"])
+            })
+            .expect("ambiguous sidecar schema variant exists");
+        variant["properties"]["candidate_item_ids"]["minItems"] = serde_json::json!(2);
+        variant["properties"]["candidate_item_ids"]["uniqueItems"] = serde_json::json!(true);
     }
     *schema = serde_json::from_value(value)?;
     Ok(())
@@ -564,6 +576,7 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
     let mut source_ids = BTreeSet::new();
     let mut source_paths = BTreeSet::new();
     let mut transferable_files = BTreeMap::new();
+    let mut ambiguous_sidecar_items = BTreeSet::new();
     for item in &document.items {
         if item.item_id.is_empty() {
             return Err(PlanError::EmptyIdentifier("item"));
@@ -607,6 +620,14 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
                 minimum_version: 2,
             });
         }
+        if matches!(
+            item.disposition,
+            PlanItemDisposition::Unresolved {
+                finding: PlanItemFinding::AmbiguousSidecar
+            }
+        ) {
+            ambiguous_sidecar_items.insert(item.item_id.as_str());
+        }
         for file in &item.files {
             if file.source_file_id.is_empty() {
                 return Err(PlanError::EmptyIdentifier("source file"));
@@ -643,6 +664,7 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
             .map(|file| (&file.source_path, &file.source_file_id)),
         "unhandled content",
     )?;
+    let mut ambiguous_sidecar_evidence = BTreeSet::new();
     for file in &document.unhandled_content {
         if file.source_file_id.is_empty() {
             return Err(PlanError::EmptyIdentifier("source file"));
@@ -667,7 +689,14 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
                     file.source_file_id.clone(),
                 ));
             }
+            ambiguous_sidecar_evidence.extend(candidate_item_ids.iter().map(String::as_str));
         }
+    }
+    if let Some(item_id) = ambiguous_sidecar_items
+        .difference(&ambiguous_sidecar_evidence)
+        .next()
+    {
+        return Err(PlanError::InvalidAmbiguousSidecar((*item_id).to_owned()));
     }
 
     ensure_strictly_sorted(
@@ -952,7 +981,7 @@ impl fmt::Display for PlanError {
             Self::InvalidAmbiguousSidecar(id) => {
                 write!(
                     formatter,
-                    "ambiguous sidecar '{id}' must reference at least two plan items"
+                    "ambiguous sidecar evidence for '{id}' must reference at least two plan items and cover every ambiguous item"
                 )
             }
             Self::ManifestBaselineMismatch(path) => {
@@ -1539,6 +1568,15 @@ mod tests {
 
     #[test]
     fn ambiguous_sidecars_require_two_existing_item_references() {
+        let mut missing_evidence = document();
+        missing_evidence.items[0].disposition = PlanItemDisposition::Unresolved {
+            finding: PlanItemFinding::AmbiguousSidecar,
+        };
+        assert!(matches!(
+            ImportPlan::new(missing_evidence),
+            Err(PlanError::InvalidAmbiguousSidecar(id)) if id == "item-b"
+        ));
+
         let mut single_candidate = document();
         single_candidate.unhandled_content[0].finding = UnhandledContentFinding::AmbiguousSidecar {
             candidate_item_ids: vec!["item-a".into()],

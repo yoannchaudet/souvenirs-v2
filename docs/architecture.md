@@ -310,6 +310,7 @@ Readers must not reinterpret version 1 data with a later digest contract.
 
 Version 2 adds the `ambiguous_sidecar` item finding.
 Version 2 keeps the version 1 field order, normalization, JSON encoding, and digest algorithm.
+Each `ambiguous_sidecar` item finding requires an unhandled sidecar record that names the item among at least two valid candidates.
 Readers validate each document against its declared version.
 Readers continue to verify version 1 digests with the version 1 contract.
 

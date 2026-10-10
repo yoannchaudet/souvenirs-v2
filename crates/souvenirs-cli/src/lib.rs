@@ -1981,13 +1981,17 @@ fn scanned_source_file(file: &ScannedFile) -> Result<SourceFile, CliError> {
 
 fn source_file(id: SourceFileId, path: SourcePath) -> Result<SourceFile, CliError> {
     let filename = path.filename();
-    let (basename, extension) = filename
-        .rsplit_once('.')
-        .map_or((filename, ""), |(basename, extension)| {
-            (basename, extension)
-        });
-    let basename = basename.to_owned();
-    let extension = extension.to_owned();
+    let filename_path = Path::new(filename);
+    let basename = filename_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(filename)
+        .to_owned();
+    let extension = filename_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_owned();
     let kind = souvenirs_metadata::classify_extension(&extension).source_file_kind();
     Ok(SourceFile {
         id,

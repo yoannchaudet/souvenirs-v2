@@ -650,7 +650,9 @@
               "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "minItems": 2,
+              "uniqueItems": true
             },
             "kind": {
               "type": "string",
