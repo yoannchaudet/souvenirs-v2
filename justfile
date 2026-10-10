@@ -5,7 +5,11 @@ default:
 
 # Run the fast, process-free core suite.
 test-core:
-    cargo test -p souvenirs-domain -p souvenirs-application
+    cargo test -p souvenirs-domain -p souvenirs-metadata -p souvenirs-application
+
+# Build once, measure the warmed core suite, and enforce the macOS development target.
+test-core-performance:
+    ./scripts/check-core-runtime.sh
 
 # Run every Rust test target.
 test-rust:
@@ -19,4 +23,5 @@ protocol-schema:
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+    if [[ "$(uname -s)" == "Darwin" ]]; then just test-core-performance; fi
     just test-rust

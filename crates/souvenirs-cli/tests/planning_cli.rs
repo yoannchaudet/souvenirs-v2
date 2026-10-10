@@ -94,6 +94,118 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
 }
 
 #[test]
+fn produces_canonical_scan_and_plan_across_equivalent_sources() {
+    let temporary = TempDir::new().unwrap();
+    let first_source = temporary.path().join("source-a");
+    let second_source = temporary.path().join("source-b");
+    fs::create_dir(&first_source).unwrap();
+    fs::create_dir(&second_source).unwrap();
+    let files = [
+        ("nested/IMG_0001.CR3", b"raw bytes".as_slice()),
+        ("nested/IMG_0001.JPG", b"jpeg bytes".as_slice()),
+        ("nested/IMG_0001.xmp", b"xmp bytes".as_slice()),
+        ("clip.MOV", b"video bytes".as_slice()),
+        ("notes.pdf", b"unsupported bytes".as_slice()),
+    ];
+    for (path, contents) in files {
+        let destination = first_source.join(path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, contents).unwrap();
+    }
+    for (path, contents) in files.into_iter().rev() {
+        let destination = second_source.join(path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, contents).unwrap();
+    }
+
+    let first_scan = temporary.path().join("scan-a.json");
+    let second_scan = temporary.path().join("scan-b.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        first_source.to_str().unwrap(),
+        "--output",
+        first_scan.to_str().unwrap(),
+    ]));
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        second_source.to_str().unwrap(),
+        "--output",
+        second_scan.to_str().unwrap(),
+    ]));
+
+    let first_snapshot: Value = serde_json::from_slice(&fs::read(&first_scan).unwrap()).unwrap();
+    let second_snapshot: Value = serde_json::from_slice(&fs::read(&second_scan).unwrap()).unwrap();
+    assert_eq!(first_snapshot["files"], second_snapshot["files"]);
+    assert_eq!(
+        first_snapshot["fingerprint"],
+        second_snapshot["fingerprint"]
+    );
+
+    let first_plan = create_plan(&temporary, "a", &first_scan);
+    let second_plan = create_plan(&temporary, "b", &second_scan);
+    assert_eq!(
+        first_plan["import_plan"]["document"]["items"],
+        second_plan["import_plan"]["document"]["items"]
+    );
+    assert_eq!(
+        first_plan["import_plan"]["document"]["unhandled_content"],
+        second_plan["import_plan"]["document"]["unhandled_content"]
+    );
+    assert_eq!(
+        first_plan["import_plan"]["document"]["steps"],
+        second_plan["import_plan"]["document"]["steps"]
+    );
+    assert_eq!(
+        first_plan["import_plan"]["document"]["items"][0]["files"][0]["source_path"],
+        serde_json::json!(["clip.MOV"])
+    );
+    let copy_destinations: Vec<_> = first_plan["import_plan"]["document"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step["action"]["destination"].as_array())
+        .cloned()
+        .collect();
+    let expected_destination =
+        serde_json::json!(["2026", "2026-10-10 Corpus", "2026-10-10 12-34-56 001.MOV"]);
+    assert!(copy_destinations.contains(expected_destination.as_array().unwrap()));
+}
+
+fn create_plan(temporary: &TempDir, suffix: &str, snapshot: &std::path::Path) -> Value {
+    let catalog = temporary.path().join(format!("catalog-{suffix}"));
+    fs::create_dir(&catalog).unwrap();
+    json_stdout(&run(&[
+        "catalog",
+        "initialize",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    let plan = temporary.path().join(format!("plan-{suffix}.json"));
+    json_stdout(&run(&[
+        "import",
+        "plan",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--snapshot",
+        snapshot.to_str().unwrap(),
+        "--output",
+        plan.to_str().unwrap(),
+        "--collection",
+        "Corpus",
+        "--destination-mode",
+        "create",
+        "--accepted-at",
+        "2026-10-10T12:34:56",
+        "--confirm",
+    ]));
+    serde_json::from_slice(&fs::read(plan).unwrap()).unwrap()
+}
+
+#[test]
 fn help_is_successful_and_human_readable() {
     let output = run(&["--help"]);
 

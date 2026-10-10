@@ -919,6 +919,7 @@ dependencies = [
  "serde",
  "serde_json",
  "souvenirs-domain",
+ "souvenirs-metadata",
  "souvenirs-storage",
  "tempfile",
  "time",
@@ -933,6 +934,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "souvenirs-domain",
+ "souvenirs-metadata",
  "souvenirs-storage",
  "tempfile",
  "time",
@@ -965,6 +967,12 @@ dependencies = [
 [[package]]
 name = "souvenirs-metadata"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "souvenirs-domain",
+ "time",
+]
 
 [[package]]
 name = "souvenirs-protocol"
