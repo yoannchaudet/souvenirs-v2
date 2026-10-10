@@ -17,7 +17,7 @@ fn process_serves_requests_and_exits_cleanly_on_eof() {
         "id": "macos-1",
         "protocol_version": PROTOCOL_VERSION,
         "method": "handshake",
-        "params": {}
+        "params": {"client_version": "0.1.0"}
     });
     writeln!(
         child.stdin.as_mut().expect("stdin should be available"),
@@ -36,6 +36,8 @@ fn process_serves_requests_and_exits_cleanly_on_eof() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
     assert_eq!(stdout.lines().count(), 1);
     let response: Value = serde_json::from_str(&stdout).expect("stdout should contain JSON");
+    assert_eq!(response["kind"], "response");
+    assert_eq!(response["status"], "success");
     assert_eq!(response["id"], "macos-1");
     assert_eq!(response["result"]["protocol_version"], PROTOCOL_VERSION);
 }

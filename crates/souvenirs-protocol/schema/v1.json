@@ -1,0 +1,384 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WireMessage",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/Request"
+    },
+    {
+      "$ref": "#/definitions/EngineMessage"
+    }
+  ],
+  "definitions": {
+    "CancelOperationParameters": {
+      "type": "object",
+      "required": [
+        "operation_id"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EngineMessage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "result",
+                "status"
+              ],
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/ResponseResult"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "success"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "error",
+                "status"
+              ],
+              "properties": {
+                "error": {
+                  "$ref": "#/definitions/ProtocolError"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          ],
+          "required": [
+            "kind",
+            "protocol_version"
+          ],
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "response"
+              ]
+            },
+            "protocol_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "event",
+                "name"
+              ],
+              "properties": {
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "started"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "completed_units",
+                "event"
+              ],
+              "properties": {
+                "completed_units": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "progress"
+                  ]
+                },
+                "message": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "total_units": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "event",
+                "result"
+              ],
+              "properties": {
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "completed"
+                  ]
+                },
+                "result": true
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "error",
+                "event"
+              ],
+              "properties": {
+                "error": {
+                  "$ref": "#/definitions/ProtocolError"
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "failed"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "event"
+              ],
+              "properties": {
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "cancelled"
+                  ]
+                }
+              }
+            }
+          ],
+          "required": [
+            "kind",
+            "operation_id",
+            "protocol_version",
+            "sequence"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "event"
+              ]
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "protocol_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "sequence": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          }
+        }
+      ]
+    },
+    "HandshakeParameters": {
+      "type": "object",
+      "required": [
+        "client_version"
+      ],
+      "properties": {
+        "client_version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProtocolError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "data": true,
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "Request": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "handshake"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/HandshakeParameters"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "operation.cancel"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/CancelOperationParameters"
+            }
+          }
+        }
+      ],
+      "required": [
+        "id",
+        "protocol_version"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ResponseResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "capabilities",
+            "compatible_client_version",
+            "engine_version",
+            "protocol_version",
+            "type"
+          ],
+          "properties": {
+            "capabilities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "compatible_client_version": {
+              "type": "string"
+            },
+            "engine_version": {
+              "type": "string"
+            },
+            "protocol_version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "handshake"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation_id",
+            "type"
+          ],
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "operation_accepted"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation_id",
+            "type"
+          ],
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "cancellation_accepted"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
