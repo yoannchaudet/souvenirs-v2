@@ -17,7 +17,7 @@ final class EngineAppModel: ObservableObject {
 
     @Published private(set) var status: Status = .connecting
 
-    private let supervisor: EngineSupervisor
+    let supervisor: EngineSupervisor
     private var lifecycleTask: Task<Void, Never>?
     private var isStopping = false
 
@@ -130,8 +130,14 @@ struct SouvenirsApp: App {
 
 private struct EngineRootView: View {
     @ObservedObject var engine: EngineAppModel
+    @StateObject private var welcome: CatalogWelcomeModel
+
+    init(engine: EngineAppModel) {
+        self.engine = engine
+        _welcome = StateObject(wrappedValue: CatalogWelcomeModel(engine: engine))
+    }
 
     var body: some View {
-        ContentView(engineStatus: engine.status)
+        ContentView(engineStatus: engine.status, model: welcome)
     }
 }

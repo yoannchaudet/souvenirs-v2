@@ -21,6 +21,7 @@ const DEFAULT_SIDECAR_EXTENSIONS: &[&str] = &["xmp", "aae", "dop", "pp3"];
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogConfig {
     pub format_version: u32,
+    pub display_name: Option<String>,
     pub media_extensions: Vec<String>,
     pub sidecar_extensions: Vec<String>,
 }
@@ -29,6 +30,7 @@ impl Default for CatalogConfig {
     fn default() -> Self {
         Self {
             format_version: FORMAT_VERSION,
+            display_name: None,
             media_extensions: DEFAULT_MEDIA_EXTENSIONS
                 .iter()
                 .map(|extension| (*extension).to_owned())
@@ -50,12 +52,21 @@ impl CatalogConfig {
         }
         validate_extensions(&self.media_extensions, &self.sidecar_extensions)?;
 
-        Ok(format!(
+        let mut yaml = format!(
             "format_version: {}\nmedia_extensions: [{}]\nsidecar_extensions: [{}]\n",
             self.format_version,
             self.media_extensions.join(", "),
             self.sidecar_extensions.join(", ")
-        ))
+        );
+        if let Some(display_name) = &self.display_name {
+            yaml.push_str("display_name: ");
+            yaml.push_str(
+                &serde_json::to_string(display_name)
+                    .map_err(CatalogInitializationError::SerializeConfig)?,
+            );
+            yaml.push('\n');
+        }
+        Ok(yaml)
     }
 }
 
@@ -306,6 +317,7 @@ pub enum CatalogInitializationError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    SerializeConfig(serde_json::Error),
     StorageCapability(StorageCapabilityError),
     UnsupportedFormatVersion(u32),
 }
@@ -344,6 +356,12 @@ impl fmt::Display for CatalogInitializationError {
                 "failed to serialize initialization journal {}: {source}",
                 path.display()
             ),
+            Self::SerializeConfig(source) => {
+                write!(
+                    formatter,
+                    "failed to serialize catalog configuration: {source}"
+                )
+            }
             Self::StorageCapability(source) => source.fmt(formatter),
             Self::UnsupportedFormatVersion(version) => write!(
                 formatter,
@@ -358,6 +376,7 @@ impl Error for CatalogInitializationError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::SerializeJournal { source, .. } => Some(source),
+            Self::SerializeConfig(source) => Some(source),
             Self::StorageCapability(source) => Some(source),
             Self::AlreadyExists(_)
             | Self::Clock { .. }
@@ -438,6 +457,7 @@ mod tests {
         let temporary = TempDirectory::new("extensions");
         let config = CatalogConfig {
             format_version: FORMAT_VERSION,
+            display_name: None,
             media_extensions: vec!["jpg".to_owned()],
             sidecar_extensions: vec!["JPG".to_owned()],
         };

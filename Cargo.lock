@@ -916,7 +916,11 @@ checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 name = "souvenirs-application"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "souvenirs-domain",
+ "souvenirs-storage",
+ "tempfile",
 ]
 
 [[package]]
@@ -952,7 +956,9 @@ name = "souvenirs-engine"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "souvenirs-application",
  "souvenirs-protocol",
+ "tempfile",
 ]
 
 [[package]]

@@ -9,7 +9,11 @@ repository.workspace = true
 
 [dependencies]
 serde_json.workspace = true
+souvenirs-application = { path = "../souvenirs-application" }
 souvenirs-protocol = { path = "../souvenirs-protocol" }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

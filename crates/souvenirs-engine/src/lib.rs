@@ -3,9 +3,11 @@
 use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
+use souvenirs_application::{CatalogIntent as ApplicationIntent, CatalogService};
 use souvenirs_protocol::{
-    EngineMessage, HandshakeResult, ProtocolError, Request, RequestPayload, ResponseResult,
-    CANCEL_OPERATION_METHOD, COMPATIBLE_CLIENT_VERSION, PROTOCOL_VERSION,
+    CatalogIntent, CatalogResult, EngineMessage, HandshakeResult, ProtocolError, Request,
+    RequestPayload, ResponseResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD,
+    CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, PROTOCOL_VERSION,
 };
 
 pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -93,7 +95,12 @@ impl Connection {
                         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
                         protocol_version: PROTOCOL_VERSION,
                         compatible_client_version: COMPATIBLE_CLIENT_VERSION.to_owned(),
-                        capabilities: vec![CANCEL_OPERATION_METHOD.to_owned()],
+                        capabilities: vec![
+                            CANCEL_OPERATION_METHOD.to_owned(),
+                            CATALOG_VALIDATE_METHOD.to_owned(),
+                            CATALOG_CREATE_METHOD.to_owned(),
+                            CATALOG_OPEN_METHOD.to_owned(),
+                        ],
                     }),
                 )
             }
@@ -113,7 +120,48 @@ impl Connection {
                 )
                 .with_data(json!({"operation_id": parameters.operation_id})),
             ),
+            RequestPayload::ValidateCatalog(parameters) => catalog_response(
+                request.id,
+                CatalogService::validate(
+                    parameters.path,
+                    match parameters.intent {
+                        CatalogIntent::Create => ApplicationIntent::Create,
+                        CatalogIntent::Open => ApplicationIntent::Open,
+                    },
+                ),
+            ),
+            RequestPayload::CreateCatalog(parameters) => catalog_response(
+                request.id,
+                CatalogService::create(parameters.path, parameters.display_name),
+            ),
+            RequestPayload::OpenCatalog(parameters) => {
+                catalog_response(request.id, CatalogService::open(parameters.path))
+            }
         }
+    }
+}
+
+fn catalog_response(
+    request_id: String,
+    result: Result<
+        souvenirs_application::CatalogLocation,
+        souvenirs_application::CatalogServiceError,
+    >,
+) -> EngineMessage {
+    match result {
+        Ok(location) => EngineMessage::success(
+            request_id,
+            ResponseResult::Catalog(CatalogResult {
+                path: location.path.to_string_lossy().into_owned(),
+                volume_name: location.volume_name,
+                display_name: location.display_name,
+                detail: location.detail,
+            }),
+        ),
+        Err(error) => EngineMessage::error(
+            Some(request_id),
+            ProtocolError::new(error.code(), error.to_string()),
+        ),
     }
 }
 
@@ -196,7 +244,12 @@ mod tests {
                 "engine_version": env!("CARGO_PKG_VERSION"),
                 "protocol_version": PROTOCOL_VERSION,
                 "compatible_client_version": "0.1.0",
-                "capabilities": ["operation.cancel"]
+                "capabilities": [
+                    "operation.cancel",
+                    "catalog.validate",
+                    "catalog.create",
+                    "catalog.open"
+                ]
             })
         );
     }
@@ -379,6 +432,46 @@ mod tests {
 
         assert_eq!(responses[1]["error"]["code"], "unsupported_operation");
         assert_eq!(responses[1]["id"], "request-2");
+    }
+
+    #[test]
+    fn catalog_create_and_open_use_application_service() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().to_string_lossy();
+        let input = format!(
+            "{}{}{}",
+            request("request-1", "handshake", json!({"client_version": "0.1.0"})),
+            request(
+                "request-2",
+                "catalog.create",
+                json!({"path": path, "display_name": "Family Catalog"})
+            ),
+            request("request-3", "catalog.open", json!({"path": path}))
+        );
+
+        let responses = run_lines(input);
+
+        assert_eq!(responses[1]["result"]["type"], "catalog");
+        assert_eq!(responses[1]["result"]["display_name"], "Family Catalog");
+        assert_eq!(responses[2]["result"]["display_name"], "Family Catalog");
+    }
+
+    #[test]
+    fn opening_plain_folder_returns_structured_error() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let input = format!(
+            "{}{}",
+            request("request-1", "handshake", json!({"client_version": "0.1.0"})),
+            request(
+                "request-2",
+                "catalog.open",
+                json!({"path": directory.path().to_string_lossy()})
+            )
+        );
+
+        let responses = run_lines(input);
+
+        assert_eq!(responses[1]["error"]["code"], "not_a_catalog");
     }
 
     fn request(id: &str, method: &str, params: Value) -> String {

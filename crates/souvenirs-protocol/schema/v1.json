@@ -22,6 +22,57 @@
       },
       "additionalProperties": false
     },
+    "CatalogIntent": {
+      "type": "string",
+      "enum": [
+        "create",
+        "open"
+      ]
+    },
+    "CatalogParameters": {
+      "type": "object",
+      "required": [
+        "intent",
+        "path"
+      ],
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/CatalogIntent"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CatalogPathParameters": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CreateCatalogParameters": {
+      "type": "object",
+      "required": [
+        "display_name",
+        "path"
+      ],
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "EngineMessage": {
       "oneOf": [
         {
@@ -306,6 +357,60 @@
               "$ref": "#/definitions/CancelOperationParameters"
             }
           }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "catalog.validate"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/CatalogParameters"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "catalog.create"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/CreateCatalogParameters"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "catalog.open"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/CatalogPathParameters"
+            }
+          }
         }
       ],
       "required": [
@@ -393,6 +498,38 @@
               "enum": [
                 "cancellation_accepted"
               ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "detail",
+            "path",
+            "type",
+            "volume_name"
+          ],
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "catalog"
+              ]
+            },
+            "volume_name": {
+              "type": "string"
             }
           }
         }
