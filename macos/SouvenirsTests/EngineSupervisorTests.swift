@@ -20,12 +20,12 @@ final class EngineSupervisorTests: XCTestCase {
             """
             trap 'exit 99' TERM
             IFS= read -r request || exit 2
-            expected='{"id":"macos-handshake-1","method":"handshake","params":{},"protocol_version":1}'
+            expected='{"id":"macos-handshake-1","method":"handshake","params":{"client_version":"0.1.0"},"protocol_version":1}'
             if [ "$request" != "$expected" ]; then
                 echo "unexpected request: $request" >&2
                 exit 3
             fi
-            printf '%s\\n' '{"id":"macos-handshake-1","protocol_version":1,"result":{"engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"1","capabilities":["import"]}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":["operation.cancel"]}}'
             while IFS= read -r _; do :; done
             """
         )
@@ -39,8 +39,8 @@ final class EngineSupervisorTests: XCTestCase {
             .init(
                 engineVersion: "0.1.0",
                 protocolVersion: 1,
-                compatibleClientVersion: "1",
-                capabilities: ["import"]
+                compatibleClientVersion: "0.1.0",
+                capabilities: ["operation.cancel"]
             )
         )
 
@@ -55,7 +55,7 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeHandshakeFixture(
             response:
                 """
-                {"id":null,"protocol_version":1,"error":{"code":"invalid_request","message":"request could not be decoded"}}
+                {"kind":"response","id":null,"protocol_version":1,"status":"error","error":{"code":"invalid_request","message":"request could not be decoded"}}
                 """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
@@ -81,7 +81,7 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeHandshakeFixture(
             response:
                 """
-                {"id":"macos-handshake-1","protocol_version":2,"result":{"engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"1","capabilities":[]}}
+                {"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":[]}}
                 """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
@@ -94,6 +94,64 @@ final class EngineSupervisorTests: XCTestCase {
             XCTAssertEqual(error, .incompatibleProtocol(expected: 1, actual: 2))
         }
 
+        try await supervisor.stop()
+    }
+
+    func testHandshakeRejectsFutureEnvelopeBeforeTypedFields() async throws {
+        let executable = try makeHandshakeFixture(
+            response:
+                """
+                {"id":"macos-handshake-1","protocol_version":2,"future_result":{}}
+                """
+        )
+        let supervisor = EngineSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+
+        do {
+            _ = try await supervisor.handshake()
+            XCTFail("Expected the incompatible protocol to be reported")
+        } catch let error as EngineSupervisor.SupervisorError {
+            XCTAssertEqual(error, .incompatibleProtocol(expected: 1, actual: 2))
+        }
+
+        try await supervisor.stop()
+    }
+
+    func testHandshakeRejectsIncompatibleClientVersion() async throws {
+        let executable = try makeHandshakeFixture(
+            response:
+                """
+                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":[]}}
+                """
+        )
+        let supervisor = EngineSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+
+        do {
+            _ = try await supervisor.handshake()
+            XCTFail("Expected the incompatible client version to be reported")
+        } catch let error as EngineSupervisor.SupervisorError {
+            XCTAssertEqual(
+                error,
+                .incompatibleClientVersion(expected: "0.1.0", actual: "0.2.0")
+            )
+        }
+
+        try await supervisor.stop()
+    }
+
+    func testHandshakeParsesSharedGoldenFixture() async throws {
+        let executable = try makeHandshakeFixture(
+            response: try sharedHandshakeResponse()
+        )
+        let supervisor = EngineSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+
+        let handshake = try await supervisor.handshake()
+
+        XCTAssertEqual(handshake.engineVersion, "0.1.0")
+        XCTAssertEqual(handshake.compatibleClientVersion, "0.1.0")
+        XCTAssertEqual(handshake.capabilities, ["operation.cancel"])
         try await supervisor.stop()
     }
 
@@ -181,7 +239,7 @@ final class EngineSupervisorTests: XCTestCase {
             """
             trap 'exit 23' TERM
             IFS= read -r _ || exit 2
-            printf '%s\\n' '{"id":"macos-handshake-1","protocol_version":1,"result":{"engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"1","capabilities":[]}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":[]}}'
             while :; do :; done
             """
         )
@@ -207,7 +265,7 @@ final class EngineSupervisorTests: XCTestCase {
             """
             trap '' TERM
             IFS= read -r _ || exit 2
-            printf '%s\\n' '{"id":"macos-handshake-1","protocol_version":1,"result":{"engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"1","capabilities":[]}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":[]}}'
             while :; do :; done
             """
         )
@@ -348,6 +406,23 @@ final class EngineSupervisorTests: XCTestCase {
             while IFS= read -r _; do :; done
             """
         )
+    }
+
+    private func sharedHandshakeResponse() throws -> String {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v1.jsonl")
+        let lines = try String(contentsOf: fixture, encoding: .utf8)
+            .split(separator: "\n")
+        guard let response = lines.first(where: {
+            $0.contains(#""kind":"response""#)
+                && $0.contains(#""type":"handshake""#)
+        }) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return String(response)
     }
 
     private func makeExecutable(_ body: String) throws -> URL {

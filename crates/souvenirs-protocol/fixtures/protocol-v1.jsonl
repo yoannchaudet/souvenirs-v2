@@ -1,5 +1,5 @@
-{"id":"request-1","protocol_version":1,"method":"handshake","params":{"client_version":"0.1.0"}}
-{"kind":"response","id":"request-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":["operation.cancel"]}}
+{"id":"macos-handshake-1","protocol_version":1,"method":"handshake","params":{"client_version":"0.1.0"}}
+{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":["operation.cancel"]}}
 {"id":"request-2","protocol_version":1,"method":"operation.cancel","params":{"operation_id":"operation-1"}}
 {"kind":"response","id":"request-2","protocol_version":1,"status":"success","result":{"type":"cancellation_accepted","operation_id":"operation-1"}}
 {"kind":"response","id":"request-3","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}

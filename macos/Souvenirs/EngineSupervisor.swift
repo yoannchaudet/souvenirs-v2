@@ -3,6 +3,7 @@ import Foundation
 
 public actor EngineSupervisor {
     public static let protocolVersion: UInt32 = 1
+    public static let protocolClientVersion = "0.1.0"
 
     public struct Handshake: Equatable, Sendable {
         public let engineVersion: String
@@ -60,6 +61,7 @@ public actor EngineSupervisor {
         case malformedResponse(String)
         case unexpectedResponseIdentifier(expected: String, actual: String?)
         case incompatibleProtocol(expected: UInt32, actual: UInt32)
+        case incompatibleClientVersion(expected: String, actual: String)
         case protocolError(code: String, message: String)
         case inputCloseFailed(String)
         case shutdownTimedOut
@@ -94,6 +96,8 @@ public actor EngineSupervisor {
                 return "The engine returned response ID \(actual ?? "null"); expected \(expected)"
             case .incompatibleProtocol(let expected, let actual):
                 return "The engine returned protocol version \(actual); expected \(expected)"
+            case .incompatibleClientVersion(let expected, let actual):
+                return "The engine supports client version \(actual); expected \(expected)"
             case .protocolError(let code, let message):
                 return "The engine returned protocol error \(code): \(message)"
             case .inputCloseFailed(let description):
@@ -239,7 +243,7 @@ public actor EngineSupervisor {
             id: Self.handshakeRequestIdentifier,
             protocolVersion: Self.protocolVersion,
             method: "handshake",
-            params: EmptyParameters()
+            params: HandshakeParameters(clientVersion: Self.protocolClientVersion)
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -264,7 +268,7 @@ public actor EngineSupervisor {
         do {
             response = try JSONDecoder().decode(HandshakeResponse.self, from: responseData)
         } catch {
-            throw SupervisorError.malformedResponse(error.localizedDescription)
+            throw SupervisorError.malformedResponse(String(describing: error))
         }
 
         guard response.protocolVersion == Self.protocolVersion else {
@@ -273,8 +277,23 @@ public actor EngineSupervisor {
                 actual: response.protocolVersion
             )
         }
-        if let error = response.error {
+        guard response.kind == "response" else {
+            throw SupervisorError.malformedResponse(
+                "The handshake message kind is not response"
+            )
+        }
+        if response.status == "error" {
+            guard let error = response.error else {
+                throw SupervisorError.malformedResponse(
+                    "An error response does not contain a protocol error"
+                )
+            }
             throw SupervisorError.protocolError(code: error.code, message: error.message)
+        }
+        guard response.status == "success" else {
+            throw SupervisorError.malformedResponse(
+                "A handshake result requires success status"
+            )
         }
         guard response.id == Self.handshakeRequestIdentifier else {
             throw SupervisorError.unexpectedResponseIdentifier(
@@ -287,10 +306,21 @@ public actor EngineSupervisor {
                 "The response contains neither a result nor an error"
             )
         }
+        guard result.type == "handshake" else {
+            throw SupervisorError.malformedResponse(
+                "The response result type is not handshake"
+            )
+        }
         guard result.protocolVersion == Self.protocolVersion else {
             throw SupervisorError.incompatibleProtocol(
                 expected: Self.protocolVersion,
                 actual: result.protocolVersion
+            )
+        }
+        guard result.compatibleClientVersion == Self.protocolClientVersion else {
+            throw SupervisorError.incompatibleClientVersion(
+                expected: Self.protocolClientVersion,
+                actual: result.compatibleClientVersion
             )
         }
 
@@ -592,13 +622,19 @@ private final class ResponseLineReader: @unchecked Sendable {
     }
 }
 
-private struct EmptyParameters: Encodable {}
+private struct HandshakeParameters: Encodable {
+    let clientVersion: String
+
+    enum CodingKeys: String, CodingKey {
+        case clientVersion = "client_version"
+    }
+}
 
 private struct HandshakeRequest: Encodable {
     let id: String
     let protocolVersion: UInt32
     let method: String
-    let params: EmptyParameters
+    let params: HandshakeParameters
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -609,26 +645,32 @@ private struct HandshakeRequest: Encodable {
 }
 
 private struct HandshakeResponse: Decodable {
+    let kind: String?
     let id: String?
     let protocolVersion: UInt32
+    let status: String?
     let result: HandshakeResult?
     let error: ProtocolErrorResponse?
 
     enum CodingKeys: String, CodingKey {
+        case kind
         case id
         case protocolVersion = "protocol_version"
+        case status
         case result
         case error
     }
 }
 
 private struct HandshakeResult: Decodable {
+    let type: String
     let engineVersion: String
     let protocolVersion: UInt32
     let compatibleClientVersion: String
     let capabilities: [String]
 
     enum CodingKeys: String, CodingKey {
+        case type
         case engineVersion = "engine_version"
         case protocolVersion = "protocol_version"
         case compatibleClientVersion = "compatible_client_version"
