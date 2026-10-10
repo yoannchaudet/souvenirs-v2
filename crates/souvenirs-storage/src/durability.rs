@@ -2,12 +2,18 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+#[cfg(target_vendor = "apple")]
 pub(crate) fn sync_file(file: &File) -> io::Result<()> {
     sync_with_fallback(
-        cfg!(target_vendor = "apple"),
-        || file.sync_all(),
+        true,
+        || rustix::fs::fcntl_fullfsync(file).map_err(io::Error::from),
         || rustix::fs::fsync(file).map_err(io::Error::from),
     )
+}
+
+#[cfg(not(target_vendor = "apple"))]
+pub(crate) fn sync_file(file: &File) -> io::Result<()> {
+    rustix::fs::fsync(file).map_err(io::Error::from)
 }
 
 pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
@@ -25,6 +31,7 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
     sync_directory(parent)
 }
 
+#[cfg(any(target_vendor = "apple", test))]
 fn sync_with_fallback(
     full_sync_may_be_unsupported: bool,
     full_sync: impl FnOnce() -> io::Result<()>,
@@ -39,6 +46,7 @@ fn sync_with_fallback(
     }
 }
 
+#[cfg(any(target_vendor = "apple", test))]
 fn is_unsupported_full_sync(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(22 | 25 | 45 | 102))
 }
