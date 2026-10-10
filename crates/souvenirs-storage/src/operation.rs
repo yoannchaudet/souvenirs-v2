@@ -71,6 +71,14 @@ pub enum DurableTransition {
         manifest_path: PathBuf,
         resulting_sha256: String,
     },
+    StageRemovalStarted {
+        step_id: String,
+        staged_path: PathBuf,
+    },
+    StageRemoved {
+        step_id: String,
+        staged_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -191,6 +199,101 @@ impl OperationJournal {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn open_for_recovery(
+        layout: &CatalogLayout,
+        lock: &CatalogLock,
+        path: &Path,
+    ) -> Result<(Self, Vec<OperationRecord>), OperationJournalError> {
+        ensure_lock(layout, lock)?;
+        let canonical_journal_directory =
+            fs::canonicalize(layout.journal_directory()).map_err(|source| {
+                OperationJournalError::Io {
+                    action: "resolve operation journal directory",
+                    path: layout.journal_directory(),
+                    source,
+                }
+            })?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| OperationJournalError::InvalidJournalPath(path.to_path_buf()))?;
+        let canonical_parent =
+            fs::canonicalize(parent).map_err(|source| OperationJournalError::Io {
+                action: "resolve operation journal parent",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        if canonical_parent != canonical_journal_directory
+            || path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+        {
+            return Err(OperationJournalError::InvalidJournalPath(
+                path.to_path_buf(),
+            ));
+        }
+        let metadata = fs::symlink_metadata(path).map_err(|source| OperationJournalError::Io {
+            action: "inspect operation journal for recovery",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(OperationJournalError::InvalidJournalPath(
+                path.to_path_buf(),
+            ));
+        }
+
+        let bytes = fs::read(path).map_err(|source| OperationJournalError::Io {
+            action: "read operation journal for recovery",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut records = Vec::new();
+        for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            records.push(serde_json::from_slice(line).map_err(|source| {
+                OperationJournalError::DeserializeRecord {
+                    path: path.to_path_buf(),
+                    line: index + 1,
+                    source,
+                }
+            })?);
+        }
+        let operation_id = match records.first() {
+            Some(OperationRecord::Plan { operation_id, .. }) => operation_id.clone(),
+            _ => return Err(OperationJournalError::MissingPlan(path.to_path_buf())),
+        };
+        validate_identifier("operation", &operation_id)?;
+        let finished = records
+            .last()
+            .is_some_and(|record| matches!(record, OperationRecord::Outcome { .. }));
+        let file = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|source| OperationJournalError::Io {
+                action: "open operation journal for recovery",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let catalog_root =
+            fs::canonicalize(layout.root()).map_err(|source| OperationJournalError::Io {
+                action: "resolve operation catalog root",
+                path: layout.root().to_path_buf(),
+                source,
+            })?;
+        Ok((
+            Self {
+                operation_id,
+                catalog_root,
+                path: path.to_path_buf(),
+                file,
+                finished,
+                #[cfg(feature = "test-failpoints")]
+                failpoint: None,
+            },
+            records,
+        ))
     }
 
     pub fn create_destination_directory(
@@ -443,6 +546,8 @@ pub enum Failpoint {
     ManifestStagePersisted,
     ManifestPublicationIntentPersisted,
     ManifestPublished,
+    StageRemovalIntentPersisted,
+    StageRemovalPersisted,
     OutcomePersisted,
 }
 
@@ -451,18 +556,25 @@ pub enum OperationJournalError {
     AlreadyFinished,
     CatalogPath(CatalogPathError),
     Clock(String),
+    DeserializeRecord {
+        path: PathBuf,
+        line: usize,
+        source: serde_json::Error,
+    },
     #[cfg(feature = "test-failpoints")]
     Failpoint(Failpoint),
     InvalidIdentifier {
         kind: &'static str,
         value: String,
     },
+    InvalidJournalPath(PathBuf),
     Io {
         action: &'static str,
         path: PathBuf,
         source: io::Error,
     },
     Lock(LockError),
+    MissingPlan(PathBuf),
     SerializePlan(serde_json::Error),
     SerializeRecord {
         path: PathBuf,
@@ -479,6 +591,11 @@ impl fmt::Display for OperationJournalError {
             Self::AlreadyFinished => formatter.write_str("operation journal already has an outcome"),
             Self::CatalogPath(error) => error.fmt(formatter),
             Self::Clock(details) => write!(formatter, "failed to read system clock: {details}"),
+            Self::DeserializeRecord { path, line, source } => write!(
+                formatter,
+                "failed to deserialize operation journal {} line {line}: {source}",
+                path.display()
+            ),
             #[cfg(feature = "test-failpoints")]
             Self::Failpoint(failpoint) => {
                 write!(formatter, "test failpoint reached: {failpoint:?}")
@@ -487,12 +604,22 @@ impl fmt::Display for OperationJournalError {
                 formatter,
                 "{kind} identifier must contain only ASCII letters, digits, hyphens, or underscores: {value:?}"
             ),
+            Self::InvalidJournalPath(path) => write!(
+                formatter,
+                "operation journal must be a JSON Lines file directly inside the catalog journal directory: {}",
+                path.display()
+            ),
             Self::Io {
                 action,
                 path,
                 source,
             } => write!(formatter, "{action} at {}: {source}", path.display()),
             Self::Lock(source) => write!(formatter, "failed to validate catalog lock: {source}"),
+            Self::MissingPlan(path) => write!(
+                formatter,
+                "operation journal does not start with a confirmed plan: {}",
+                path.display()
+            ),
             Self::SerializePlan(source) => {
                 write!(formatter, "failed to serialize confirmed operation plan: {source}")
             }
@@ -520,12 +647,15 @@ impl Error for OperationJournalError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::CatalogPath(source) => Some(source),
+            Self::DeserializeRecord { source, .. } => Some(source),
             Self::Io { source, .. } => Some(source),
             Self::Lock(source) => Some(source),
             Self::SerializePlan(source) | Self::SerializeRecord { source, .. } => Some(source),
             Self::AlreadyFinished
             | Self::Clock(_)
             | Self::InvalidIdentifier { .. }
+            | Self::InvalidJournalPath(_)
+            | Self::MissingPlan(_)
             | Self::UnfinishedOperation(_)
             | Self::WrongCatalogJournal
             | Self::WrongCatalogLock => None,

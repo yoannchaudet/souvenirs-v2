@@ -264,7 +264,10 @@ fn disable_cache(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn publish_exclusively(staged_path: &Path, destination: &CatalogEntry) -> Result<(), PublishError> {
+pub(crate) fn publish_exclusively(
+    staged_path: &Path,
+    destination: &CatalogEntry,
+) -> Result<(), PublishError> {
     match renameat_with(
         CWD,
         staged_path,
@@ -300,7 +303,7 @@ fn publish_with_locked_fallback(
     })
 }
 
-enum PublishError {
+pub(crate) enum PublishError {
     Occupied,
     Io(io::Error),
 }

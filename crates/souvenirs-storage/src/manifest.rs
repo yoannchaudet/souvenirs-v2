@@ -182,7 +182,7 @@ fn verify_resulting_digest(
     }
 }
 
-fn verify_previous_manifest(
+pub(crate) fn verify_previous_manifest(
     path: &Path,
     expected: Option<&str>,
 ) -> Result<(), ManifestReplacementError> {
