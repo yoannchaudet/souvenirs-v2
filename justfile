@@ -11,6 +11,10 @@ test-core:
 test-rust:
     cargo test --workspace --all-targets
 
+# Regenerate the committed engine protocol schema.
+protocol-schema:
+    cargo run -p souvenirs-protocol --example generate_schema
+
 # Check formatting, static analysis, and tests.
 check:
     cargo fmt --all -- --check

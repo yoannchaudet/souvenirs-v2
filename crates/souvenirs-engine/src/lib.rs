@@ -1,11 +1,15 @@
-//! Line-delimited JSON process lifecycle for the supervised engine.
+//! Newline-delimited JSON process lifecycle for the supervised engine.
 
 use std::io::{self, BufRead, Write};
 
-use serde_json::json;
-use souvenirs_protocol::{Handshake, Request, Response, HANDSHAKE_METHOD, PROTOCOL_VERSION};
+use serde_json::{json, Value};
+use souvenirs_protocol::{
+    EngineMessage, HandshakeResult, ProtocolError, Request, RequestPayload, ResponseResult,
+    CANCEL_OPERATION_METHOD, COMPATIBLE_CLIENT_VERSION, PROTOCOL_VERSION,
+};
 
 pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+    let mut connection = Connection::default();
     let mut line = Vec::new();
 
     loop {
@@ -14,13 +18,132 @@ pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result
             break;
         }
         trim_line_ending(&mut line);
-        let response = handle_line(&line);
+        let response = connection.handle_line(&line);
         serde_json::to_writer(&mut output, &response).map_err(io::Error::other)?;
         output.write_all(b"\n")?;
         output.flush()?;
     }
 
     Ok(())
+}
+
+#[derive(Default)]
+struct Connection {
+    handshake_complete: bool,
+}
+
+impl Connection {
+    fn handle_line(&mut self, line: &[u8]) -> EngineMessage {
+        let (request_id, protocol_version) = match request_envelope(line) {
+            Ok(envelope) => envelope,
+            Err(error) => return EngineMessage::error(request_id(line), error),
+        };
+        if protocol_version != PROTOCOL_VERSION {
+            return incompatible_protocol(request_id, protocol_version);
+        }
+
+        let request = match serde_json::from_slice::<Request>(line) {
+            Ok(request) => request,
+            Err(error) => {
+                return EngineMessage::error(
+                    request_id,
+                    ProtocolError::new(
+                        "invalid_request",
+                        "request does not match protocol version 1",
+                    )
+                    .with_data(json!({"detail": error.to_string()})),
+                );
+            }
+        };
+
+        if !self.handshake_complete && !matches!(request.payload, RequestPayload::Handshake(_)) {
+            return EngineMessage::error(
+                Some(request.id),
+                ProtocolError::new(
+                    "handshake_required",
+                    "the first request must be a handshake",
+                ),
+            );
+        }
+
+        match request.payload {
+            RequestPayload::Handshake(parameters) => {
+                if self.handshake_complete {
+                    return EngineMessage::error(
+                        Some(request.id),
+                        ProtocolError::new(
+                            "handshake_already_completed",
+                            "the connection handshake has already completed",
+                        ),
+                    );
+                }
+                if parameters.client_version.trim().is_empty() {
+                    return EngineMessage::error(
+                        Some(request.id),
+                        ProtocolError::new(
+                            "invalid_client_version",
+                            "client version must not be empty",
+                        ),
+                    );
+                }
+                self.handshake_complete = true;
+                EngineMessage::success(
+                    request.id,
+                    ResponseResult::Handshake(HandshakeResult {
+                        engine_version: env!("CARGO_PKG_VERSION").to_owned(),
+                        protocol_version: PROTOCOL_VERSION,
+                        compatible_client_version: COMPATIBLE_CLIENT_VERSION.to_owned(),
+                        capabilities: vec![CANCEL_OPERATION_METHOD.to_owned()],
+                    }),
+                )
+            }
+
+            RequestPayload::CancelOperation(parameters) => EngineMessage::error(
+                Some(request.id),
+                ProtocolError::new(
+                    "operation_not_found",
+                    format!("operation {:?} was not found", parameters.operation_id),
+                )
+                .with_data(json!({"operation_id": parameters.operation_id})),
+            ),
+        }
+    }
+}
+
+fn request_envelope(line: &[u8]) -> Result<(Option<String>, u32), ProtocolError> {
+    let value: Value = serde_json::from_slice(line).map_err(|error| {
+        ProtocolError::new("invalid_request", "request is not valid JSON")
+            .with_data(json!({"detail": error.to_string()}))
+    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| ProtocolError::new("invalid_request", "request must be a JSON object"))?;
+    let id = object.get("id").and_then(Value::as_str).map(str::to_owned);
+    let version = object
+        .get("protocol_version")
+        .and_then(Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| {
+            ProtocolError::new(
+                "invalid_request",
+                "request protocol_version must be an unsigned 32-bit integer",
+            )
+        })?;
+    Ok((id, version))
+}
+
+fn incompatible_protocol(id: Option<String>, actual: u32) -> EngineMessage {
+    EngineMessage::error(
+        id,
+        ProtocolError::new(
+            "incompatible_protocol",
+            format!("protocol version {actual} is unsupported; expected {PROTOCOL_VERSION}"),
+        )
+        .with_data(json!({
+            "expected": PROTOCOL_VERSION,
+            "actual": actual
+        })),
+    )
 }
 
 fn trim_line_ending(line: &mut Vec<u8>) {
@@ -32,42 +155,12 @@ fn trim_line_ending(line: &mut Vec<u8>) {
     }
 }
 
-fn handle_line(line: &[u8]) -> Response {
-    let request = match serde_json::from_slice::<Request>(line) {
-        Ok(request) => request,
-        Err(error) => {
-            return Response::error(None, "invalid_request", error.to_string());
-        }
-    };
-
-    if request.protocol_version != PROTOCOL_VERSION {
-        return Response::error(
-            Some(request.id),
-            "incompatible_protocol",
-            format!(
-                "protocol version {} is unsupported; expected {PROTOCOL_VERSION}",
-                request.protocol_version
-            ),
-        );
-    }
-
-    if request.method != HANDSHAKE_METHOD {
-        return Response::error(
-            Some(request.id),
-            "unsupported_method",
-            format!("method {:?} is not implemented", request.method),
-        );
-    }
-
-    let handshake = Handshake {
-        engine_version: env!("CARGO_PKG_VERSION").to_owned(),
-        protocol_version: PROTOCOL_VERSION,
-        compatible_client_version: PROTOCOL_VERSION.to_string(),
-        capabilities: Vec::new(),
-    };
-    let result = serde_json::to_value(handshake).expect("handshake should serialize");
-
-    Response::success(request.id, json!(result))
+fn request_id(line: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(line)
+        .ok()?
+        .get("id")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -81,6 +174,124 @@ mod tests {
 
     #[test]
     fn handshake_returns_process_contract() {
+        let input = request("request-1", "handshake", json!({"client_version": "0.1.0"}));
+
+        let response = run(input);
+
+        assert_eq!(response["kind"], "response");
+        assert_eq!(response["id"], "request-1");
+        assert_eq!(response["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(response["status"], "success");
+        assert_eq!(
+            response["result"],
+            json!({
+                "type": "handshake",
+                "engine_version": env!("CARGO_PKG_VERSION"),
+                "protocol_version": PROTOCOL_VERSION,
+                "compatible_client_version": "0.1.0",
+                "capabilities": ["operation.cancel"]
+            })
+        );
+    }
+
+    #[test]
+    fn first_request_must_be_handshake() {
+        let input = request(
+            "request-1",
+            "operation.cancel",
+            json!({"operation_id": "operation-1"}),
+        );
+
+        let response = run(input);
+
+        assert_eq!(response["error"]["code"], "handshake_required");
+    }
+
+    #[test]
+    fn duplicate_handshake_is_rejected() {
+        let handshake = request("request-1", "handshake", json!({"client_version": "0.1.0"}));
+        let input = format!("{handshake}{handshake}");
+
+        let responses = run_lines(input);
+
+        assert!(responses[0]["result"].is_object());
+        assert_eq!(responses[1]["error"]["code"], "handshake_already_completed");
+    }
+
+    #[test]
+    fn incompatible_protocol_is_rejected_with_version_data() {
+        let input = format!(
+            "{}\n",
+            json!({
+                "id": "request-1",
+                "protocol_version": PROTOCOL_VERSION + 1,
+                "method": "handshake",
+                "params": {"client_version": "0.1.0"}
+            })
+        );
+
+        let response = run(input);
+
+        assert_eq!(response["id"], "request-1");
+        assert_eq!(response["error"]["code"], "incompatible_protocol");
+        assert_eq!(response["error"]["data"]["expected"], PROTOCOL_VERSION);
+        assert_eq!(response["error"]["data"]["actual"], PROTOCOL_VERSION + 1);
+    }
+
+    #[test]
+    fn future_method_is_rejected_as_incompatible_before_typed_decode() {
+        let input = format!(
+            "{}\n",
+            json!({
+                "id": "request-1",
+                "protocol_version": PROTOCOL_VERSION + 1,
+                "method": "future.method",
+                "params": {"future_field": true}
+            })
+        );
+
+        let response = run(input);
+
+        assert_eq!(response["error"]["code"], "incompatible_protocol");
+    }
+
+    #[test]
+    fn future_handshake_shape_is_rejected_as_incompatible() {
+        let input = format!(
+            "{}\n",
+            json!({
+                "id": "request-1",
+                "protocol_version": PROTOCOL_VERSION + 1,
+                "method": "handshake",
+                "params": {
+                    "client_version": "0.2.0",
+                    "future_field": true
+                }
+            })
+        );
+
+        let response = run(input);
+
+        assert_eq!(response["error"]["code"], "incompatible_protocol");
+    }
+
+    #[test]
+    fn version_only_future_message_is_rejected_as_incompatible() {
+        let input = format!(
+            "{}\n",
+            json!({
+                "id": "request-1",
+                "protocol_version": PROTOCOL_VERSION + 1
+            })
+        );
+
+        let response = run(input);
+
+        assert_eq!(response["error"]["code"], "incompatible_protocol");
+    }
+
+    #[test]
+    fn malformed_message_preserves_valid_request_identifier() {
         let input = format!(
             "{}\n",
             json!({
@@ -90,96 +301,84 @@ mod tests {
                 "params": {}
             })
         );
-        let mut output = Vec::new();
 
-        run_engine(Cursor::new(input), &mut output).expect("engine should run");
+        let response = run(input);
 
-        let response: Value =
-            serde_json::from_slice(&output).expect("engine should write valid JSON");
         assert_eq!(response["id"], "request-1");
-        assert_eq!(response["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(response["error"]["code"], "invalid_request");
         assert_eq!(
-            response["result"],
-            json!({
-                "engine_version": env!("CARGO_PKG_VERSION"),
-                "protocol_version": PROTOCOL_VERSION,
-                "compatible_client_version": PROTOCOL_VERSION.to_string(),
-                "capabilities": []
-            })
+            response["error"]["message"],
+            "request does not match protocol version 1"
         );
     }
 
     #[test]
-    fn engine_processes_requests_until_end_of_input() {
-        let input = [
-            json!({
-                "id": "request-1",
-                "protocol_version": PROTOCOL_VERSION,
-                "method": "unknown"
-            })
-            .to_string(),
-            "{not-json}".to_owned(),
-        ]
-        .join("\n");
-        let mut output = Vec::new();
+    fn empty_client_version_is_rejected() {
+        let input = request("request-1", "handshake", json!({"client_version": ""}));
 
-        run_engine(Cursor::new(input), &mut output).expect("engine should run");
+        let response = run(input);
 
-        let lines = String::from_utf8(output).expect("output should be UTF-8");
-        let responses: Vec<Value> = lines
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("each line should be valid JSON"))
-            .collect();
-        assert_eq!(responses.len(), 2);
-        assert_eq!(responses[0]["error"]["code"], "unsupported_method");
-        assert_eq!(responses[1]["error"]["code"], "invalid_request");
-    }
-
-    #[test]
-    fn incompatible_protocol_is_rejected() {
-        let input = format!(
-            "{}\n",
-            json!({
-                "id": "request-1",
-                "protocol_version": PROTOCOL_VERSION + 1,
-                "method": "handshake"
-            })
-        );
-        let mut output = Vec::new();
-
-        run_engine(Cursor::new(input), &mut output).expect("engine should run");
-
-        let response: Value =
-            serde_json::from_slice(&output).expect("engine should write valid JSON");
-        assert_eq!(response["id"], "request-1");
-        assert_eq!(response["error"]["code"], "incompatible_protocol");
+        assert_eq!(response["error"]["code"], "invalid_client_version");
     }
 
     #[test]
     fn invalid_utf8_is_rejected_without_stopping_the_engine() {
         let mut input = b"\xff\n".to_vec();
         input.extend_from_slice(
-            format!(
-                "{}\n",
-                json!({
-                    "id": "request-2",
-                    "protocol_version": PROTOCOL_VERSION,
-                    "method": "handshake"
-                })
-            )
-            .as_bytes(),
+            request("request-2", "handshake", json!({"client_version": "0.1.0"})).as_bytes(),
         );
-        let mut output = Vec::new();
 
-        run_engine(Cursor::new(input), &mut output).expect("engine should keep running");
+        let responses = run_lines(input);
 
-        let lines = String::from_utf8(output).expect("output should be UTF-8");
-        let responses: Vec<Value> = lines
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("each line should be valid JSON"))
-            .collect();
         assert_eq!(responses.len(), 2);
         assert_eq!(responses[0]["error"]["code"], "invalid_request");
         assert!(responses[1]["result"].is_object());
+    }
+
+    #[test]
+    fn cancellation_of_unknown_operation_is_structured() {
+        let input = format!(
+            "{}{}",
+            request("request-1", "handshake", json!({"client_version": "0.1.0"})),
+            request(
+                "request-2",
+                "operation.cancel",
+                json!({"operation_id": "operation-missing"})
+            )
+        );
+
+        let responses = run_lines(input);
+
+        assert_eq!(responses[1]["error"]["code"], "operation_not_found");
+        assert_eq!(
+            responses[1]["error"]["data"]["operation_id"],
+            "operation-missing"
+        );
+    }
+
+    fn request(id: &str, method: &str, params: Value) -> String {
+        format!(
+            "{}\n",
+            json!({
+                "id": id,
+                "protocol_version": PROTOCOL_VERSION,
+                "method": method,
+                "params": params
+            })
+        )
+    }
+
+    fn run(input: impl AsRef<[u8]>) -> Value {
+        run_lines(input).remove(0)
+    }
+
+    fn run_lines(input: impl AsRef<[u8]>) -> Vec<Value> {
+        let mut output = Vec::new();
+        run_engine(Cursor::new(input), &mut output).expect("engine should run");
+        String::from_utf8(output)
+            .expect("output should be UTF-8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("line should be valid JSON"))
+            .collect()
     }
 }
