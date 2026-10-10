@@ -19,6 +19,17 @@ struct ContentView: View {
         }
         .frame(minWidth: 586, minHeight: 386)
         .background(.ultraThinMaterial)
+        .overlay {
+            if let planning = model.importPlanning {
+                ZStack {
+                    Color.black.opacity(0.22).ignoresSafeArea()
+                    ImportPlanningSheet(
+                        model: planning,
+                        onCancel: model.dismissImport
+                    )
+                }
+            }
+        }
         .alert(
             model.presentedErrorTitle,
             isPresented: Binding(
@@ -30,18 +41,6 @@ struct ContentView: View {
                 .accessibilityIdentifier("catalog-error-dismiss")
         } message: {
             Text(model.presentedError ?? "")
-        }
-        .accessibilityHidden(model.importPlanning != nil)
-        .overlay {
-            if let planning = model.importPlanning {
-                ZStack {
-                    Color.black.opacity(0.22).ignoresSafeArea()
-                    ImportPlanningSheet(
-                        model: planning,
-                        onCancel: model.dismissImport
-                    )
-                }
-            }
         }
     }
 
