@@ -1,7 +1,10 @@
 use std::fs;
 
 use sha2::{Digest as _, Sha256};
-use souvenirs_storage::{CatalogConfig, CatalogLayout, CatalogLock, VerifiedCopyError};
+use souvenirs_storage::{
+    CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError, OperationJournal,
+    OperationJournalError, VerifiedCopyError,
+};
 use tempfile::TempDir;
 
 fn initialized_catalog() -> (TempDir, CatalogLayout, CatalogLock) {
@@ -18,16 +21,33 @@ fn staged_path(layout: &CatalogLayout, operation_id: &str, step_id: &str) -> std
     ))
 }
 
+fn journal(layout: &CatalogLayout, lock: &CatalogLock, operation_id: &str) -> OperationJournal {
+    OperationJournal::create(
+        layout,
+        lock,
+        operation_id,
+        &serde_json::json!({"plan": operation_id}),
+    )
+    .unwrap()
+}
+
 #[test]
 fn publishes_only_after_copy_and_read_back_hashes_match() {
     let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "import1");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     fs::write(&source, b"verified bytes").unwrap();
     fs::create_dir(layout.root().join("2026")).unwrap();
 
     let copied = layout
-        .copy_verified(&lock, &source, "2026/original.bin", "import1", "original1")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "original1",
+        )
         .unwrap();
 
     assert_eq!(
@@ -42,6 +62,7 @@ fn publishes_only_after_copy_and_read_back_hashes_match() {
 #[test]
 fn copies_and_verifies_multiple_buffers() {
     let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "import1");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     let bytes: Vec<_> = (0..300_000).map(|index| (index % 251) as u8).collect();
@@ -49,7 +70,7 @@ fn copies_and_verifies_multiple_buffers() {
     fs::create_dir(layout.root().join("2026")).unwrap();
 
     let copied = layout
-        .copy_verified(&lock, &source, "2026/large.bin", "import1", "large")
+        .copy_verified(&lock, &mut journal, &source, "2026/large.bin", "large")
         .unwrap();
 
     assert_eq!(copied.bytes_copied, bytes.len() as u64);
@@ -60,6 +81,7 @@ fn copies_and_verifies_multiple_buffers() {
 #[test]
 fn never_overwrites_an_occupied_destination() {
     let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "import2");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     fs::write(&source, b"new bytes").unwrap();
@@ -68,7 +90,13 @@ fn never_overwrites_an_occupied_destination() {
     fs::write(&destination, b"existing bytes").unwrap();
 
     let error = layout
-        .copy_verified(&lock, &source, "2026/original.bin", "import2", "original1")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "original1",
+        )
         .unwrap_err();
 
     match error {
@@ -93,6 +121,7 @@ fn never_overwrites_an_occupied_destination() {
 #[test]
 fn never_overwrites_an_occupied_staging_path() {
     let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "import3");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     fs::write(&source, b"new bytes").unwrap();
@@ -104,7 +133,13 @@ fn never_overwrites_an_occupied_staging_path() {
     fs::create_dir(layout.root().join("2026")).unwrap();
 
     let error = layout
-        .copy_verified(&lock, &source, "2026/original.bin", "import3", "original1")
+        .copy_verified(
+            &lock,
+            &mut journal,
+            &source,
+            "2026/original.bin",
+            "original1",
+        )
         .unwrap_err();
 
     assert!(matches!(error, VerifiedCopyError::StageOccupied(_)));
@@ -119,6 +154,7 @@ fn never_overwrites_an_occupied_staging_path() {
 fn requires_the_active_lock_for_the_same_catalog() {
     let (_temporary, layout, _lock) = initialized_catalog();
     let (_other_temporary, other_layout, other_lock) = initialized_catalog();
+    let mut journal = journal(&other_layout, &other_lock, "import4");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     fs::write(&source, b"bytes").unwrap();
@@ -127,14 +163,17 @@ fn requires_the_active_lock_for_the_same_catalog() {
     let error = layout
         .copy_verified(
             &other_lock,
+            &mut journal,
             &source,
             "2026/original.bin",
-            "import4",
             "original1",
         )
         .unwrap_err();
 
-    assert!(matches!(error, VerifiedCopyError::WrongCatalogLock));
+    assert!(matches!(
+        error,
+        VerifiedCopyError::Journal(OperationJournalError::WrongCatalogLock)
+    ));
     assert!(!layout.root().join("2026/original.bin").exists());
     drop(other_layout);
 }
@@ -142,35 +181,37 @@ fn requires_the_active_lock_for_the_same_catalog() {
 #[test]
 fn rejects_destination_traversal_before_staging_bytes() {
     let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "import5");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     fs::write(&source, b"bytes").unwrap();
 
     let error = layout
-        .copy_verified(&lock, &source, "../outside.bin", "import5", "original1")
+        .copy_verified(&lock, &mut journal, &source, "../outside.bin", "original1")
         .unwrap_err();
 
-    assert!(matches!(error, VerifiedCopyError::InvalidDestination(_)));
+    assert!(matches!(
+        error,
+        VerifiedCopyError::Path(CatalogPathError::Invalid(_))
+    ));
     assert!(!staged_path(&layout, "import5", "original1").exists());
 }
 
 #[test]
 fn rejects_invalid_identifiers_before_staging_bytes() {
     let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "import5");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     fs::write(&source, b"bytes").unwrap();
 
     let error = layout
-        .copy_verified(&lock, &source, "original.bin", "../import", "original1")
+        .copy_verified(&lock, &mut journal, &source, "original.bin", "../step")
         .unwrap_err();
 
     assert!(matches!(
         error,
-        VerifiedCopyError::InvalidIdentifier {
-            kind: "operation",
-            ..
-        }
+        VerifiedCopyError::Journal(OperationJournalError::InvalidIdentifier { kind: "step", .. })
     ));
     assert!(fs::read_dir(layout.staging_directory())
         .unwrap()
@@ -181,6 +222,7 @@ fn rejects_invalid_identifiers_before_staging_bytes() {
 #[test]
 fn rejects_catalog_state_destinations() {
     let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "import6");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     fs::write(&source, b"bytes").unwrap();
@@ -188,14 +230,17 @@ fn rejects_catalog_state_destinations() {
     let error = layout
         .copy_verified(
             &lock,
+            &mut journal,
             &source,
             ".souvenirs/journal/injected",
-            "import6",
             "original1",
         )
         .unwrap_err();
 
-    assert!(matches!(error, VerifiedCopyError::ReservedDestination(_)));
+    assert!(matches!(
+        error,
+        VerifiedCopyError::Path(CatalogPathError::Reserved(_))
+    ));
 }
 
 #[cfg(unix)]
@@ -204,6 +249,7 @@ fn rejects_a_destination_directory_symlink_outside_the_catalog() {
     use std::os::unix::fs::symlink;
 
     let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "import6");
     let source_directory = TempDir::new().unwrap();
     let source = source_directory.path().join("source.bin");
     fs::write(&source, b"bytes").unwrap();
@@ -213,17 +259,47 @@ fn rejects_a_destination_directory_symlink_outside_the_catalog() {
     let error = layout
         .copy_verified(
             &lock,
+            &mut journal,
             &source,
             "escaped/original.bin",
-            "import6",
             "original1",
         )
         .unwrap_err();
 
     assert!(matches!(
         error,
-        VerifiedCopyError::DestinationEscapesCatalog(_)
+        VerifiedCopyError::Path(CatalogPathError::EscapesCatalog(_))
     ));
     assert!(!outside.path().join("original.bin").exists());
     assert!(!staged_path(&layout, "import6", "original1").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn serialization_failure_does_not_append_a_partial_journal_record() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "nonutf8");
+    fs::create_dir(layout.root().join("2026")).unwrap();
+    let source_directory = TempDir::new().unwrap();
+    let source = source_directory
+        .path()
+        .join(OsString::from_vec(vec![b's', b'o', 0xff]));
+    let before = fs::read(journal.path()).unwrap();
+
+    let error = layout
+        .copy_verified(&lock, &mut journal, &source, "2026/original.bin", "copy1")
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        VerifiedCopyError::Journal(OperationJournalError::SerializeRecord { .. })
+    ));
+    assert_eq!(fs::read(journal.path()).unwrap(), before);
+    assert!(fs::read_dir(layout.staging_directory())
+        .unwrap()
+        .next()
+        .is_none());
 }
