@@ -524,6 +524,7 @@ private struct ImportPlanningSheet: View {
                 Text("Collection name")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("import-destination-summary")
                 HStack {
                     TextField("Collection name", text: $model.collectionName)
                         .textFieldStyle(.roundedBorder)
@@ -554,7 +555,6 @@ private struct ImportPlanningSheet: View {
         .overlay {
             RoundedRectangle(cornerRadius: 11).stroke(.separator.opacity(0.55))
         }
-        .accessibilityIdentifier("import-destination-summary")
     }
 
     private func dateDecision(_ scan: EngineSupervisor.ImportScan) -> some View {
@@ -562,6 +562,7 @@ private struct ImportPlanningSheet: View {
             Text("Needs your choice · \(model.review?.requiredDecisionCount ?? 1)")
                 .font(.caption.bold())
                 .foregroundStyle(.orange)
+                .accessibilityIdentifier("import-date-decision")
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "questionmark")
                     .font(.caption.bold())
@@ -587,7 +588,6 @@ private struct ImportPlanningSheet: View {
             RoundedRectangle(cornerRadius: 11)
                 .stroke(.orange, lineWidth: model.dateResolution == nil ? 1.2 : 0)
         }
-        .accessibilityIdentifier("import-date-decision")
     }
 
     private func decisionButton(
@@ -616,6 +616,7 @@ private struct ImportPlanningSheet: View {
                 "\(model.review?.transferCount ?? scan.mediaCount) photos and videos will be copied.",
                 systemImage: "square.and.arrow.down"
             )
+            .accessibilityIdentifier("import-operation-summary")
             if scan.unsupportedCount > 0 {
                 Label(
                     "\(scan.unsupportedCount) unsupported files will stay on the source.",
@@ -631,7 +632,6 @@ private struct ImportPlanningSheet: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .accessibilityIdentifier("import-operation-summary")
     }
 
     private var details: some View {
