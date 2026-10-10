@@ -105,6 +105,11 @@ impl CatalogLayout {
                 source,
             },
         })?;
+        remove_apple_double_sidecar(&staged_path).map_err(|source| VerifiedCopyError::Io {
+            action: "remove staged AppleDouble sidecar after publication",
+            path: staged_path.clone(),
+            source,
+        })?;
         sync_directory(&self.staging_directory()).map_err(|source| VerifiedCopyError::Io {
             action: "persist staging directory after publication",
             path: self.staging_directory(),
@@ -132,6 +137,18 @@ impl CatalogLayout {
             sha256,
             bytes_copied,
         })
+    }
+}
+
+pub(crate) fn remove_apple_double_sidecar(path: &Path) -> io::Result<()> {
+    let Some(file_name) = path.file_name() else {
+        return Ok(());
+    };
+    let sidecar = path.with_file_name(format!("._{}", file_name.to_string_lossy()));
+    match fs::remove_file(sidecar) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(source),
     }
 }
 

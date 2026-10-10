@@ -40,7 +40,10 @@ jobs:
             -scheme Souvenirs \
             -configuration Release \
             -destination 'platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/SouvenirsReleaseDerivedData"
+            -derivedDataPath "$RUNNER_TEMP/SouvenirsReleaseDerivedData" \
+            OTHER_CODE_SIGN_FLAGS=--timestamp=none
           app="$RUNNER_TEMP/SouvenirsReleaseDerivedData/Build/Products/Release/Souvenirs.app"
-          test -x "$app/Contents/MacOS/souvenirs-engine"
-          codesign --verify --deep --strict "$app"
+          ./scripts/verify-release.sh --allow-adhoc "$app"
+
+      - name: Validate representative attached storage
+        run: ./scripts/validate-representative-storage.sh

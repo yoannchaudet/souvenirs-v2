@@ -119,6 +119,24 @@ fn completed_journal_allows_the_next_mutation() {
 }
 
 #[test]
+fn apple_double_sidecars_do_not_look_like_unfinished_journals() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let mut completed = journal(&layout, &lock, "import-complete");
+    completed.complete(&layout, &lock).unwrap();
+    fs::write(
+        layout
+            .journal_directory()
+            .join("._20260101-000000-import.jsonl"),
+        b"filesystem metadata",
+    )
+    .unwrap();
+
+    let next = journal(&layout, &lock, "import-next");
+
+    assert_eq!(next.operation_id(), "import-next");
+}
+
+#[test]
 fn invalid_operation_identifier_is_rejected_before_journal_creation() {
     let (_temporary, layout, lock) = initialized_catalog();
     let before = fs::read_dir(layout.journal_directory()).unwrap().count();

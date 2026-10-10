@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::copy::{publish_exclusively, PublishError};
+use crate::copy::{publish_exclusively, remove_apple_double_sidecar, PublishError};
 use crate::durability::{sync_directory, sync_file};
 use crate::manifest::verify_previous_manifest;
 use crate::operation::validate_identifier;
@@ -333,12 +333,24 @@ fn recover_copies(
             if staged_digest.is_some() {
                 return Err(RecoveryError::PathConflict(staged_path));
             }
+            remove_apple_double_sidecar(&staged_path).map_err(|source| RecoveryError::Io {
+                action: "remove recovered staged AppleDouble sidecar",
+                path: staged_path.clone(),
+                source,
+            })?;
             continue;
         }
 
         if let Some(expected) = state.sha256.as_deref() {
             match (staged_digest.as_deref(), destination_digest.as_deref()) {
                 (None, Some(actual)) if actual == expected => {
+                    remove_apple_double_sidecar(&staged_path).map_err(|source| {
+                        RecoveryError::Io {
+                            action: "remove recovered staged AppleDouble sidecar",
+                            path: staged_path.clone(),
+                            source,
+                        }
+                    })?;
                     record_copy_published(
                         layout,
                         lock,
@@ -372,6 +384,13 @@ fn recover_copies(
                             },
                         },
                     )?;
+                    remove_apple_double_sidecar(&staged_path).map_err(|source| {
+                        RecoveryError::Io {
+                            action: "remove recovered staged AppleDouble sidecar",
+                            path: staged_path.clone(),
+                            source,
+                        }
+                    })?;
                     sync_directory(&layout.staging_directory()).map_err(|source| {
                         RecoveryError::Io {
                             action: "persist staging directory after recovered publication",
@@ -873,18 +892,24 @@ fn remove_owned_stage(
         .map_err(RecoveryError::Journal)?;
     let path = layout.root().join(relative_path);
     match fs::remove_file(&path) {
-        Ok(()) => sync_directory(&layout.staging_directory()).map_err(|source| RecoveryError::Io {
-            action: "persist recovered staging cleanup",
-            path: layout.staging_directory(),
-            source,
-        }),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
         Err(source) => Err(RecoveryError::Io {
             action: "remove journal-owned staging file",
-            path,
+            path: path.clone(),
             source,
-        }),
-    }?;
+        })?,
+    }
+    remove_apple_double_sidecar(&path).map_err(|source| RecoveryError::Io {
+        action: "remove recovered staged AppleDouble sidecar",
+        path: path.clone(),
+        source,
+    })?;
+    sync_directory(&layout.staging_directory()).map_err(|source| RecoveryError::Io {
+        action: "persist recovered staging cleanup",
+        path: layout.staging_directory(),
+        source,
+    })?;
     journal
         .record_transition(DurableTransition::StageRemoved {
             step_id: step_id.to_owned(),
