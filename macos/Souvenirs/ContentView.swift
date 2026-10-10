@@ -511,7 +511,7 @@ private struct ImportPlanningSheet: View {
             .padding(16)
             .background(.regularMaterial)
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 620, height: 520)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.28), radius: 34, y: 18)
