@@ -56,16 +56,16 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["import-review-sheet"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["import-review-title"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["import-date-decision"].exists)
-        XCTAssertFalse(app.buttons["start-import"].isEnabled)
+        XCTAssertFalse(app.descendants(matching: .any)["start-import"].isEnabled)
 
-        app.buttons["date-as-shown"].click()
-        let start = app.buttons["start-import"]
+        app.descendants(matching: .any)["date-as-shown"].click()
+        let start = app.descendants(matching: .any)["start-import"]
         expectation(
             for: NSPredicate(format: "isEnabled == true"),
             evaluatedWith: start
         )
         waitForExpectations(timeout: 3)
-        app.disclosureTriangles["import-details"].click()
+        app.descendants(matching: .any)["import-details"].click()
         XCTAssertTrue(app.descendants(matching: .any)["import-operation-summary"].exists)
         start.click()
         XCTAssertEqual(start.label, "Plan Ready")
@@ -83,7 +83,7 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             app.staticTexts["import-planning-error"].waitForExistence(timeout: 5)
         )
-        XCTAssertFalse(app.buttons["start-import"].isEnabled)
+        XCTAssertFalse(app.descendants(matching: .any)["start-import"].isEnabled)
     }
 
     @MainActor
