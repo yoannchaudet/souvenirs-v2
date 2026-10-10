@@ -2,16 +2,26 @@
 
 mod capabilities;
 mod catalog;
+mod catalog_path;
 mod copy;
 mod durability;
 mod lock;
+mod manifest;
+mod operation;
 
 pub use capabilities::{
     StorageCapabilities, StorageCapabilityError, VolumeIdentity, WriteSuitability,
 };
 pub use catalog::{CatalogConfig, CatalogInitializationError, CatalogLayout, FORMAT_VERSION};
+pub use catalog_path::CatalogPathError;
 pub use copy::{VerifiedCopy, VerifiedCopyError};
 pub use lock::{CatalogLock, LockEnvironment, LockError, LockHolder, SystemLockEnvironment};
+pub use manifest::{ManifestReplacement, ManifestReplacementError, ManifestReplacementRequest};
+#[cfg(feature = "test-failpoints")]
+pub use operation::Failpoint;
+pub use operation::{
+    DurableTransition, OperationJournal, OperationJournalError, OperationOutcome, OperationRecord,
+};
 
 #[cfg(test)]
 mod test_support {

@@ -1,16 +1,20 @@
 use std::error::Error;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use rustix::fs::{renameat_with, RenameFlags, CWD};
 use rustix::io::Errno;
 use sha2::{Digest as _, Sha256};
 
+use crate::catalog_path::{resolve_catalog_entry, CatalogEntry, CatalogPathError};
 use crate::durability::{sync_directory, sync_file};
-use crate::{CatalogLayout, CatalogLock, LockError};
+use crate::operation::{validate_identifier, Failpoint};
+use crate::{
+    CatalogLayout, CatalogLock, DurableTransition, LockError, OperationJournal,
+    OperationJournalError,
+};
 
 const COPY_BUFFER_SIZE: usize = 128 * 1024;
 
@@ -26,20 +30,34 @@ impl CatalogLayout {
     pub fn copy_verified(
         &self,
         lock: &CatalogLock,
+        journal: &mut OperationJournal,
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
-        operation_id: &str,
         step_id: &str,
     ) -> Result<VerifiedCopy, VerifiedCopyError> {
-        if !lock.guards(self).map_err(VerifiedCopyError::Lock)? {
-            return Err(VerifiedCopyError::WrongCatalogLock);
-        }
-        validate_identifier("operation", operation_id)?;
-        validate_identifier("step", step_id)?;
+        journal
+            .ensure_active(self, lock)
+            .map_err(VerifiedCopyError::Journal)?;
+        validate_identifier("step", step_id).map_err(VerifiedCopyError::Journal)?;
 
         let source = source.as_ref();
-        let destination = catalog_destination(self, destination.as_ref())?;
-        let staged_path = staging_path(self, operation_id, step_id);
+        let relative_destination = destination.as_ref();
+        let destination =
+            resolve_catalog_entry(self, relative_destination).map_err(VerifiedCopyError::Path)?;
+        let staged_relative_path = staging_relative_path(journal.operation_id(), step_id);
+        let staged_path = self.root().join(&staged_relative_path);
+
+        journal
+            .record_transition(DurableTransition::CopyStarted {
+                step_id: step_id.to_owned(),
+                source: source.to_path_buf(),
+                staged_path: staged_relative_path.clone(),
+                destination: relative_destination.to_path_buf(),
+            })
+            .map_err(VerifiedCopyError::Journal)?;
+        journal
+            .check_failpoint(Failpoint::CopyIntentPersisted)
+            .map_err(VerifiedCopyError::Journal)?;
 
         let (copy_digest, bytes_copied) = copy_to_stage(source, &staged_path)?;
         let read_back_digest = hash_staged_file(&staged_path)?;
@@ -52,6 +70,29 @@ impl CatalogLayout {
         }
 
         let sha256 = encode_digest(copy_digest);
+        journal
+            .record_transition(DurableTransition::CopyVerified {
+                step_id: step_id.to_owned(),
+                staged_path: staged_relative_path.clone(),
+                destination: relative_destination.to_path_buf(),
+                sha256: sha256.clone(),
+                bytes_copied,
+            })
+            .map_err(VerifiedCopyError::Journal)?;
+        journal
+            .check_failpoint(Failpoint::CopyStagePersisted)
+            .map_err(VerifiedCopyError::Journal)?;
+        journal
+            .record_transition(DurableTransition::CopyPublicationStarted {
+                step_id: step_id.to_owned(),
+                staged_path: staged_relative_path,
+                destination: relative_destination.to_path_buf(),
+                sha256: sha256.clone(),
+            })
+            .map_err(VerifiedCopyError::Journal)?;
+        journal
+            .check_failpoint(Failpoint::CopyPublicationIntentPersisted)
+            .map_err(VerifiedCopyError::Journal)?;
         publish_exclusively(&staged_path, &destination).map_err(|error| match error {
             PublishError::Occupied => VerifiedCopyError::DestinationOccupied {
                 destination: destination.path.clone(),
@@ -74,6 +115,16 @@ impl CatalogLayout {
             path: destination.directory_path.clone(),
             source,
         })?;
+        journal
+            .record_transition(DurableTransition::CopyPublished {
+                step_id: step_id.to_owned(),
+                destination: relative_destination.to_path_buf(),
+                sha256: sha256.clone(),
+            })
+            .map_err(VerifiedCopyError::Journal)?;
+        journal
+            .check_failpoint(Failpoint::CopyPublished)
+            .map_err(VerifiedCopyError::Journal)?;
 
         Ok(VerifiedCopy {
             destination: destination.path,
@@ -84,98 +135,11 @@ impl CatalogLayout {
     }
 }
 
-fn validate_identifier(kind: &'static str, identifier: &str) -> Result<(), VerifiedCopyError> {
-    if identifier.is_empty()
-        || !identifier
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(VerifiedCopyError::InvalidIdentifier {
-            kind,
-            value: identifier.to_owned(),
-        });
-    }
-    Ok(())
-}
-
-fn staging_path(layout: &CatalogLayout, operation_id: &str, step_id: &str) -> PathBuf {
-    layout.staging_directory().join(format!(
+fn staging_relative_path(operation_id: &str, step_id: &str) -> PathBuf {
+    Path::new(".souvenirs").join("staging").join(format!(
         "{}-{operation_id}-{step_id}.copy",
         operation_id.len()
     ))
-}
-
-fn catalog_destination(
-    layout: &CatalogLayout,
-    relative_path: &Path,
-) -> Result<CatalogDestination, VerifiedCopyError> {
-    if relative_path.as_os_str().is_empty()
-        || relative_path.is_absolute()
-        || relative_path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(VerifiedCopyError::InvalidDestination(
-            relative_path.to_path_buf(),
-        ));
-    }
-
-    let first_component = relative_path
-        .components()
-        .next()
-        .expect("validated destination has a component")
-        .as_os_str();
-    if first_component == ".souvenirs" || relative_path == Path::new(".souvenirs.yml") {
-        return Err(VerifiedCopyError::ReservedDestination(
-            relative_path.to_path_buf(),
-        ));
-    }
-
-    let destination = layout.root().join(relative_path);
-    let parent = destination
-        .parent()
-        .expect("non-empty relative destination has a parent");
-    let canonical_root =
-        fs::canonicalize(layout.root()).map_err(|source| VerifiedCopyError::Io {
-            action: "resolve catalog root",
-            path: layout.root().to_path_buf(),
-            source,
-        })?;
-    let canonical_parent = fs::canonicalize(parent).map_err(|source| VerifiedCopyError::Io {
-        action: "resolve destination directory",
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    if !canonical_parent.starts_with(&canonical_root) {
-        return Err(VerifiedCopyError::DestinationEscapesCatalog(
-            relative_path.to_path_buf(),
-        ));
-    }
-
-    let directory = File::open(&canonical_parent).map_err(|source| VerifiedCopyError::Io {
-        action: "open destination directory",
-        path: canonical_parent.clone(),
-        source,
-    })?;
-    let file_name = destination
-        .file_name()
-        .expect("validated destination has a file name")
-        .to_os_string();
-    Ok(CatalogDestination {
-        path: destination,
-        resolved_path: canonical_parent.join(&file_name),
-        directory_path: canonical_parent,
-        directory,
-        file_name,
-    })
-}
-
-struct CatalogDestination {
-    path: PathBuf,
-    resolved_path: PathBuf,
-    directory_path: PathBuf,
-    directory: File,
-    file_name: OsString,
 }
 
 fn copy_to_stage(source: &Path, staged_path: &Path) -> Result<([u8; 32], u64), VerifiedCopyError> {
@@ -300,10 +264,7 @@ fn disable_cache(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn publish_exclusively(
-    staged_path: &Path,
-    destination: &CatalogDestination,
-) -> Result<(), PublishError> {
+fn publish_exclusively(staged_path: &Path, destination: &CatalogEntry) -> Result<(), PublishError> {
     match renameat_with(
         CWD,
         staged_path,
@@ -355,7 +316,6 @@ fn encode_digest(digest: [u8; 32]) -> String {
 
 #[derive(Debug)]
 pub enum VerifiedCopyError {
-    DestinationEscapesCatalog(PathBuf),
     DestinationOccupied {
         destination: PathBuf,
         staged_path: PathBuf,
@@ -366,31 +326,21 @@ pub enum VerifiedCopyError {
         copy_sha256: String,
         read_back_sha256: String,
     },
-    InvalidDestination(PathBuf),
-    InvalidIdentifier {
-        kind: &'static str,
-        value: String,
-    },
     Io {
         action: &'static str,
         path: PathBuf,
         source: io::Error,
     },
+    Journal(OperationJournalError),
     Lock(LockError),
-    ReservedDestination(PathBuf),
+    Path(CatalogPathError),
     SourceIsNotFile(PathBuf),
     StageOccupied(PathBuf),
-    WrongCatalogLock,
 }
 
 impl fmt::Display for VerifiedCopyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DestinationEscapesCatalog(path) => write!(
-                formatter,
-                "copy destination escapes the catalog through a symbolic link: {}",
-                path.display()
-            ),
             Self::DestinationOccupied {
                 destination,
                 staged_path,
@@ -410,26 +360,14 @@ impl fmt::Display for VerifiedCopyError {
                 "staged file {} changed between copy and read-back hashing: copied {copy_sha256}, read back {read_back_sha256}",
                 staged_path.display()
             ),
-            Self::InvalidDestination(path) => write!(
-                formatter,
-                "copy destination must be a non-empty catalog-relative path without traversal: {}",
-                path.display()
-            ),
-            Self::InvalidIdentifier { kind, value } => write!(
-                formatter,
-                "{kind} identifier must contain only ASCII letters, digits, hyphens, or underscores: {value:?}"
-            ),
             Self::Io {
                 action,
                 path,
                 source,
             } => write!(formatter, "{action} at {}: {source}", path.display()),
+            Self::Journal(source) => source.fmt(formatter),
             Self::Lock(source) => write!(formatter, "failed to validate catalog lock: {source}"),
-            Self::ReservedDestination(path) => write!(
-                formatter,
-                "copy destination is reserved for catalog state: {}",
-                path.display()
-            ),
+            Self::Path(source) => write!(formatter, "invalid copy destination: {source}"),
             Self::SourceIsNotFile(path) => {
                 write!(formatter, "copy source is not a regular file: {}", path.display())
             }
@@ -438,9 +376,6 @@ impl fmt::Display for VerifiedCopyError {
                 "verified copy refuses to replace occupied staging path {}",
                 path.display()
             ),
-            Self::WrongCatalogLock => {
-                formatter.write_str("verified copy requires the active lock for this catalog")
-            }
         }
     }
 }
@@ -449,16 +384,13 @@ impl Error for VerifiedCopyError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Journal(source) => Some(source),
             Self::Lock(source) => Some(source),
-            Self::DestinationEscapesCatalog(_)
-            | Self::DestinationOccupied { .. }
+            Self::Path(source) => Some(source),
+            Self::DestinationOccupied { .. }
             | Self::DigestMismatch { .. }
-            | Self::InvalidDestination(_)
-            | Self::InvalidIdentifier { .. }
-            | Self::ReservedDestination(_)
             | Self::SourceIsNotFile(_)
-            | Self::StageOccupied(_)
-            | Self::WrongCatalogLock => None,
+            | Self::StageOccupied(_) => None,
         }
     }
 }
