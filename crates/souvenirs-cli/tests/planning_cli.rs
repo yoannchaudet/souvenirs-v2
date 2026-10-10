@@ -325,6 +325,34 @@ fn live_photo_video(identifier: &str) -> Vec<u8> {
     .concat()
 }
 
+fn bigtiff_dng(little_endian: bool) -> Vec<u8> {
+    let mut bytes = if little_endian {
+        b"II".to_vec()
+    } else {
+        b"MM".to_vec()
+    };
+    let u16_bytes = |value: u16| {
+        if little_endian {
+            value.to_le_bytes()
+        } else {
+            value.to_be_bytes()
+        }
+    };
+    let u64_bytes = |value: u64| {
+        if little_endian {
+            value.to_le_bytes()
+        } else {
+            value.to_be_bytes()
+        }
+    };
+    bytes.extend_from_slice(&u16_bytes(43));
+    bytes.extend_from_slice(&u16_bytes(8));
+    bytes.extend_from_slice(&u16_bytes(0));
+    bytes.extend_from_slice(&u64_bytes(16));
+    bytes.extend_from_slice(&u64_bytes(0));
+    bytes
+}
+
 #[test]
 fn plans_differing_basename_live_photo_from_scanned_metadata() {
     const IDENTIFIER: &str = "11111111-2222-3333-4444-555555555555";
@@ -448,6 +476,43 @@ fn malformed_relationship_metadata_blocks_scanning_instead_of_guessing() {
         String::from_utf8_lossy(&output.stderr).contains("JPEG segment exceeds the file"),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn valid_unsupported_bigtiff_dng_plans_without_an_identifier() {
+    const IDENTIFIER: &str = "11111111-2222-3333-4444-555555555555";
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("paired.dng"), bigtiff_dng(true)).unwrap();
+    fs::write(source.join("paired.mov"), live_photo_video(IDENTIFIER)).unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+
+    let scan: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    let dng = scan["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == serde_json::json!(["paired.dng"]))
+        .unwrap();
+    assert!(dng.get("metadata").is_none());
+
+    let plan = create_plan(&temporary, "bigtiff", &snapshot);
+    assert_eq!(
+        plan["import_plan"]["document"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
 }
 

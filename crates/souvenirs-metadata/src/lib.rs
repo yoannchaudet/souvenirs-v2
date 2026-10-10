@@ -178,8 +178,47 @@ fn dng_content_identifier(path: &Path) -> Result<Option<String>, MetadataError> 
     if !matches!(bytes.get(..2), Some(value) if value == b"II" || value == b"MM") {
         return Ok(None);
     }
+    if is_valid_bigtiff(&bytes).map_err(|error| MetadataError::new(path, error))? {
+        return Ok(None);
+    }
     let maker_note = tiff_maker_note(&bytes).map_err(|error| MetadataError::new(path, error))?;
     Ok(maker_note.and_then(apple_maker_note_content_identifier))
+}
+
+fn is_valid_bigtiff(tiff: &[u8]) -> std::io::Result<bool> {
+    let byte_order = match tiff.get(..2) {
+        Some(b"MM") => ByteOrder::Big,
+        Some(b"II") => ByteOrder::Little,
+        _ => return Err(invalid_data("TIFF byte order is invalid")),
+    };
+    match read_u16(tiff, 2, byte_order) {
+        Some(42) => Ok(false),
+        Some(43) => {
+            if tiff.len() < 16 {
+                return Err(invalid_data("BigTIFF header is truncated"));
+            }
+            if read_u16(tiff, 4, byte_order) != Some(8) {
+                return Err(invalid_data("BigTIFF offset size is unsupported"));
+            }
+            if read_u16(tiff, 6, byte_order) != Some(0) {
+                return Err(invalid_data("BigTIFF reserved header field is invalid"));
+            }
+            let first_ifd = usize::try_from(
+                read_u64(tiff, 8, byte_order)
+                    .ok_or_else(|| invalid_data("BigTIFF first IFD offset is truncated"))?,
+            )
+            .map_err(|_| invalid_data("BigTIFF first IFD offset exceeds usize"))?;
+            let first_ifd_end = first_ifd
+                .checked_add(8)
+                .ok_or_else(|| invalid_data("BigTIFF first IFD range overflows"))?;
+            if first_ifd < 16 || first_ifd_end > tiff.len() {
+                return Err(invalid_data("BigTIFF first IFD is outside the file"));
+            }
+            Ok(true)
+        }
+        Some(_) => Err(invalid_data("TIFF magic is invalid")),
+        None => Err(invalid_data("TIFF magic is truncated")),
+    }
 }
 
 fn has_supported_still_signature(path: &Path) -> Result<bool, MetadataError> {
@@ -941,6 +980,15 @@ fn read_u32(bytes: &[u8], offset: usize, byte_order: ByteOrder) -> Option<u32> {
     })
 }
 
+fn read_u64(bytes: &[u8], offset: usize, byte_order: ByteOrder) -> Option<u64> {
+    let end = offset.checked_add(8)?;
+    let bytes: [u8; 8] = bytes.get(offset..end)?.try_into().ok()?;
+    Some(match byte_order {
+        ByteOrder::Big => u64::from_be_bytes(bytes),
+        ByteOrder::Little => u64::from_le_bytes(bytes),
+    })
+}
+
 fn normalized_identifier(bytes: &[u8]) -> Option<String> {
     let value = bytes.split(|byte| *byte == 0).next().unwrap_or(bytes);
     if !value
@@ -1184,6 +1232,34 @@ mod tests {
         [ftyp, meta, atom(*b"mdat", &exif_item)].concat()
     }
 
+    fn bigtiff(little_endian: bool) -> Vec<u8> {
+        let mut bytes = if little_endian {
+            b"II".to_vec()
+        } else {
+            b"MM".to_vec()
+        };
+        let u16_bytes = |value: u16| {
+            if little_endian {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            }
+        };
+        let u64_bytes = |value: u64| {
+            if little_endian {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            }
+        };
+        bytes.extend_from_slice(&u16_bytes(43));
+        bytes.extend_from_slice(&u16_bytes(8));
+        bytes.extend_from_slice(&u16_bytes(0));
+        bytes.extend_from_slice(&u64_bytes(16));
+        bytes.extend_from_slice(&u64_bytes(0));
+        bytes
+    }
+
     #[test]
     fn classification_is_case_insensitive() {
         assert_eq!(
@@ -1292,6 +1368,45 @@ mod tests {
     fn valid_sips_heic_without_exif_is_safe() {
         let bytes = include_bytes!("../tests/fixtures/sips-1px.heic");
         assert_eq!(heif_exif_tiff(bytes).unwrap(), None);
+    }
+
+    #[test]
+    fn valid_bigtiff_dng_is_an_unsupported_candidate_without_an_error() {
+        let temporary = TempDir::new().unwrap();
+        for (name, bytes) in [("little.dng", bigtiff(true)), ("big.dng", bigtiff(false))] {
+            let path = temporary.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                relationship_metadata(&path)
+                    .unwrap()
+                    .apple_content_identifier,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_bigtiff_headers_return_contextual_errors() {
+        let mut truncated = bigtiff(true);
+        truncated.truncate(12);
+        assert!(is_valid_bigtiff(&truncated)
+            .unwrap_err()
+            .to_string()
+            .contains("header is truncated"));
+
+        let mut invalid_offset_size = bigtiff(false);
+        invalid_offset_size[4..6].copy_from_slice(&4_u16.to_be_bytes());
+        assert!(is_valid_bigtiff(&invalid_offset_size)
+            .unwrap_err()
+            .to_string()
+            .contains("offset size"));
+
+        let mut invalid_ifd = bigtiff(true);
+        invalid_ifd[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(is_valid_bigtiff(&invalid_ifd)
+            .unwrap_err()
+            .to_string()
+            .contains("first IFD"));
     }
 
     #[test]
