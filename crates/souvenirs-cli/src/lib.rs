@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{error::ErrorKind, Args, Parser, Subcommand, ValueEnum};
+use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use souvenirs_domain::catalog::{
@@ -223,22 +224,19 @@ pub enum ScannedFileKind {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredPlan {
+    #[schemars(range(min = 1, max = 1))]
     pub schema_version: u32,
     pub confirmed: bool,
+    #[schemars(with = "String")]
     pub source_root: PathBuf,
     pub import_plan: ImportPlan,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawStoredPlan {
-    schema_version: u32,
-    confirmed: bool,
-    source_root: PathBuf,
-    import_plan: serde_json::Value,
+pub fn stored_plan_schema() -> RootSchema {
+    schema_for!(StoredPlan)
 }
 
 #[derive(Debug, Serialize)]
@@ -1125,23 +1123,14 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
 }
 
 fn read_stored_plan(path: &Path) -> Result<StoredPlan, CliError> {
-    let raw: RawStoredPlan = read_json(path)?;
-    if raw.schema_version != 1 {
+    let stored: StoredPlan = read_json(path)?;
+    if stored.schema_version != 1 {
         return Err(CliError::invalid_data(format!(
             "unsupported stored plan schema version {}",
-            raw.schema_version
+            stored.schema_version
         )));
     }
-    let plan_bytes = serde_json::to_vec(&raw.import_plan)
-        .map_err(|error| CliError::invalid_data(format!("serialize import plan: {error}")))?;
-    let import_plan = ImportPlan::from_json(&plan_bytes)
-        .map_err(|error| CliError::invalid_data(format!("validate import plan: {error}")))?;
-    Ok(StoredPlan {
-        schema_version: raw.schema_version,
-        confirmed: raw.confirmed,
-        source_root: raw.source_root,
-        import_plan,
-    })
+    Ok(stored)
 }
 
 fn validate_plan_state(layout: &CatalogLayout, stored: &StoredPlan) -> Result<(), CliError> {
@@ -2163,6 +2152,8 @@ fn write_error(error: &CliError) {
 
 #[cfg(test)]
 mod tests {
+    use jsonschema::JSONSchema;
+
     use super::*;
 
     #[test]
@@ -2181,5 +2172,94 @@ mod tests {
             String::from_utf8(encode_manifest(&lines)).unwrap(),
             format!("{}  a.jpg\n{}  b.jpg\n", "a".repeat(64), "b".repeat(64))
         );
+    }
+
+    #[test]
+    fn committed_import_plan_schema_matches_generated_schema() {
+        let expected = serde_json::to_string_pretty(&stored_plan_schema()).unwrap() + "\n";
+        let actual = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v1.json"),
+        )
+        .expect("committed import plan schema should be readable");
+
+        assert_eq!(
+            actual, expected,
+            "regenerate the committed import plan schema"
+        );
+    }
+
+    #[test]
+    fn representative_saved_plans_match_the_schema_and_production_reader() {
+        let schema_value: serde_json::Value = serde_json::from_slice(
+            &fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v1.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let validator = JSONSchema::compile(&schema_value).expect("schema should compile");
+        let confirmed = fixture_path("confirmed-v1.json");
+        let unconfirmed = fixture_path("unconfirmed-v1.json");
+
+        for path in [&confirmed, &unconfirmed] {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            if let Err(errors) = validator.validate(&value) {
+                let errors = errors.map(|error| error.to_string()).collect::<Vec<_>>();
+                panic!("fixture does not match the committed schema: {errors:?}");
+            }
+            read_stored_plan(path).expect("fixture should pass production validation");
+        }
+
+        let confirmed = read_stored_plan(&confirmed).unwrap();
+        let unconfirmed = read_stored_plan(&unconfirmed).unwrap();
+        assert!(confirmed.confirmed);
+        assert!(!unconfirmed.confirmed);
+        assert_ne!(confirmed.source_root, unconfirmed.source_root);
+        assert_eq!(
+            confirmed.import_plan.digest(),
+            unconfirmed.import_plan.digest()
+        );
+    }
+
+    #[test]
+    fn version_one_schema_rejects_other_outer_and_inner_versions() {
+        let schema_value: serde_json::Value = serde_json::from_slice(
+            &fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v1.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let validator = JSONSchema::compile(&schema_value).expect("schema should compile");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture_path("confirmed-v1.json")).unwrap()).unwrap();
+
+        value["schema_version"] = serde_json::json!(2);
+        assert!(!validator.is_valid(&value));
+        value["schema_version"] = serde_json::json!(1);
+        value["import_plan"]["document"]["schema_version"] = serde_json::json!(2);
+        assert!(!validator.is_valid(&value));
+    }
+
+    #[test]
+    fn production_reader_rejects_invalid_saved_plan_envelopes() {
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture_path("confirmed-v1.json")).unwrap()).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+
+        let mut unsupported = fixture.clone();
+        unsupported["schema_version"] = serde_json::json!(2);
+        let unsupported_path = temporary.path().join("unsupported.json");
+        fs::write(&unsupported_path, serde_json::to_vec(&unsupported).unwrap()).unwrap();
+        assert!(read_stored_plan(&unsupported_path).is_err());
+
+        let mut unknown = fixture;
+        unknown["unexpected"] = serde_json::json!(true);
+        let unknown_path = temporary.path().join("unknown.json");
+        fs::write(&unknown_path, serde_json::to_vec(&unknown).unwrap()).unwrap();
+        assert!(read_stored_plan(&unknown_path).is_err());
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/import-plan")
+            .join(name)
     }
 }

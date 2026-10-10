@@ -1,0 +1,665 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StoredPlan",
+  "type": "object",
+  "required": [
+    "confirmed",
+    "import_plan",
+    "schema_version",
+    "source_root"
+  ],
+  "properties": {
+    "confirmed": {
+      "type": "boolean"
+    },
+    "import_plan": {
+      "$ref": "#/definitions/ImportPlan"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 1.0,
+      "minimum": 1.0
+    },
+    "source_root": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "CatalogSnapshot": {
+      "type": "object",
+      "required": [
+        "catalog_id",
+        "manifests"
+      ],
+      "properties": {
+        "catalog_id": {
+          "type": "string"
+        },
+        "manifests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManifestFingerprint"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContentDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ImportPlan": {
+      "type": "object",
+      "required": [
+        "digest",
+        "document"
+      ],
+      "properties": {
+        "digest": {
+          "$ref": "#/definitions/ContentDigest"
+        },
+        "document": {
+          "$ref": "#/definitions/PlanDocument"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestFingerprint": {
+      "type": "object",
+      "required": [
+        "digest",
+        "path"
+      ],
+      "properties": {
+        "digest": {
+          "$ref": "#/definitions/ContentDigest"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanDateTime": {
+      "type": "object",
+      "required": [
+        "hour",
+        "minute",
+        "ordinal",
+        "provenance",
+        "second",
+        "year"
+      ],
+      "properties": {
+        "hour": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "minute": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "ordinal": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "provenance": {
+          "$ref": "#/definitions/PlanDateTimeProvenance"
+        },
+        "recorded_offset_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "second": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "year": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanDateTimeProvenance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "source"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "metadata"
+              ]
+            },
+            "source": {
+              "$ref": "#/definitions/PlanDateTimeSource"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "source"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "confirmed"
+              ]
+            },
+            "source": {
+              "$ref": "#/definitions/PlanDateTimeSource"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "user_assigned"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "offset_seconds",
+            "original"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "corrected"
+              ]
+            },
+            "offset_seconds": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "original": {
+              "$ref": "#/definitions/PlanDateTimeProvenance"
+            }
+          }
+        }
+      ]
+    },
+    "PlanDateTimeSource": {
+      "type": "string",
+      "enum": [
+        "exif_date_time_original",
+        "exif_date_time_digitized",
+        "quick_time_creation_date",
+        "xmp_date_created",
+        "xmp_exif_date_time_original",
+        "container_creation_time",
+        "google_takeout_photo_taken_time",
+        "filename_pattern"
+      ]
+    },
+    "PlanDocument": {
+      "description": "Field order is part of the version 1 digest contract.",
+      "type": "object",
+      "required": [
+        "catalog",
+        "created_at",
+        "items",
+        "plan_id",
+        "required_space_bytes",
+        "schema_version",
+        "source",
+        "steps",
+        "unhandled_content"
+      ],
+      "properties": {
+        "catalog": {
+          "$ref": "#/definitions/CatalogSnapshot"
+        },
+        "created_at": {
+          "$ref": "#/definitions/PlanTimestamp"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PlanItem"
+          }
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "required_space_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 1.0,
+          "minimum": 1.0
+        },
+        "source": {
+          "$ref": "#/definitions/SourceSnapshot"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PlanStep"
+          }
+        },
+        "unhandled_content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/UnhandledContent"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanFile": {
+      "type": "object",
+      "required": [
+        "digest",
+        "role",
+        "size_bytes",
+        "source_file_id",
+        "source_path"
+      ],
+      "properties": {
+        "digest": {
+          "$ref": "#/definitions/ContentDigest"
+        },
+        "role": {
+          "$ref": "#/definitions/PlanFileRole"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "source_file_id": {
+          "type": "string"
+        },
+        "source_path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanFileRole": {
+      "type": "string",
+      "enum": [
+        "primary",
+        "companion",
+        "sidecar"
+      ]
+    },
+    "PlanItem": {
+      "type": "object",
+      "required": [
+        "disposition",
+        "files",
+        "item_id"
+      ],
+      "properties": {
+        "accepted_datetime": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PlanDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disposition": {
+          "$ref": "#/definitions/PlanItemDisposition"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PlanFile"
+          }
+        },
+        "item_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanItemDisposition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "transfer"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "excluded"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "finding",
+            "kind"
+          ],
+          "properties": {
+            "finding": {
+              "$ref": "#/definitions/PlanItemFinding"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "unresolved"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "PlanItemFinding": {
+      "type": "string",
+      "enum": [
+        "missing_date",
+        "pending_date_confirmation",
+        "ambiguous_raw_jpeg",
+        "ambiguous_live_photo",
+        "ambiguous_canonical_compound",
+        "conflicting_compound"
+      ]
+    },
+    "PlanStep": {
+      "type": "object",
+      "required": [
+        "action",
+        "sequence"
+      ],
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/PlanStepKind"
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanStepKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "path"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "create_directory"
+              ]
+            },
+            "path": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "destination",
+            "expected_digest",
+            "kind",
+            "size_bytes",
+            "source_file_id"
+          ],
+          "properties": {
+            "destination": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "expected_digest": {
+              "$ref": "#/definitions/ContentDigest"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "copy_file"
+              ]
+            },
+            "size_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "source_file_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "path",
+            "resulting_digest",
+            "resulting_size_bytes"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "write_manifest"
+              ]
+            },
+            "path": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "previous_digest": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ContentDigest"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resulting_digest": {
+              "$ref": "#/definitions/ContentDigest"
+            },
+            "resulting_size_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          }
+        }
+      ]
+    },
+    "PlanTimestamp": {
+      "type": "object",
+      "required": [
+        "nanosecond",
+        "unix_seconds"
+      ],
+      "properties": {
+        "nanosecond": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "unix_seconds": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SourceSnapshot": {
+      "type": "object",
+      "required": [
+        "fingerprint",
+        "source_id"
+      ],
+      "properties": {
+        "fingerprint": {
+          "$ref": "#/definitions/ContentDigest"
+        },
+        "source_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "UnhandledContent": {
+      "type": "object",
+      "required": [
+        "digest",
+        "finding",
+        "size_bytes",
+        "source_file_id",
+        "source_path"
+      ],
+      "properties": {
+        "digest": {
+          "$ref": "#/definitions/ContentDigest"
+        },
+        "finding": {
+          "$ref": "#/definitions/UnhandledContentFinding"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "source_file_id": {
+          "type": "string"
+        },
+        "source_path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "UnhandledContentFinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "unknown_content"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "orphan_sidecar"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "candidate_item_ids",
+            "kind"
+          ],
+          "properties": {
+            "candidate_item_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "ambiguous_sidecar"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

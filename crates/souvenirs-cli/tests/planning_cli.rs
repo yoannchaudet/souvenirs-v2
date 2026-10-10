@@ -1,6 +1,8 @@
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
 
+use jsonschema::JSONSchema;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -86,6 +88,16 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
     assert_eq!(planned["result"]["unhandled_count"], 1);
 
     let plan_value: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
+    let schema: Value = serde_json::from_slice(
+        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v1.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let validator = JSONSchema::compile(&schema).expect("committed schema should compile");
+    assert!(
+        validator.is_valid(&plan_value),
+        "CLI-produced plan should match the committed schema"
+    );
     assert_eq!(plan_value["confirmed"], true);
     assert_eq!(
         plan_value["import_plan"]["document"]["items"][0]["disposition"]["kind"],

@@ -58,6 +58,16 @@ Execution rechecks that destinations are still free and manifests are unchanged.
 Drift requires a new plan, never silent replanning.
 Naming and folder operations must not hash the media collection.
 
+A saved import plan uses one versioned envelope.
+The envelope contains its version, confirmation state, source location metadata, and the digested import plan.
+The import plan digest protects every field in the normalized plan document.
+The digest does not protect confirmation state or source location metadata.
+
+Initial import execution validates confirmation state before it mutates the catalog.
+Initial import execution uses source location metadata to find each planned item file.
+It compares each item file with the size and digest in the plan document.
+Changing the source location does not change the planned catalog operation.
+
 ### Unhandled content
 
 Scans and plans report these findings without acting on them:

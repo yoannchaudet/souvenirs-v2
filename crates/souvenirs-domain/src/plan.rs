@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use schemars::{schema::RootSchema, schema_for, JsonSchema};
+use schemars::{
+    schema::{InstanceType, RootSchema, Schema, SchemaObject, StringValidation},
+    schema_for, JsonSchema,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::Date;
@@ -9,7 +12,7 @@ use time::Date;
 use crate::names::{PathCollisionKey, PortableRelativePath};
 use crate::source::SourcePath;
 
-/// Serialized field order is part of the digest contract and requires a version bump to change.
+/// Version 1 hashes the normalized `PlanDocument` compact JSON representation.
 pub const IMPORT_PLAN_SCHEMA_VERSION: u32 = 1;
 
 #[derive(
@@ -53,12 +56,26 @@ impl From<PlanId> for String {
     }
 }
 
-#[derive(
-    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-#[schemars(transparent)]
 pub struct ContentDigest(String);
+
+impl JsonSchema for ContentDigest {
+    fn schema_name() -> String {
+        "ContentDigest".into()
+    }
+
+    fn json_schema(_: &mut schemars::gen::SchemaGenerator) -> Schema {
+        Schema::Object(SchemaObject {
+            instance_type: Some(InstanceType::String.into()),
+            string: Some(Box::new(StringValidation {
+                pattern: Some("^[0-9a-f]{64}$".into()),
+                ..StringValidation::default()
+            })),
+            ..SchemaObject::default()
+        })
+    }
+}
 
 impl ContentDigest {
     pub fn from_bytes(bytes: &[u8]) -> Self {
@@ -277,7 +294,9 @@ pub struct PlanStep {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Field order is part of the version 1 digest contract.
 pub struct PlanDocument {
+    #[schemars(range(min = 1, max = 1))]
     pub schema_version: u32,
     pub plan_id: PlanId,
     pub created_at: PlanTimestamp,
@@ -303,6 +322,16 @@ struct RawImportPlan {
     digest: ContentDigest,
 }
 
+impl<'de> Deserialize<'de> for ImportPlan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawImportPlan::deserialize(deserializer)?;
+        Self::from_raw(raw).map_err(serde::de::Error::custom)
+    }
+}
+
 impl ImportPlan {
     pub fn new(mut document: PlanDocument) -> Result<Self, PlanError> {
         normalize_document(&mut document);
@@ -318,6 +347,10 @@ impl ImportPlan {
 
     pub fn from_json(bytes: &[u8]) -> Result<Self, PlanError> {
         let raw: RawImportPlan = serde_json::from_slice(bytes)?;
+        Self::from_raw(raw)
+    }
+
+    fn from_raw(raw: RawImportPlan) -> Result<Self, PlanError> {
         let plan = Self {
             document: raw.document,
             digest: raw.digest,
@@ -751,7 +784,13 @@ where
 }
 
 fn document_digest(document: &PlanDocument) -> Result<ContentDigest, PlanError> {
-    Ok(ContentDigest::from_bytes(&serde_json::to_vec(document)?))
+    Ok(ContentDigest::from_bytes(&canonical_document_bytes(
+        document,
+    )?))
+}
+
+fn canonical_document_bytes(document: &PlanDocument) -> Result<Vec<u8>, PlanError> {
+    Ok(serde_json::to_vec(document)?)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -1120,6 +1159,108 @@ mod tests {
     }
 
     #[test]
+    fn every_top_level_document_field_is_inside_the_digest_boundary() {
+        let original = ImportPlan::new(document()).unwrap();
+        let expected = original.digest().clone();
+        let mut variants = Vec::new();
+
+        let mut changed = document();
+        changed.schema_version = 2;
+        variants.push(changed);
+        let mut changed = document();
+        changed.plan_id = PlanId::new("other-plan").unwrap();
+        variants.push(changed);
+        let mut changed = document();
+        changed.created_at = PlanTimestamp::new(-1, 0).unwrap();
+        variants.push(changed);
+        let mut changed = document();
+        changed.catalog.catalog_id = "other-catalog".into();
+        variants.push(changed);
+        let mut changed = document();
+        changed.source.source_id = "other-source".into();
+        variants.push(changed);
+        let mut changed = document();
+        changed.items[0].disposition = PlanItemDisposition::Excluded {
+            reason: "other reason".into(),
+        };
+        variants.push(changed);
+        let mut changed = document();
+        changed.unhandled_content[0].size_bytes += 1;
+        variants.push(changed);
+        let mut changed = document();
+        changed.steps[0].sequence = 4;
+        variants.push(changed);
+        let mut changed = document();
+        changed.required_space_bytes += 1;
+        variants.push(changed);
+
+        for changed in variants {
+            assert_ne!(document_digest(&changed).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn version_one_canonical_bytes_cover_json_encoding_rules() {
+        let mut document = document();
+        document.plan_id = PlanId::new("plan-\"café\"").unwrap();
+        document.created_at = PlanTimestamp::new(-1, 0).unwrap();
+        document.catalog.catalog_id = "catalog-雪".into();
+        document.catalog.manifests.clear();
+        document.source.source_id = "source-card".into();
+        document.items = vec![PlanItem {
+            item_id: "item-1".into(),
+            files: vec![PlanFile {
+                source_file_id: "file-1".into(),
+                source_path: vec!["DCIM".into(), "café \"one\".jpg".into()],
+                digest: digest("file"),
+                size_bytes: 1,
+                role: PlanFileRole::Primary,
+            }],
+            accepted_datetime: None,
+            disposition: PlanItemDisposition::Excluded {
+                reason: "not selected\nline".into(),
+            },
+        }];
+        document.unhandled_content.clear();
+        document.steps.clear();
+        document.required_space_bytes = 0;
+        let plan = ImportPlan::new(document).unwrap();
+
+        let bytes = canonical_document_bytes(plan.document()).unwrap();
+
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            concat!(
+                "{\"schema_version\":1,\"plan_id\":\"plan-\\\"café\\\"\",",
+                "\"created_at\":{\"unix_seconds\":-1,\"nanosecond\":0},",
+                "\"catalog\":{\"catalog_id\":\"catalog-雪\",\"manifests\":[]},",
+                "\"source\":{\"source_id\":\"source-card\",\"fingerprint\":",
+                "\"41637c7875947b50775c0ab2bb30a28b292be748376a5713eb8f527d9953433c\"},",
+                "\"items\":[{\"item_id\":\"item-1\",\"files\":[{\"source_file_id\":",
+                "\"file-1\",\"source_path\":[\"DCIM\",\"café \\\"one\\\".jpg\"],",
+                "\"digest\":\"3b9c358f36f0a31b6ad3e14f309c7cf198ac9246e8316f9ce543d5b19ac02b80\",",
+                "\"size_bytes\":1,\"role\":\"primary\"}],\"accepted_datetime\":null,",
+                "\"disposition\":{\"kind\":\"excluded\",\"reason\":\"not selected\\nline\"}}],",
+                "\"unhandled_content\":[],\"steps\":[],\"required_space_bytes\":0}"
+            )
+        );
+        assert_eq!(
+            plan.digest().as_str(),
+            "c9df6ebdc9a50f2b21ebcfa128bbc29586f36f2755f7609098e4b09f935ad9e3"
+        );
+    }
+
+    #[test]
+    fn version_one_rich_document_digest_is_stable() {
+        let plan = ImportPlan::new(document()).unwrap();
+
+        assert_eq!(
+            plan.digest().as_str(),
+            "8169e208a2d7301f2727c1cae13abf7dd0a3f27dafe4993a293e95d7819314d5"
+        );
+    }
+
+    #[test]
     fn deserialization_rejects_noncanonical_step_order_even_with_a_matching_digest() {
         let mut plan = ImportPlan::new(document()).unwrap();
         plan.document.steps.reverse();
@@ -1380,8 +1521,12 @@ mod tests {
         );
         assert!(schema["definitions"]["PlanDocument"].is_object());
         assert_eq!(
-            schema["properties"]["digest"]["type"],
-            serde_json::json!("string")
+            schema["properties"]["digest"]["$ref"],
+            serde_json::json!("#/definitions/ContentDigest")
+        );
+        assert_eq!(
+            schema["definitions"]["ContentDigest"]["pattern"],
+            serde_json::json!("^[0-9a-f]{64}$")
         );
     }
 }
