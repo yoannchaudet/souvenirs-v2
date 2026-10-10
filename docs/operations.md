@@ -62,6 +62,8 @@ A saved import plan uses one versioned envelope.
 The envelope contains its version, confirmation state, source location metadata, and the digested import plan.
 The import plan digest protects every field in the normalized plan document.
 The digest does not protect confirmation state or source location metadata.
+Version 2 records `ambiguous_sidecar` when sidecar ownership blocks a candidate item.
+Readers continue to accept valid version 1 plans.
 
 Initial import execution validates confirmation state before it mutates the catalog.
 Initial import execution uses source location metadata to find each planned item file.

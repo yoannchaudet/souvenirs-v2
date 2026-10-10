@@ -1,0 +1,86 @@
+{
+  "schema_version": 2,
+  "confirmed": true,
+  "source_root": "/Volumes/Card \"A\"",
+  "import_plan": {
+    "document": {
+      "schema_version": 2,
+      "plan_id": "plan-\"café\"",
+      "created_at": {
+        "unix_seconds": -1,
+        "nanosecond": 0
+      },
+      "catalog": {
+        "catalog_id": "catalog-雪",
+        "manifests": []
+      },
+      "source": {
+        "source_id": "source-card",
+        "fingerprint": "41637c7875947b50775c0ab2bb30a28b292be748376a5713eb8f527d9953433c"
+      },
+      "items": [
+        {
+          "item_id": "item-1",
+          "files": [
+            {
+              "source_file_id": "file-1",
+              "source_path": [
+                "DCIM",
+                "café \"one\".jpg"
+              ],
+              "digest": "3b9c358f36f0a31b6ad3e14f309c7cf198ac9246e8316f9ce543d5b19ac02b80",
+              "size_bytes": 1,
+              "role": "primary"
+            }
+          ],
+          "accepted_datetime": null,
+          "disposition": {
+            "kind": "unresolved",
+            "finding": "ambiguous_sidecar"
+          }
+        },
+        {
+          "item_id": "item-2",
+          "files": [
+            {
+              "source_file_id": "file-2",
+              "source_path": [
+                "DCIM",
+                "café \"two\".mov"
+              ],
+              "digest": "d98cf53e0c8b77c14a96358d5b69584225d2f3206cd3b245a88435d92aa9c6f4",
+              "size_bytes": 2,
+              "role": "primary"
+            }
+          ],
+          "accepted_datetime": null,
+          "disposition": {
+            "kind": "unresolved",
+            "finding": "ambiguous_sidecar"
+          }
+        }
+      ],
+      "unhandled_content": [
+        {
+          "source_file_id": "sidecar-1",
+          "source_path": [
+            "DCIM",
+            "café.xmp"
+          ],
+          "digest": "0ab7283988e8f49022d126054947f222cbdf0a589511760ca38e306e61c9fbdb",
+          "size_bytes": 3,
+          "finding": {
+            "kind": "ambiguous_sidecar",
+            "candidate_item_ids": [
+              "item-1",
+              "item-2"
+            ]
+          }
+        }
+      ],
+      "steps": [],
+      "required_space_bytes": 0
+    },
+    "digest": "d3403a2bc0b8d3a3855289d6a1a4c6e9ca4f5005660fdcde546a0e1dc55bff74"
+  }
+}
