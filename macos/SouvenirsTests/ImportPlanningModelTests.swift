@@ -68,7 +68,7 @@ final class ImportPlanningModelTests: XCTestCase {
         let engine = FakeImportPlanningEngine()
         let model = makeModel(engine: engine)
         await model.load()
-        await model.resolveDate(.convertFromUTC)
+        await model.resolveDate(.asShown)
 
         XCTAssertEqual(model.review?.transferCount, 12)
         XCTAssertEqual(model.review?.leftOnSourceCount, 2)
@@ -112,7 +112,14 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             uncertainTimeCount: 4,
             totalBytes: 41_000_000_000,
             suggestedCollectionName: "Dolomites",
-            suggestedAcceptedDate: "2026-10-10"
+            suggestedAcceptedDate: "2026-10-10",
+            suggestedRangeEnd: "2026-10-12",
+            pendingItemCount: 4,
+            unresolvedItemCount: 0,
+            datetimeSources: [
+                .init(source: .exifDateTimeOriginal, state: .accepted, itemCount: 8),
+                .init(source: .containerCreationTime, state: .needsConfirmation, itemCount: 4)
+            ]
         )
     }
 

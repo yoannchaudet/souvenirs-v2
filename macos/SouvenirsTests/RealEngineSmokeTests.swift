@@ -223,7 +223,7 @@ final class RealEngineSmokeTests: XCTestCase {
             )
             try contents.write(
                 to: source.appendingPathComponent(
-                    String(format: "IMG_%04d.jpg", index + 1)
+                    String(format: "IMG_20261010_1011%02d.jpg", index)
                 )
             )
         }

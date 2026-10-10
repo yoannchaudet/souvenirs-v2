@@ -5,7 +5,13 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use souvenirs_domain::source::{OriginalRole, SidecarNamingForm, SourceFileKind};
+use souvenirs_domain::datetime::{DateTimeCandidate, DateTimeSource, DateTimeValue};
+use souvenirs_domain::source::{
+    CameraIdentity, OriginalRole, SidecarNamingForm, SourceFileKind, SourceMetadata,
+};
+use time::format_description::well_known::Iso8601;
+use time::macros::format_description;
+use time::{Date, Duration, Month, OffsetDateTime, PrimitiveDateTime, UtcOffset};
 
 pub const SUPPORTED_ORIGINAL_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "heic", "dng", "cr3", "nef", "arw", "mov", "mp4",
@@ -54,7 +60,7 @@ impl fmt::Display for MetadataError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "read relationship metadata from {}: {}",
+            "read metadata from {}: {}",
             self.path.display(),
             self.source
         )
@@ -135,6 +141,523 @@ pub fn relationship_metadata(path: &Path) -> Result<RelationshipMetadata, Metada
     Ok(RelationshipMetadata {
         apple_content_identifier: identifier,
     })
+}
+
+pub fn normalized_metadata(path: &Path) -> Result<SourceMetadata, MetadataError> {
+    let relationship = relationship_metadata(path)?;
+    let mut datetime_candidates = Vec::new();
+    let mut camera = empty_camera();
+
+    match classify_path(path) {
+        AssetKind::Original {
+            media: MediaKind::Photo,
+            role: OriginalRole::Jpeg | OriginalRole::Still,
+        } => {
+            if let Some(tiff) = read_supported_still_tiff(path)? {
+                let extracted = tiff_normalized_metadata(&tiff)
+                    .map_err(|error| MetadataError::new(path, error))?;
+                datetime_candidates.extend(extracted.datetime_candidates);
+                camera = extracted.camera;
+            }
+        }
+        AssetKind::Original {
+            media: MediaKind::Photo,
+            role: OriginalRole::Raw,
+        } if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                ["dng", "nef", "arw"]
+                    .iter()
+                    .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            }) =>
+        {
+            if let Some(tiff) = read_classic_tiff(path)? {
+                let extracted = tiff_normalized_metadata(&tiff)
+                    .map_err(|error| MetadataError::new(path, error))?;
+                datetime_candidates.extend(extracted.datetime_candidates);
+                camera = extracted.camera;
+            }
+        }
+        AssetKind::Original {
+            media: MediaKind::Video,
+            ..
+        } => {
+            let extracted = quicktime_normalized_metadata(path)?;
+            datetime_candidates.extend(extracted);
+        }
+        AssetKind::Sidecar { .. }
+            if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("xmp")) =>
+        {
+            datetime_candidates.extend(xmp_datetime_candidates(path)?);
+        }
+        AssetKind::Original { .. } | AssetKind::Sidecar { .. } | AssetKind::Unsupported => {}
+    }
+
+    if let Some(candidate) = filename_datetime_candidate(path) {
+        datetime_candidates.push(candidate);
+    }
+
+    Ok(SourceMetadata {
+        datetime_candidates,
+        camera,
+        apple_content_identifier: relationship.apple_content_identifier,
+    })
+}
+
+fn empty_camera() -> CameraIdentity {
+    CameraIdentity {
+        make: None,
+        model: None,
+        serial_number: None,
+    }
+}
+
+struct ExtractedTiffMetadata {
+    datetime_candidates: Vec<DateTimeCandidate>,
+    camera: CameraIdentity,
+}
+
+fn read_supported_still_tiff(path: &Path) -> Result<Option<Vec<u8>>, MetadataError> {
+    if !has_supported_still_signature(path)? {
+        return Ok(None);
+    }
+    let bytes = read_bounded_file(path, 512 * 1024 * 1024)?;
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let tiff = if bytes.starts_with(&[0xff, 0xd8]) {
+        jpeg_exif_tiff(&bytes)
+    } else {
+        heif_exif_tiff(&bytes)
+    }
+    .map_err(|error| MetadataError::new(path, error))?;
+    Ok(tiff.map(ToOwned::to_owned))
+}
+
+fn read_classic_tiff(path: &Path) -> Result<Option<Vec<u8>>, MetadataError> {
+    let Some(bytes) = read_bounded_file(path, 512 * 1024 * 1024)? else {
+        return Ok(None);
+    };
+    if !matches!(bytes.get(..2), Some(value) if value == b"II" || value == b"MM") {
+        return Ok(None);
+    }
+    if is_valid_bigtiff(&bytes).map_err(|error| MetadataError::new(path, error))? {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn read_bounded_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, MetadataError> {
+    let size = std::fs::metadata(path)
+        .map_err(|error| MetadataError::new(path, error))?
+        .len();
+    if size > limit {
+        return Ok(None);
+    }
+    std::fs::read(path)
+        .map(Some)
+        .map_err(|error| MetadataError::new(path, error))
+}
+
+fn tiff_normalized_metadata(tiff: &[u8]) -> std::io::Result<ExtractedTiffMetadata> {
+    const EXIF_IFD_POINTER: u16 = 0x8769;
+    const MAKE: u16 = 0x010f;
+    const MODEL: u16 = 0x0110;
+    const DATE_TIME_ORIGINAL: u16 = 0x9003;
+    const DATE_TIME_DIGITIZED: u16 = 0x9004;
+    const BODY_SERIAL_NUMBER: u16 = 0xa431;
+    const MAX_IFD_ENTRIES: usize = 4096;
+
+    let (byte_order, ifd0_offset) = tiff_header(tiff)?;
+    let make = tiff_ascii_value(tiff, ifd0_offset, MAKE, byte_order, MAX_IFD_ENTRIES)?;
+    let model = tiff_ascii_value(tiff, ifd0_offset, MODEL, byte_order, MAX_IFD_ENTRIES)?;
+    let mut output = ExtractedTiffMetadata {
+        datetime_candidates: Vec::new(),
+        camera: CameraIdentity {
+            make,
+            model,
+            serial_number: None,
+        },
+    };
+    let Some(exif_entry) = tiff_entry(
+        tiff,
+        ifd0_offset,
+        EXIF_IFD_POINTER,
+        byte_order,
+        MAX_IFD_ENTRIES,
+    )?
+    else {
+        return Ok(output);
+    };
+    if !matches!(read_u16(&exif_entry, 2, byte_order), Some(4 | 13))
+        || read_u32(&exif_entry, 4, byte_order) != Some(1)
+    {
+        return Ok(output);
+    }
+    let exif_offset = usize::try_from(
+        read_u32(&exif_entry, 8, byte_order)
+            .ok_or_else(|| invalid_data("TIFF ExifIFD pointer is truncated"))?,
+    )
+    .map_err(|_| invalid_data("TIFF ExifIFD offset exceeds usize"))?;
+
+    for (tag, source) in [
+        (DATE_TIME_ORIGINAL, DateTimeSource::ExifDateTimeOriginal),
+        (DATE_TIME_DIGITIZED, DateTimeSource::ExifDateTimeDigitized),
+    ] {
+        let Some(value) = tiff_ascii_value(tiff, exif_offset, tag, byte_order, MAX_IFD_ENTRIES)?
+        else {
+            continue;
+        };
+        let Some(datetime) = parse_exif_datetime(&value) else {
+            continue;
+        };
+        output.datetime_candidates.push(DateTimeCandidate {
+            source,
+            value: DateTimeValue::Local(datetime),
+        });
+    }
+    output.camera.serial_number = tiff_ascii_value(
+        tiff,
+        exif_offset,
+        BODY_SERIAL_NUMBER,
+        byte_order,
+        MAX_IFD_ENTRIES,
+    )?;
+    Ok(output)
+}
+
+fn tiff_ascii_value(
+    tiff: &[u8],
+    ifd_offset: usize,
+    tag: u16,
+    byte_order: ByteOrder,
+    max_entries: usize,
+) -> std::io::Result<Option<String>> {
+    let Some(entry) = tiff_entry(tiff, ifd_offset, tag, byte_order, max_entries)? else {
+        return Ok(None);
+    };
+    if read_u16(&entry, 2, byte_order) != Some(2) {
+        return Ok(None);
+    }
+    let length = usize::try_from(
+        read_u32(&entry, 4, byte_order)
+            .ok_or_else(|| invalid_data("TIFF ASCII length is truncated"))?,
+    )
+    .map_err(|_| invalid_data("TIFF ASCII length exceeds usize"))?;
+    if length == 0 || length > 4096 {
+        return Ok(None);
+    }
+    let value = if length <= 4 {
+        entry
+            .get(8..8 + length)
+            .ok_or_else(|| invalid_data("TIFF inline ASCII value is truncated"))?
+    } else {
+        let offset = usize::try_from(
+            read_u32(&entry, 8, byte_order)
+                .ok_or_else(|| invalid_data("TIFF ASCII offset is truncated"))?,
+        )
+        .map_err(|_| invalid_data("TIFF ASCII offset exceeds usize"))?;
+        tiff.get(
+            offset
+                ..offset
+                    .checked_add(length)
+                    .ok_or_else(|| invalid_data("TIFF ASCII range overflows"))?,
+        )
+        .ok_or_else(|| invalid_data("TIFF ASCII value exceeds the EXIF data"))?
+    };
+    let value = value.split(|byte| *byte == 0).next().unwrap_or(value);
+    let value = std::str::from_utf8(value)
+        .map_err(|_| invalid_data("TIFF ASCII value is not UTF-8"))?
+        .trim();
+    Ok((!value.is_empty()).then(|| value.to_owned()))
+}
+
+fn quicktime_normalized_metadata(path: &Path) -> Result<Vec<DateTimeCandidate>, MetadataError> {
+    let mut file = File::open(path).map_err(|error| MetadataError::new(path, error))?;
+    let file_end = file
+        .seek(SeekFrom::End(0))
+        .map_err(|error| MetadataError::new(path, error))?;
+    if !is_iso_base_media(&mut file, file_end).map_err(|error| MetadataError::new(path, error))? {
+        return Ok(Vec::new());
+    }
+
+    let mut output = Vec::new();
+    if let Some(value) =
+        read_quicktime_text_key(&mut file, file_end, b"com.apple.quicktime.creationdate")
+            .map_err(|error| MetadataError::new(path, error))?
+    {
+        let (local, offset) = parse_iso_datetime(&value)
+            .and_then(|(local, offset)| offset.map(|offset| (local, offset)))
+            .ok_or_else(|| {
+                MetadataError::new(
+                    path,
+                    invalid_data("QuickTime creation date must contain a valid UTC offset"),
+                )
+            })?;
+        output.push(DateTimeCandidate {
+            source: DateTimeSource::QuickTimeCreationDate,
+            value: DateTimeValue::LocalWithOffset { local, offset },
+        });
+    }
+    if let Some(value) = read_container_creation_time(&mut file, file_end)
+        .map_err(|error| MetadataError::new(path, error))?
+    {
+        output.push(DateTimeCandidate {
+            source: DateTimeSource::ContainerCreationTime,
+            value: DateTimeValue::AmbiguousContainer(value),
+        });
+    }
+    Ok(output)
+}
+
+fn read_quicktime_text_key<R: Read + Seek>(
+    reader: &mut R,
+    file_end: u64,
+    key: &[u8],
+) -> std::io::Result<Option<String>> {
+    const MAX_META_BYTES: u64 = 1 << 20;
+    const MAX_VALUE_BYTES: u64 = 4096;
+    let Some(moov) = find_atom(reader, b"moov", 0, file_end)? else {
+        return Ok(None);
+    };
+    let meta = if let Some(meta) = find_atom(reader, b"meta", moov.start, moov.end)? {
+        Some(meta)
+    } else if let Some(udta) = find_atom(reader, b"udta", moov.start, moov.end)? {
+        find_atom(reader, b"meta", udta.start, udta.end)?
+    } else {
+        None
+    };
+    let Some(meta) = meta else {
+        return Ok(None);
+    };
+    let Some(meta_bytes) = read_limited(reader, meta.start, meta.end, MAX_META_BYTES)? else {
+        return Ok(None);
+    };
+    let mut meta_reader = std::io::Cursor::new(meta_bytes);
+    let meta_end = meta_reader.get_ref().len() as u64;
+    let mut metadata_atoms = None;
+    for offset in [0, 4] {
+        if let (Some(keys), Some(ilst)) = (
+            find_atom(&mut meta_reader, b"keys", offset, meta_end)?,
+            find_atom(&mut meta_reader, b"ilst", offset, meta_end)?,
+        ) {
+            metadata_atoms = Some((keys, ilst));
+            break;
+        }
+    }
+    let Some((keys, ilst)) = metadata_atoms else {
+        return Ok(None);
+    };
+    let mut key_index = None;
+    for (index, entry) in atoms(&mut meta_reader, keys.start + 8, keys.end)?
+        .into_iter()
+        .enumerate()
+    {
+        let Some(name) = read_limited(&mut meta_reader, entry.start, entry.end, MAX_VALUE_BYTES)?
+        else {
+            continue;
+        };
+        if name == key {
+            key_index = u32::try_from(index + 1).ok();
+            break;
+        }
+    }
+    let Some(key_index) = key_index else {
+        return Ok(None);
+    };
+    let Some(item) = atoms(&mut meta_reader, ilst.start, ilst.end)?
+        .into_iter()
+        .find(|atom| u32::from_be_bytes(atom.kind) == key_index)
+    else {
+        return Ok(None);
+    };
+    let Some(data) = find_atom(&mut meta_reader, b"data", item.start, item.end)? else {
+        return Ok(None);
+    };
+    let Some(value) = read_limited(&mut meta_reader, data.start + 8, data.end, MAX_VALUE_BYTES)?
+    else {
+        return Ok(None);
+    };
+    let Ok(value) = std::str::from_utf8(&value) else {
+        return Ok(None);
+    };
+    let value = value.trim_matches(char::from(0)).trim();
+    Ok((!value.is_empty()).then(|| value.to_owned()))
+}
+
+fn read_container_creation_time<R: Read + Seek>(
+    reader: &mut R,
+    file_end: u64,
+) -> std::io::Result<Option<PrimitiveDateTime>> {
+    let Some(moov) = find_atom(reader, b"moov", 0, file_end)? else {
+        return Ok(None);
+    };
+    let Some(mvhd) = find_atom(reader, b"mvhd", moov.start, moov.end)? else {
+        return Ok(None);
+    };
+    let header = read_exact_at(reader, mvhd.start, 12)?;
+    let seconds = match header[0] {
+        0 => u64::from(u32::from_be_bytes(
+            header[4..8].try_into().expect("creation time"),
+        )),
+        1 => u64::from_be_bytes(header[4..12].try_into().expect("creation time")),
+        _ => return Ok(None),
+    };
+    if seconds == 0 {
+        return Ok(None);
+    }
+    let seconds = i64::try_from(seconds)
+        .map_err(|_| invalid_data("QuickTime container creation time exceeds i64"))?;
+    let epoch = Date::from_calendar_date(1904, Month::January, 1)
+        .expect("QuickTime epoch is valid")
+        .midnight();
+    epoch
+        .checked_add(Duration::seconds(seconds))
+        .map(Some)
+        .ok_or_else(|| invalid_data("QuickTime container creation time is out of range"))
+}
+
+fn xmp_datetime_candidates(path: &Path) -> Result<Vec<DateTimeCandidate>, MetadataError> {
+    let Some(bytes) = read_bounded_file(path, 4 * 1024 * 1024)? else {
+        return Ok(Vec::new());
+    };
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| MetadataError::new(path, invalid_data("XMP is not UTF-8")))?;
+    let mut output = Vec::new();
+    for (name, source) in [
+        ("photoshop:DateCreated", DateTimeSource::XmpDateCreated),
+        (
+            "exif:DateTimeOriginal",
+            DateTimeSource::XmpExifDateTimeOriginal,
+        ),
+    ] {
+        let Some(value) = xmp_property(text, name) else {
+            continue;
+        };
+        let Some((local, offset)) = parse_iso_datetime(value) else {
+            continue;
+        };
+        output.push(DateTimeCandidate {
+            source,
+            value: offset.map_or(DateTimeValue::Local(local), |offset| {
+                DateTimeValue::LocalWithOffset { local, offset }
+            }),
+        });
+    }
+    Ok(output)
+}
+
+fn xmp_property<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let attribute = format!("{name}=");
+    if let Some(start) = text.find(&attribute) {
+        let after = text.get(start + attribute.len()..)?;
+        let quote = after.chars().next()?;
+        if quote == '"' || quote == '\'' {
+            let value = &after[quote.len_utf8()..];
+            return value.find(quote).map(|end| value[..end].trim());
+        }
+    }
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let value = text.get(text.find(&open)? + open.len()..)?;
+    value.find(&close).map(|end| value[..end].trim())
+}
+
+fn filename_datetime_candidate(path: &Path) -> Option<DateTimeCandidate> {
+    let filename = path.file_name()?.to_str()?;
+    let stem = filename.rsplit_once('.').map_or(filename, |(stem, _)| stem);
+    let value = if let Some(value) = stem
+        .strip_prefix("IMG_")
+        .or_else(|| stem.strip_prefix("VID_"))
+        .and_then(parse_compact_filename_datetime)
+    {
+        DateTimeValue::Local(value)
+    } else if let Some(value) = stem
+        .strip_prefix("PXL_")
+        .and_then(parse_pixel_filename_datetime)
+    {
+        DateTimeValue::UtcWithoutLocalContext(value)
+    } else if let Some(date) = stem
+        .strip_prefix("IMG-")
+        .or_else(|| stem.strip_prefix("VID-"))
+        .and_then(parse_whatsapp_filename_date)
+    {
+        DateTimeValue::DateOnly(date)
+    } else if let Some(value) = stem
+        .strip_prefix("Screenshot ")
+        .and_then(parse_screenshot_filename_datetime)
+    {
+        DateTimeValue::Local(value)
+    } else {
+        return None;
+    };
+    Some(DateTimeCandidate {
+        source: DateTimeSource::FilenamePattern,
+        value,
+    })
+}
+
+fn parse_compact_filename_datetime(value: &str) -> Option<PrimitiveDateTime> {
+    const FORMAT: &[time::format_description::FormatItem<'_>] =
+        format_description!("[year][month][day]_[hour][minute][second]");
+    PrimitiveDateTime::parse(value, FORMAT).ok()
+}
+
+fn parse_pixel_filename_datetime(value: &str) -> Option<PrimitiveDateTime> {
+    if value.len() < 18
+        || value.as_bytes().get(8) != Some(&b'_')
+        || !value[15..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    parse_compact_filename_datetime(&value[..15])
+}
+
+fn parse_whatsapp_filename_date(value: &str) -> Option<Date> {
+    const FORMAT: &[time::format_description::FormatItem<'_>] =
+        format_description!("[year][month][day]");
+    if value.len() < 11 || value.as_bytes().get(8..11) != Some(b"-WA") {
+        return None;
+    }
+    Date::parse(&value[..8], FORMAT).ok()
+}
+
+fn parse_screenshot_filename_datetime(value: &str) -> Option<PrimitiveDateTime> {
+    const FORMAT: &[time::format_description::FormatItem<'_>] =
+        format_description!("[year]-[month]-[day] at [hour].[minute].[second]");
+    PrimitiveDateTime::parse(value, FORMAT).ok()
+}
+
+fn parse_exif_datetime(value: &str) -> Option<PrimitiveDateTime> {
+    const FORMAT: &[time::format_description::FormatItem<'_>] =
+        format_description!("[year]:[month]:[day] [hour]:[minute]:[second]");
+    PrimitiveDateTime::parse(value, FORMAT).ok()
+}
+
+fn parse_iso_datetime(value: &str) -> Option<(PrimitiveDateTime, Option<UtcOffset>)> {
+    if let Ok(value) = OffsetDateTime::parse(value, &Iso8601::DEFAULT) {
+        return Some((
+            PrimitiveDateTime::new(
+                value.date(),
+                value.time().replace_nanosecond(0).expect("zero is valid"),
+            ),
+            Some(value.offset()),
+        ));
+    }
+    PrimitiveDateTime::parse(value, &Iso8601::DEFAULT)
+        .ok()
+        .map(|value| {
+            (
+                value
+                    .replace_nanosecond(0)
+                    .expect("zero nanoseconds are valid"),
+                None,
+            )
+        })
 }
 
 fn original(media: MediaKind, role: OriginalRole) -> AssetKind {
@@ -744,76 +1267,10 @@ fn read_quicktime_identifier<R: Read + Seek>(
     reader: &mut R,
     file_end: u64,
 ) -> std::io::Result<Option<String>> {
-    const KEY: &[u8] = b"com.apple.quicktime.content.identifier";
-    const FULL_BOX_PREFIX: u64 = 4;
-    const KEYS_PREFIX: u64 = 8;
-    const DATA_PREFIX: u64 = 8;
-    const MAX_META_BYTES: u64 = 1 << 20;
-    const MAX_VALUE_BYTES: u64 = 4096;
-
-    let Some(moov) = find_atom(reader, b"moov", 0, file_end)? else {
-        return Ok(None);
-    };
-    let meta = if let Some(meta) = find_atom(reader, b"meta", moov.start, moov.end)? {
-        Some(meta)
-    } else if let Some(udta) = find_atom(reader, b"udta", moov.start, moov.end)? {
-        find_atom(reader, b"meta", udta.start, udta.end)?
-    } else {
-        None
-    };
-    let Some(meta) = meta else {
-        return Ok(None);
-    };
-    let Some(meta_bytes) = read_limited(reader, meta.start, meta.end, MAX_META_BYTES)? else {
-        return Ok(None);
-    };
-    let mut meta_reader = std::io::Cursor::new(meta_bytes);
-    let meta_end = meta_reader.get_ref().len() as u64;
-    let mut metadata_atoms = None;
-    for offset in [0, FULL_BOX_PREFIX] {
-        if let (Some(keys), Some(ilst)) = (
-            find_atom(&mut meta_reader, b"keys", offset, meta_end)?,
-            find_atom(&mut meta_reader, b"ilst", offset, meta_end)?,
-        ) {
-            metadata_atoms = Some((keys, ilst));
-            break;
-        }
-    }
-    let Some((keys, ilst)) = metadata_atoms else {
-        return Ok(None);
-    };
-    let mut key_index = None;
-    let keys_start = checked_add_u64(keys.start, KEYS_PREFIX, "QuickTime keys entries")?;
-    for (index, entry) in atoms(&mut meta_reader, keys_start, keys.end)?
-        .into_iter()
-        .enumerate()
-    {
-        let Some(name) = read_limited(&mut meta_reader, entry.start, entry.end, MAX_VALUE_BYTES)?
-        else {
-            continue;
-        };
-        if name == KEY {
-            key_index = u32::try_from(index + 1).ok();
-            break;
-        }
-    }
-    let Some(key_index) = key_index else {
-        return Ok(None);
-    };
-    let item = atoms(&mut meta_reader, ilst.start, ilst.end)?
-        .into_iter()
-        .find(|atom| u32::from_be_bytes(atom.kind) == key_index);
-    let Some(item) = item else {
-        return Ok(None);
-    };
-    let Some(data) = find_atom(&mut meta_reader, b"data", item.start, item.end)? else {
-        return Ok(None);
-    };
-    let data_start = checked_add_u64(data.start, DATA_PREFIX, "QuickTime data value")?;
-    let Some(value) = read_limited(&mut meta_reader, data_start, data.end, MAX_VALUE_BYTES)? else {
-        return Ok(None);
-    };
-    Ok(normalized_identifier(&value))
+    Ok(
+        read_quicktime_text_key(reader, file_end, b"com.apple.quicktime.content.identifier")?
+            .and_then(|value| normalized_identifier(value.as_bytes())),
+    )
 }
 
 fn invalid_data(message: impl Into<String>) -> std::io::Error {
@@ -1180,6 +1637,123 @@ mod tests {
         [atom(*b"ftyp", b"qt  "), atom(*b"moov", &moov_body)].concat()
     }
 
+    fn normalized_tiff(identifier: &str) -> Vec<u8> {
+        fn entry(tag: u16, kind: u16, count: u32, value: u32) -> Vec<u8> {
+            [
+                tag.to_be_bytes().as_slice(),
+                kind.to_be_bytes().as_slice(),
+                count.to_be_bytes().as_slice(),
+                value.to_be_bytes().as_slice(),
+            ]
+            .concat()
+        }
+
+        let maker_note = apple_maker_note(identifier);
+        let make = b"Canon\0";
+        let model = b"Camera R5\0";
+        let original = b"2024:07:09 10:11:12\0";
+        let digitized = b"2024:07:09 10:11:13\0";
+        let serial = b"SN123\0";
+        let ifd0_values = 8 + 2 + 3 * 12 + 4;
+        let make_offset = ifd0_values;
+        let model_offset = make_offset + make.len();
+        let exif_offset = model_offset + model.len();
+        let exif_values = exif_offset + 2 + 4 * 12 + 4;
+        let original_offset = exif_values;
+        let digitized_offset = original_offset + original.len();
+        let serial_offset = digitized_offset + digitized.len();
+        let maker_note_offset = serial_offset + serial.len();
+
+        let mut tiff = b"MM\0\x2a".to_vec();
+        tiff.extend_from_slice(&8_u32.to_be_bytes());
+        tiff.extend_from_slice(&3_u16.to_be_bytes());
+        tiff.extend_from_slice(&entry(0x010f, 2, make.len() as u32, make_offset as u32));
+        tiff.extend_from_slice(&entry(0x0110, 2, model.len() as u32, model_offset as u32));
+        tiff.extend_from_slice(&entry(0x8769, 4, 1, exif_offset as u32));
+        tiff.extend_from_slice(&0_u32.to_be_bytes());
+        tiff.extend_from_slice(make);
+        tiff.extend_from_slice(model);
+        tiff.extend_from_slice(&4_u16.to_be_bytes());
+        tiff.extend_from_slice(&entry(
+            0x9003,
+            2,
+            original.len() as u32,
+            original_offset as u32,
+        ));
+        tiff.extend_from_slice(&entry(
+            0x9004,
+            2,
+            digitized.len() as u32,
+            digitized_offset as u32,
+        ));
+        tiff.extend_from_slice(&entry(0xa431, 2, serial.len() as u32, serial_offset as u32));
+        tiff.extend_from_slice(&entry(
+            0x927c,
+            7,
+            maker_note.len() as u32,
+            maker_note_offset as u32,
+        ));
+        tiff.extend_from_slice(&0_u32.to_be_bytes());
+        tiff.extend_from_slice(original);
+        tiff.extend_from_slice(digitized);
+        tiff.extend_from_slice(serial);
+        tiff.extend_from_slice(&maker_note);
+        tiff
+    }
+
+    fn jpeg_with_tiff(tiff: &[u8]) -> Vec<u8> {
+        let mut segment = b"Exif\0\0".to_vec();
+        segment.extend_from_slice(tiff);
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&u16::try_from(segment.len() + 2).unwrap().to_be_bytes());
+        jpeg.extend_from_slice(&segment);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        jpeg
+    }
+
+    fn quicktime_with_normalized_dates(
+        identifier: &str,
+        creation_date: &str,
+        container: PrimitiveDateTime,
+    ) -> Vec<u8> {
+        let keys = [
+            &[0, 0, 0, 0][..],
+            &2_u32.to_be_bytes(),
+            &atom(*b"mdta", b"com.apple.quicktime.content.identifier"),
+            &atom(*b"mdta", b"com.apple.quicktime.creationdate"),
+        ]
+        .concat();
+        let data = |value: &[u8]| {
+            let mut body = vec![0, 0, 0, 1, 0, 0, 0, 0];
+            body.extend_from_slice(value);
+            atom(*b"data", &body)
+        };
+        let ilst = atom(
+            *b"ilst",
+            &[
+                atom(1_u32.to_be_bytes(), &data(identifier.as_bytes())),
+                atom(2_u32.to_be_bytes(), &data(creation_date.as_bytes())),
+            ]
+            .concat(),
+        );
+        let epoch = Date::from_calendar_date(1904, Month::January, 1)
+            .unwrap()
+            .midnight();
+        let seconds = u32::try_from((container - epoch).whole_seconds()).unwrap();
+        let mut mvhd = vec![0, 0, 0, 0];
+        mvhd.extend_from_slice(&seconds.to_be_bytes());
+        mvhd.extend_from_slice(&seconds.to_be_bytes());
+        let moov = atom(
+            *b"moov",
+            &[
+                atom(*b"mvhd", &mvhd),
+                atom(*b"meta", &[atom(*b"keys", &keys), ilst].concat()),
+            ]
+            .concat(),
+        );
+        [atom(*b"ftyp", b"qt  "), moov].concat()
+    }
+
     fn heif_with_maker_note(identifier: &str) -> Vec<u8> {
         let jpeg = jpeg_with_maker_note(identifier);
         let tiff_start = jpeg
@@ -1424,6 +1998,151 @@ mod tests {
     fn malformed_relationship_metadata_is_ignored_safely() {
         assert_eq!(apple_maker_note_content_identifier(b"Apple iOS\0"), None);
         assert!(read_quicktime_identifier(&mut Cursor::new(b"not media".to_vec()), 9).is_err());
+    }
+
+    #[test]
+    fn normalizes_tiff_datetimes_camera_and_apple_identifier() {
+        let temporary = TempDir::new().unwrap();
+        let tiff = normalized_tiff(IDENTIFIER);
+        for (name, bytes) in [
+            ("IMG_0001.JPG", jpeg_with_tiff(&tiff)),
+            ("IMG_0001.DNG", tiff),
+        ] {
+            let path = temporary.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            let metadata = normalized_metadata(&path).unwrap();
+            assert_eq!(
+                metadata.camera,
+                CameraIdentity {
+                    make: Some("Canon".into()),
+                    model: Some("Camera R5".into()),
+                    serial_number: Some("SN123".into()),
+                }
+            );
+            assert_eq!(
+                metadata.apple_content_identifier.as_deref(),
+                Some(IDENTIFIER)
+            );
+            assert_eq!(
+                metadata.datetime_candidates,
+                [
+                    DateTimeCandidate {
+                        source: DateTimeSource::ExifDateTimeOriginal,
+                        value: DateTimeValue::Local(
+                            parse_exif_datetime("2024:07:09 10:11:12").unwrap()
+                        ),
+                    },
+                    DateTimeCandidate {
+                        source: DateTimeSource::ExifDateTimeDigitized,
+                        value: DateTimeValue::Local(
+                            parse_exif_datetime("2024:07:09 10:11:13").unwrap()
+                        ),
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_quicktime_offset_and_ambiguous_container_dates() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("clip.mov");
+        let container = parse_iso_datetime("2024-08-03T13:30:45").unwrap().0;
+        fs::write(
+            &path,
+            quicktime_with_normalized_dates(IDENTIFIER, "2024-08-03T15:30:45.999+0200", container),
+        )
+        .unwrap();
+
+        let metadata = normalized_metadata(&path).unwrap();
+        assert_eq!(
+            metadata.apple_content_identifier.as_deref(),
+            Some(IDENTIFIER)
+        );
+        assert_eq!(
+            metadata.datetime_candidates,
+            [
+                DateTimeCandidate {
+                    source: DateTimeSource::QuickTimeCreationDate,
+                    value: DateTimeValue::LocalWithOffset {
+                        local: parse_iso_datetime("2024-08-03T15:30:45").unwrap().0,
+                        offset: UtcOffset::from_hms(2, 0, 0).unwrap(),
+                    },
+                },
+                DateTimeCandidate {
+                    source: DateTimeSource::ContainerCreationTime,
+                    value: DateTimeValue::AmbiguousContainer(container),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_owned_xmp_datetime_candidates() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("IMG_0001.JPG.xmp");
+        fs::write(
+            &path,
+            br#"<rdf:Description photoshop:DateCreated="2024-07-09T10:11:12+02:00">
+                <exif:DateTimeOriginal>2024-07-09T08:11:12Z</exif:DateTimeOriginal>
+            </rdf:Description>"#,
+        )
+        .unwrap();
+
+        let metadata = normalized_metadata(&path).unwrap();
+        assert_eq!(metadata.datetime_candidates.len(), 2);
+        assert_eq!(
+            metadata.datetime_candidates[0].source,
+            DateTimeSource::XmpDateCreated
+        );
+        assert!(matches!(
+            metadata.datetime_candidates[0].value,
+            DateTimeValue::LocalWithOffset { .. }
+        ));
+        assert_eq!(
+            metadata.datetime_candidates[1].source,
+            DateTimeSource::XmpExifDateTimeOriginal
+        );
+    }
+
+    #[test]
+    fn recognizes_filename_datetime_proposals() {
+        let temporary = TempDir::new().unwrap();
+        for (name, expected) in [
+            (
+                "IMG_20190714_153012.jpg",
+                DateTimeValue::Local(parse_iso_datetime("2019-07-14T15:30:12").unwrap().0),
+            ),
+            (
+                "VID_20190714_153012.mp4",
+                DateTimeValue::Local(parse_iso_datetime("2019-07-14T15:30:12").unwrap().0),
+            ),
+            (
+                "PXL_20190714_153012345.jpg",
+                DateTimeValue::UtcWithoutLocalContext(
+                    parse_iso_datetime("2019-07-14T15:30:12").unwrap().0,
+                ),
+            ),
+            (
+                "IMG-20190714-WA0001.jpg",
+                DateTimeValue::DateOnly(parse_whatsapp_filename_date("20190714-WA").unwrap()),
+            ),
+            (
+                "Screenshot 2019-07-14 at 15.30.12.png",
+                DateTimeValue::Local(parse_iso_datetime("2019-07-14T15:30:12").unwrap().0),
+            ),
+        ] {
+            let path = temporary.path().join(name);
+            fs::write(&path, []).unwrap();
+            let metadata = normalized_metadata(&path).unwrap();
+            assert_eq!(
+                metadata.datetime_candidates.last(),
+                Some(&DateTimeCandidate {
+                    source: DateTimeSource::FilenamePattern,
+                    value: expected,
+                })
+            );
+        }
     }
 
     #[test]

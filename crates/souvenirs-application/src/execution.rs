@@ -14,15 +14,17 @@ use souvenirs_domain::catalog::{
     SourcePathOrderKey,
 };
 use souvenirs_domain::names::CatalogLabel;
+use souvenirs_domain::relationships::sidecar_suffix_for_item;
 use souvenirs_storage::{
     read_operation_records, CatalogLayout, CatalogLock, CopyExpectation,
     ManifestReplacementRequest, OperationJournal, OperationRecord, RecoveryCopy, RecoveryDirectory,
     RecoveryManifest, RecoveryMode, RecoveryRequest,
 };
-use time::{macros::format_description, Date, PrimitiveDateTime, Time};
+use time::Date;
 
 use crate::{
-    CatalogService, DateResolution, DestinationMode, ImportPlanningService, ImportReviewRequest,
+    dated_collection_components, inspect_source, CatalogService, DateResolution, DestinationMode,
+    ImportPlanningService, ImportReviewRequest,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,41 +100,48 @@ impl ImportExecutionService {
             return Err(ImportExecutionError::DecisionRequired);
         }
 
-        let accepted_date = Date::parse(
-            &request.accepted_date,
-            format_description!("[year]-[month]-[day]"),
-        )
-        .map_err(|_| ImportExecutionError::InvalidDate(request.accepted_date.clone()))?;
         let collection = CatalogLabel::new(&request.collection_name)
             .map_err(|error| ImportExecutionError::InvalidCollection(error.to_string()))?;
-        let year = accepted_date.year().to_string();
-        let collection_directory = format!("{accepted_date} {collection}");
+        let inspected = inspect_source(&request.source_path, request.date_resolution)
+            .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
+        let range_start = inspected
+            .items
+            .iter()
+            .map(|item| item.accepted.wall_clock.date())
+            .min()
+            .ok_or(ImportExecutionError::NoSupportedMedia)?;
+        let range_end = inspected
+            .items
+            .iter()
+            .map(|item| item.accepted.wall_clock.date())
+            .max()
+            .expect("a range start has a range end");
+        let (year, collection_directory) =
+            dated_collection_components(range_start, range_end, &collection)
+                .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
         let collection_path = request.catalog_path.join(&year).join(&collection_directory);
-        let mut source_files = Vec::new();
-        collect_media_files(
-            &request.source_path,
-            &request.source_path,
-            &mut source_files,
-        )?;
-        source_files.sort();
-        let accepted_datetime = PrimitiveDateTime::new(
-            accepted_date,
-            Time::from_hms(12, 0, 0).expect("noon is valid"),
-        );
+        let dates = inspected
+            .items
+            .iter()
+            .map(|item| item.accepted.wall_clock.date())
+            .collect::<BTreeSet<_>>();
+        let existing = dates
+            .iter()
+            .map(|date| {
+                existing_counters(&collection_path, *date).map(|counters| (*date, counters))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         let allocations = allocate_collection_counters(
-            &BTreeMap::from([(
-                accepted_date,
-                existing_counters(&collection_path, accepted_date)?,
-            )]),
-            source_files
+            &existing,
+            inspected
+                .items
                 .iter()
-                .map(|path| NewItemCounterRequest {
-                    item_id: path.to_string_lossy().into_owned(),
+                .map(|item| NewItemCounterRequest {
+                    item_id: item.primary.id.as_str().to_owned(),
                     source_path_order_key: SourcePathOrderKey::new(
-                        path.components()
-                            .map(|part| part.as_os_str().to_string_lossy().into_owned()),
+                        item.primary.path.components().to_vec(),
                     ),
-                    accepted_datetime,
+                    accepted_datetime: item.accepted.wall_clock,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -142,35 +151,81 @@ impl ImportExecutionService {
             .map(|allocation| (allocation.item_id, allocation.counter))
             .collect::<BTreeMap<_, _>>();
 
-        let mut copies = Vec::with_capacity(source_files.len());
+        let mut copies = Vec::new();
         let mut manifest = existing_manifest(&collection_path.join("SHA256SUMS"))?;
-        for (index, relative_source) in source_files.into_iter().enumerate() {
-            let source = request.source_path.join(&relative_source);
-            let extension = source
-                .extension()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| ImportExecutionError::InvalidSource(source.clone()))?
-                .to_ascii_lowercase();
-            let item_id = relative_source.to_string_lossy();
-            let stem = CanonicalStem::new(accepted_datetime, counters[item_id.as_ref()])
-                .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
-            let filename = CanonicalFilename::new(&stem, &extension)
-                .map_err(|error| ImportExecutionError::Planning(error.to_string()))?
-                .to_string();
-            let (digest, size_bytes) = digest_file(&source)?;
-            manifest.insert(filename.clone(), digest.clone());
-            copies.push(ExecutionCopy {
-                step_id: format!("copy-{}", index + 1),
-                source,
-                destination: PathBuf::from(&year)
-                    .join(&collection_directory)
-                    .join(filename),
-                digest,
-                size_bytes,
-            });
+        let relative_collection_path = PathBuf::from(&year).join(&collection_directory);
+        for item in inspected.items {
+            let stem =
+                CanonicalStem::new(item.accepted.wall_clock, counters[item.primary.id.as_str()])
+                    .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
+            for original in std::iter::once(&item.primary).chain(item.companion.iter()) {
+                let filename = CanonicalFilename::new(&stem, &original.extension)
+                    .map_err(|error| ImportExecutionError::Planning(error.to_string()))?
+                    .to_string();
+                push_execution_copy(
+                    &mut copies,
+                    &mut manifest,
+                    &request.source_path,
+                    &relative_collection_path,
+                    original,
+                    filename,
+                    true,
+                )?;
+            }
+            for sidecar in &item.sidecars {
+                let suffix = sidecar_suffix_for_item(
+                    sidecar,
+                    std::iter::once(&item.primary).chain(item.companion.iter()),
+                )
+                .ok_or_else(|| {
+                    ImportExecutionError::Planning(format!(
+                        "resolved sidecar has no preserved suffix: {}",
+                        sidecar.path
+                    ))
+                })?;
+                push_execution_copy(
+                    &mut copies,
+                    &mut manifest,
+                    &request.source_path,
+                    &relative_collection_path,
+                    sidecar,
+                    format!("{stem}{suffix}"),
+                    false,
+                )?;
+            }
         }
         if copies.is_empty() {
             return Err(ImportExecutionError::NoSupportedMedia);
+        }
+
+        fn push_execution_copy(
+            copies: &mut Vec<ExecutionCopy>,
+            manifest: &mut BTreeMap<String, String>,
+            source_root: &Path,
+            relative_collection_path: &Path,
+            file: &souvenirs_domain::source::SourceFile,
+            filename: String,
+            include_in_manifest: bool,
+        ) -> Result<(), ImportExecutionError> {
+            let source = file
+                .path
+                .components()
+                .iter()
+                .fold(source_root.to_path_buf(), |path, component| {
+                    path.join(component)
+                });
+            let (digest, size_bytes) = digest_file(&source)?;
+            if include_in_manifest {
+                manifest.insert(filename.clone(), digest.clone());
+            }
+            copies.push(ExecutionCopy {
+                step_id: format!("copy-{}", copies.len() + 1),
+                source,
+                destination: relative_collection_path.join(filename),
+                digest,
+                size_bytes,
+            });
+            Ok(())
         }
 
         let manifest_path = PathBuf::from(&year)
@@ -491,44 +546,6 @@ impl fmt::Display for ImportExecutionError {
             }
         }
     }
-}
-
-fn collect_media_files(
-    root: &Path,
-    directory: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<(), ImportExecutionError> {
-    let entries = fs::read_dir(directory).map_err(|source| ImportExecutionError::Io {
-        path: directory.to_path_buf(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| ImportExecutionError::Io {
-            path: directory.to_path_buf(),
-            source,
-        })?;
-        let file_type = entry
-            .file_type()
-            .map_err(|source| ImportExecutionError::Io {
-                path: entry.path(),
-                source,
-            })?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_media_files(root, &entry.path(), files)?;
-        } else if file_type.is_file() && super::media_kind(&entry.path()).is_some() {
-            files.push(
-                entry
-                    .path()
-                    .strip_prefix(root)
-                    .expect("walked source remains below root")
-                    .to_path_buf(),
-            );
-        }
-    }
-    Ok(())
 }
 
 fn unfinished_plan(
@@ -872,8 +889,8 @@ mod tests {
             .join("2026-10-10 Recovery Import");
         let manifest = fs::read_to_string(collection.join("SHA256SUMS")).unwrap();
         assert_eq!(manifest.lines().count(), 2);
-        assert!(manifest.contains("2026-10-10 12-00-00 001.jpg"));
-        assert!(manifest.contains("2026-10-10 12-00-00 002.jpg"));
+        assert!(manifest.contains("2026-10-10 10-11-12 001.jpg"));
+        assert!(manifest.contains("2026-10-10 10-11-13 002.jpg"));
 
         let mut existing_request = fixture.request();
         existing_request.destination_mode = DestinationMode::Existing;
@@ -881,8 +898,8 @@ mod tests {
         ImportExecutionService::execute(prepared, |_| {}).unwrap();
         let manifest = fs::read_to_string(collection.join("SHA256SUMS")).unwrap();
         assert_eq!(manifest.lines().count(), 4);
-        assert!(manifest.contains("2026-10-10 12-00-00 003.jpg"));
-        assert!(manifest.contains("2026-10-10 12-00-00 004.jpg"));
+        assert!(manifest.contains("2026-10-10 10-11-12 003.jpg"));
+        assert!(manifest.contains("2026-10-10 10-11-13 004.jpg"));
     }
 
     #[test]
@@ -978,7 +995,7 @@ mod tests {
             .unwrap();
         drop(journal);
         lock.release().unwrap();
-        fs::write(fixture.source.join("one.jpg"), b"changed").unwrap();
+        fs::write(fixture.source.join("IMG_20261010_101112.jpg"), b"changed").unwrap();
 
         let error = ImportRecoveryService::recover(
             &fixture.catalog,
@@ -997,7 +1014,11 @@ mod tests {
         let prepared = ImportExecutionService::prepare(fixture.request()).unwrap();
         let operation_id = prepared.operation_id().to_owned();
         let destination = fixture.catalog.join(&prepared.plan.copies[0].destination);
-        fs::write(fixture.source.join("one.jpg"), b"changed after planning").unwrap();
+        fs::write(
+            fixture.source.join("IMG_20261010_101112.jpg"),
+            b"changed after planning",
+        )
+        .unwrap();
 
         let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
 
@@ -1334,8 +1355,8 @@ mod tests {
         let source = temporary.path().join("source");
         fs::create_dir(&catalog).unwrap();
         fs::create_dir(&source).unwrap();
-        fs::write(source.join("one.jpg"), b"one").unwrap();
-        fs::write(source.join("two.jpg"), b"two").unwrap();
+        fs::write(source.join("IMG_20261010_101112.jpg"), b"one").unwrap();
+        fs::write(source.join("IMG_20261010_101113.jpg"), b"two").unwrap();
         CatalogService::create(&catalog, "Test Catalog").unwrap();
         Fixture {
             _temporary: temporary,

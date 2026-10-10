@@ -292,6 +292,47 @@
         "convert_from_utc"
       ]
     },
+    "ImportDateSource": {
+      "type": "string",
+      "enum": [
+        "exif_date_time_original",
+        "exif_date_time_digitized",
+        "quick_time_creation_date",
+        "xmp_date_created",
+        "xmp_exif_date_time_original",
+        "container_creation_time",
+        "google_takeout_photo_taken_time",
+        "filename_pattern"
+      ]
+    },
+    "ImportDateSourceSummary": {
+      "type": "object",
+      "required": [
+        "item_count",
+        "source",
+        "state"
+      ],
+      "properties": {
+        "item_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "source": {
+          "$ref": "#/definitions/ImportDateSource"
+        },
+        "state": {
+          "$ref": "#/definitions/ImportDateState"
+        }
+      }
+    },
+    "ImportDateState": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "needs_confirmation"
+      ]
+    },
     "ImportDestinationMode": {
       "type": "string",
       "enum": [
@@ -352,25 +393,38 @@
     "ImportScanResult": {
       "type": "object",
       "required": [
+        "datetime_sources",
         "file_count",
         "media_count",
+        "pending_item_count",
         "photo_count",
         "source_name",
         "source_path",
-        "suggested_accepted_date",
         "suggested_collection_name",
         "total_bytes",
         "uncertain_time_count",
+        "unresolved_item_count",
         "unsupported_count",
         "video_count"
       ],
       "properties": {
+        "datetime_sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ImportDateSourceSummary"
+          }
+        },
         "file_count": {
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
         },
         "media_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "pending_item_count": {
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
@@ -387,10 +441,19 @@
           "type": "string"
         },
         "suggested_accepted_date": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "suggested_collection_name": {
           "type": "string"
+        },
+        "suggested_range_end": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "total_bytes": {
           "type": "integer",
@@ -398,6 +461,11 @@
           "minimum": 0.0
         },
         "uncertain_time_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "unresolved_item_count": {
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
@@ -719,26 +787,39 @@
         {
           "type": "object",
           "required": [
+            "datetime_sources",
             "file_count",
             "media_count",
+            "pending_item_count",
             "photo_count",
             "source_name",
             "source_path",
-            "suggested_accepted_date",
             "suggested_collection_name",
             "total_bytes",
             "type",
             "uncertain_time_count",
+            "unresolved_item_count",
             "unsupported_count",
             "video_count"
           ],
           "properties": {
+            "datetime_sources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ImportDateSourceSummary"
+              }
+            },
             "file_count": {
               "type": "integer",
               "format": "uint",
               "minimum": 0.0
             },
             "media_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "pending_item_count": {
               "type": "integer",
               "format": "uint",
               "minimum": 0.0
@@ -755,10 +836,19 @@
               "type": "string"
             },
             "suggested_accepted_date": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "suggested_collection_name": {
               "type": "string"
+            },
+            "suggested_range_end": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "total_bytes": {
               "type": "integer",
@@ -772,6 +862,11 @@
               ]
             },
             "uncertain_time_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "unresolved_item_count": {
               "type": "integer",
               "format": "uint",
               "minimum": 0.0

@@ -3,12 +3,13 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
 use souvenirs_protocol::{
-    CancellationAccepted, CatalogResult, EngineMessage, HandshakeResult, ImportReviewResult,
-    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
-    OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
-    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
-    CATALOG_VALIDATE_METHOD, COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD,
-    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    CancellationAccepted, CatalogResult, EngineMessage, HandshakeResult, ImportDateSource,
+    ImportDateSourceSummary, ImportDateState, ImportReviewResult, ImportScanResult,
+    OperationAccepted, OperationEvent, OperationEventPayload, OperationInspectionResult,
+    ProtocolError, Request, RequestPayload, ResponseResult, UnfinishedOperationResult,
+    CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD,
+    COMPATIBLE_CLIENT_VERSION, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, OPERATION_INSPECT_METHOD,
+    PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 fn main() {
@@ -612,7 +613,22 @@ fn fake_scan(source_path: String) -> ImportScanResult {
         uncertain_time_count: 4,
         total_bytes: 41_000_000_000,
         suggested_collection_name: "Dolomites".to_owned(),
-        suggested_accepted_date: "2026-10-10".to_owned(),
+        suggested_accepted_date: Some("2026-10-10".to_owned()),
+        suggested_range_end: Some("2026-10-12".to_owned()),
+        pending_item_count: 4,
+        unresolved_item_count: 0,
+        datetime_sources: vec![
+            ImportDateSourceSummary {
+                source: ImportDateSource::ExifDateTimeOriginal,
+                state: ImportDateState::Accepted,
+                item_count: 8,
+            },
+            ImportDateSourceSummary {
+                source: ImportDateSource::ContainerCreationTime,
+                state: ImportDateState::NeedsConfirmation,
+                item_count: 4,
+            },
+        ],
     }
 }
 
@@ -625,7 +641,7 @@ fn import_scan_result(
         output,
         &EngineMessage::success(
             request_id,
-            ResponseResult::ImportScan(fake_scan(source_path)),
+            ResponseResult::ImportScan(Box::new(fake_scan(source_path))),
         ),
     )
 }
