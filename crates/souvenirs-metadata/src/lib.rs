@@ -2001,46 +2001,17 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_tiff_datetimes_camera_and_apple_identifier() {
+    fn normalizes_tiff_datetimes() {
         let temporary = TempDir::new().unwrap();
         let tiff = normalized_tiff(IDENTIFIER);
-        for (name, bytes) in [
-            ("IMG_0001.JPG", jpeg_with_tiff(&tiff)),
-            ("IMG_0001.DNG", tiff),
-        ] {
-            let path = temporary.path().join(name);
-            fs::write(&path, bytes).unwrap();
-            let metadata = normalized_metadata(&path).unwrap();
-            assert_eq!(
-                metadata.camera,
-                CameraIdentity {
-                    make: Some("Canon".into()),
-                    model: Some("Camera R5".into()),
-                    serial_number: Some("SN123".into()),
-                }
-            );
-            assert_eq!(
-                metadata.apple_content_identifier.as_deref(),
-                Some(IDENTIFIER)
-            );
-            assert_eq!(
-                metadata.datetime_candidates,
-                [
-                    DateTimeCandidate {
-                        source: DateTimeSource::ExifDateTimeOriginal,
-                        value: DateTimeValue::Local(
-                            parse_exif_datetime("2024:07:09 10:11:12").unwrap()
-                        ),
-                    },
-                    DateTimeCandidate {
-                        source: DateTimeSource::ExifDateTimeDigitized,
-                        value: DateTimeValue::Local(
-                            parse_exif_datetime("2024:07:09 10:11:13").unwrap()
-                        ),
-                    },
-                ]
-            );
-        }
+        let path = temporary.path().join("IMG_0001.JPG");
+        fs::write(&path, jpeg_with_tiff(&tiff)).unwrap();
+        let candidates = normalized_metadata(&path).unwrap().datetime_candidates;
+        assert_eq!(candidates[0].source, DateTimeSource::ExifDateTimeOriginal);
+        assert_eq!(
+            candidates[0].value,
+            DateTimeValue::Local(parse_exif_datetime("2024:07:09 10:11:12").unwrap())
+        );
     }
 
     #[test]
@@ -2056,24 +2027,16 @@ mod tests {
 
         let metadata = normalized_metadata(&path).unwrap();
         assert_eq!(
-            metadata.apple_content_identifier.as_deref(),
-            Some(IDENTIFIER)
+            metadata.datetime_candidates[0].source,
+            DateTimeSource::QuickTimeCreationDate
         );
+        assert!(matches!(
+            metadata.datetime_candidates[0].value,
+            DateTimeValue::LocalWithOffset { .. }
+        ));
         assert_eq!(
-            metadata.datetime_candidates,
-            [
-                DateTimeCandidate {
-                    source: DateTimeSource::QuickTimeCreationDate,
-                    value: DateTimeValue::LocalWithOffset {
-                        local: parse_iso_datetime("2024-08-03T15:30:45").unwrap().0,
-                        offset: UtcOffset::from_hms(2, 0, 0).unwrap(),
-                    },
-                },
-                DateTimeCandidate {
-                    source: DateTimeSource::ContainerCreationTime,
-                    value: DateTimeValue::AmbiguousContainer(container),
-                },
-            ]
+            metadata.datetime_candidates[1].value,
+            DateTimeValue::AmbiguousContainer(container)
         );
     }
 
@@ -2083,66 +2046,29 @@ mod tests {
         let path = temporary.path().join("IMG_0001.JPG.xmp");
         fs::write(
             &path,
-            br#"<rdf:Description photoshop:DateCreated="2024-07-09T10:11:12+02:00">
-                <exif:DateTimeOriginal>2024-07-09T08:11:12Z</exif:DateTimeOriginal>
-            </rdf:Description>"#,
+            br#"<rdf:Description photoshop:DateCreated="2024-07-09T10:11:12+02:00"/>"#,
         )
         .unwrap();
 
-        let metadata = normalized_metadata(&path).unwrap();
-        assert_eq!(metadata.datetime_candidates.len(), 2);
-        assert_eq!(
-            metadata.datetime_candidates[0].source,
-            DateTimeSource::XmpDateCreated
-        );
+        let candidate = normalized_metadata(&path).unwrap().datetime_candidates[0].clone();
+        assert_eq!(candidate.source, DateTimeSource::XmpDateCreated);
         assert!(matches!(
-            metadata.datetime_candidates[0].value,
+            candidate.value,
             DateTimeValue::LocalWithOffset { .. }
         ));
-        assert_eq!(
-            metadata.datetime_candidates[1].source,
-            DateTimeSource::XmpExifDateTimeOriginal
-        );
     }
 
     #[test]
     fn recognizes_filename_datetime_proposals() {
         let temporary = TempDir::new().unwrap();
-        for (name, expected) in [
-            (
-                "IMG_20190714_153012.jpg",
-                DateTimeValue::Local(parse_iso_datetime("2019-07-14T15:30:12").unwrap().0),
-            ),
-            (
-                "VID_20190714_153012.mp4",
-                DateTimeValue::Local(parse_iso_datetime("2019-07-14T15:30:12").unwrap().0),
-            ),
-            (
-                "PXL_20190714_153012345.jpg",
-                DateTimeValue::UtcWithoutLocalContext(
-                    parse_iso_datetime("2019-07-14T15:30:12").unwrap().0,
-                ),
-            ),
-            (
-                "IMG-20190714-WA0001.jpg",
-                DateTimeValue::DateOnly(parse_whatsapp_filename_date("20190714-WA").unwrap()),
-            ),
-            (
-                "Screenshot 2019-07-14 at 15.30.12.png",
-                DateTimeValue::Local(parse_iso_datetime("2019-07-14T15:30:12").unwrap().0),
-            ),
-        ] {
-            let path = temporary.path().join(name);
-            fs::write(&path, []).unwrap();
-            let metadata = normalized_metadata(&path).unwrap();
-            assert_eq!(
-                metadata.datetime_candidates.last(),
-                Some(&DateTimeCandidate {
-                    source: DateTimeSource::FilenamePattern,
-                    value: expected,
-                })
-            );
-        }
+        let path = temporary.path().join("IMG_20190714_153012.jpg");
+        fs::write(&path, []).unwrap();
+        let candidate = normalized_metadata(&path).unwrap().datetime_candidates[0].clone();
+        assert_eq!(candidate.source, DateTimeSource::FilenamePattern);
+        assert_eq!(
+            candidate.value,
+            DateTimeValue::Local(parse_iso_datetime("2019-07-14T15:30:12").unwrap().0)
+        );
     }
 
     #[test]

@@ -34,11 +34,13 @@ A persistence failure stops the operation with a contextual error.
 ## Lock
 
 Every mutation holds `.souvenirs/lock`, a file created exclusively at the start and removed at the end.
-It records the host name, process ID, and start time.
+It records the host, machine, boot, process ID, process start identity, and lock start time.
 Only one mutating operation per catalog runs at a time, even across computers sharing a NAS.
 Another writer must report busy and show the recorded holder.
 
 A lock left by a crashed process on the same host is removed automatically.
+Souvenirs compares the recorded boot and process start identity before it removes the lock.
+Missing or unavailable identity evidence must not cause automatic removal.
 Any other existing lock requires explicit user confirmation before removal.
 
 ## Verified copies

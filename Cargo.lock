@@ -645,6 +645,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc_pidinfo"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29492a7b48a00ab80202528e235d2f80a04ccff3747540b4ec6881f2f2bc42d1"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "proptest"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -995,6 +1004,7 @@ dependencies = [
 name = "souvenirs-storage"
 version = "0.1.0"
 dependencies = [
+ "proc_pidinfo",
  "rustix 1.1.5",
  "serde",
  "serde_json",

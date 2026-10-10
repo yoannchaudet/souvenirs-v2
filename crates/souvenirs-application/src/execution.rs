@@ -9,12 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use souvenirs_domain::catalog::{
-    allocate_collection_counters, CanonicalFilename, CanonicalStem, NewItemCounterRequest,
-    SourcePathOrderKey,
-};
-use souvenirs_domain::names::CatalogLabel;
-use souvenirs_domain::relationships::sidecar_suffix_for_item;
+use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_storage::{
     read_operation_records, CatalogLayout, CatalogLock, CopyExpectation,
     ManifestReplacementRequest, OperationJournal, OperationRecord, RecoveryCopy, RecoveryDirectory,
@@ -23,8 +18,7 @@ use souvenirs_storage::{
 use time::Date;
 
 use crate::{
-    dated_collection_components, inspect_source, CatalogService, DateResolution, DestinationMode,
-    ImportPlanningService, ImportReviewRequest,
+    planning::plan_import, CatalogService, DateResolution, DestinationMode, ImportReviewRequest,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,7 +81,7 @@ impl ImportExecutionService {
     pub fn prepare(
         request: ImportExecutionRequest,
     ) -> Result<PreparedImport, ImportExecutionError> {
-        let review = ImportPlanningService::review(ImportReviewRequest {
+        let planned = plan_import(ImportReviewRequest {
             catalog_path: request.catalog_path.clone(),
             source_path: request.source_path.clone(),
             collection_name: request.collection_name.clone(),
@@ -96,181 +90,56 @@ impl ImportExecutionService {
             date_resolution: request.date_resolution,
         })
         .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
-        if !review.can_start {
+        if !planned.review.can_start {
             return Err(ImportExecutionError::DecisionRequired);
         }
-
-        let collection = CatalogLabel::new(&request.collection_name)
-            .map_err(|error| ImportExecutionError::InvalidCollection(error.to_string()))?;
-        let inspected = inspect_source(&request.source_path, request.date_resolution)
-            .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
-        let range_start = inspected
-            .items
-            .iter()
-            .map(|item| item.accepted.wall_clock.date())
-            .min()
-            .ok_or(ImportExecutionError::NoSupportedMedia)?;
-        let range_end = inspected
-            .items
-            .iter()
-            .map(|item| item.accepted.wall_clock.date())
-            .max()
-            .expect("a range start has a range end");
-        let (year, collection_directory) =
-            dated_collection_components(range_start, range_end, &collection)
-                .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
-        let collection_path = request.catalog_path.join(&year).join(&collection_directory);
-        let dates = inspected
-            .items
-            .iter()
-            .map(|item| item.accepted.wall_clock.date())
-            .collect::<BTreeSet<_>>();
-        let existing = dates
-            .iter()
-            .map(|date| {
-                existing_counters(&collection_path, *date).map(|counters| (*date, counters))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let allocations = allocate_collection_counters(
-            &existing,
-            inspected
-                .items
-                .iter()
-                .map(|item| NewItemCounterRequest {
-                    item_id: item.primary.id.as_str().to_owned(),
-                    source_path_order_key: SourcePathOrderKey::new(
-                        item.primary.path.components().to_vec(),
-                    ),
-                    accepted_datetime: item.accepted.wall_clock,
-                })
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
-        let counters = allocations
-            .into_iter()
-            .map(|allocation| (allocation.item_id, allocation.counter))
-            .collect::<BTreeMap<_, _>>();
-
         let mut copies = Vec::new();
-        let mut manifest = existing_manifest(&collection_path.join("SHA256SUMS"))?;
-        let relative_collection_path = PathBuf::from(&year).join(&collection_directory);
-        for item in inspected.items {
-            let stem =
-                CanonicalStem::new(item.accepted.wall_clock, counters[item.primary.id.as_str()])
-                    .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
-            for original in std::iter::once(&item.primary).chain(item.companion.iter()) {
-                let filename = CanonicalFilename::new(&stem, &original.extension)
-                    .map_err(|error| ImportExecutionError::Planning(error.to_string()))?
-                    .to_string();
-                push_execution_copy(
-                    &mut copies,
-                    &mut manifest,
-                    &request.source_path,
-                    &relative_collection_path,
-                    original,
-                    filename,
-                    true,
-                )?;
-            }
-            for sidecar in &item.sidecars {
-                let suffix = sidecar_suffix_for_item(
-                    sidecar,
-                    std::iter::once(&item.primary).chain(item.companion.iter()),
-                )
-                .ok_or_else(|| {
-                    ImportExecutionError::Planning(format!(
-                        "resolved sidecar has no preserved suffix: {}",
-                        sidecar.path
-                    ))
-                })?;
-                push_execution_copy(
-                    &mut copies,
-                    &mut manifest,
-                    &request.source_path,
-                    &relative_collection_path,
-                    sidecar,
-                    format!("{stem}{suffix}"),
-                    false,
-                )?;
+        for item in &planned.items {
+            for file in &item.files {
+                copies.push(ExecutionCopy {
+                    step_id: format!("copy-{}", copies.len() + 1),
+                    source: file.source.clone(),
+                    destination: file.destination.clone(),
+                    digest: file
+                        .digest
+                        .clone()
+                        .expect("execution planning hashes every transferred file"),
+                    size_bytes: file.size_bytes,
+                    manifested: file.role != PlanFileRole::Sidecar,
+                });
             }
         }
         if copies.is_empty() {
             return Err(ImportExecutionError::NoSupportedMedia);
         }
-
-        fn push_execution_copy(
-            copies: &mut Vec<ExecutionCopy>,
-            manifest: &mut BTreeMap<String, String>,
-            source_root: &Path,
-            relative_collection_path: &Path,
-            file: &souvenirs_domain::source::SourceFile,
-            filename: String,
-            include_in_manifest: bool,
-        ) -> Result<(), ImportExecutionError> {
-            let source = file
-                .path
-                .components()
-                .iter()
-                .fold(source_root.to_path_buf(), |path, component| {
-                    path.join(component)
-                });
-            let (digest, size_bytes) = digest_file(&source)?;
-            if include_in_manifest {
-                manifest.insert(filename.clone(), digest.clone());
-            }
-            copies.push(ExecutionCopy {
-                step_id: format!("copy-{}", copies.len() + 1),
-                source,
-                destination: relative_collection_path.join(filename),
-                digest,
-                size_bytes,
-            });
-            Ok(())
-        }
-
-        let manifest_path = PathBuf::from(&year)
-            .join(&collection_directory)
-            .join("SHA256SUMS");
-        let manifest_contents = encode_manifest(&manifest);
-        let manifest_digest = digest_bytes(&manifest_contents);
-        let previous_manifest_digest = if collection_path.join("SHA256SUMS").is_file() {
-            Some(digest_file(&collection_path.join("SHA256SUMS"))?.0)
-        } else {
-            None
-        };
-        let directories = match request.destination_mode {
-            DestinationMode::Create => vec![
-                ExecutionDirectory {
-                    step_id: "directory-year".to_owned(),
-                    path: PathBuf::from(&year),
-                    create: !request.catalog_path.join(&year).exists(),
-                },
-                ExecutionDirectory {
-                    step_id: "directory-collection".to_owned(),
-                    path: PathBuf::from(&year).join(&collection_directory),
-                    create: true,
-                },
-            ],
-            DestinationMode::Existing => Vec::new(),
-        };
+        let directories = planned
+            .directories
+            .iter()
+            .enumerate()
+            .map(|(index, directory)| ExecutionDirectory {
+                step_id: format!("directory-{}", index + 1),
+                path: directory.path.clone(),
+                create: directory.create,
+            })
+            .collect();
         let operation_id = operation_id()?;
         Ok(PreparedImport {
             operation_id,
             plan: ExecutionPlan {
                 schema_version: 1,
-                catalog_path: request.catalog_path,
-                source_path: request.source_path,
-                collection_name: request.collection_name,
+                catalog_path: planned.catalog_path,
+                source_path: planned.source_path,
+                collection_name: planned.collection_name,
                 directories,
                 copies,
                 manifest: ExecutionManifest {
                     step_id: "manifest".to_owned(),
-                    path: manifest_path,
-                    previous_digest: previous_manifest_digest,
-                    resulting_digest: manifest_digest,
-                    contents: manifest_contents,
+                    path: planned.manifest.path,
+                    previous_digest: planned.manifest.previous_digest,
+                    resulting_digest: planned.manifest.resulting_digest,
+                    contents: planned.manifest.contents,
                 },
-                left_on_source_count: review.left_on_source_count,
+                left_on_source_count: planned.review.left_on_source_count,
             },
         })
     }
@@ -468,6 +337,12 @@ struct ExecutionCopy {
     destination: PathBuf,
     digest: String,
     size_bytes: u64,
+    #[serde(default = "default_manifested")]
+    manifested: bool,
+}
+
+const fn default_manifested() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -699,12 +574,14 @@ fn cancellation_manifest(
         } else if !verified_copy_can_publish(layout, copy, state)? {
             continue;
         }
-        let filename = copy
-            .destination
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| ImportExecutionError::InvalidSource(copy.destination.clone()))?;
-        lines.insert(filename.to_owned(), journal_digest.to_owned());
+        if copy.manifested {
+            let filename = copy
+                .destination
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| ImportExecutionError::InvalidSource(copy.destination.clone()))?;
+            lines.insert(filename.to_owned(), journal_digest.to_owned());
+        }
         copied_count += 1;
     }
     Ok((encode_manifest(&lines), copied_count))
@@ -736,7 +613,9 @@ fn verified_copy_can_publish(
     Ok(digest == copy.digest && size_bytes == copy.size_bytes)
 }
 
-fn existing_manifest(path: &Path) -> Result<BTreeMap<String, String>, ImportExecutionError> {
+pub(crate) fn existing_manifest(
+    path: &Path,
+) -> Result<BTreeMap<String, String>, ImportExecutionError> {
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
@@ -754,7 +633,7 @@ fn existing_manifest(path: &Path) -> Result<BTreeMap<String, String>, ImportExec
         .collect()
 }
 
-fn existing_counters(
+pub(crate) fn existing_counters(
     collection: &Path,
     date: Date,
 ) -> Result<BTreeSet<NonZeroU32>, ImportExecutionError> {
@@ -785,7 +664,7 @@ fn existing_counters(
     Ok(counters)
 }
 
-fn encode_manifest(lines: &BTreeMap<String, String>) -> Vec<u8> {
+pub(crate) fn encode_manifest(lines: &BTreeMap<String, String>) -> Vec<u8> {
     let mut output = String::new();
     for (filename, digest) in lines {
         writeln!(output, "{digest}  {filename}").expect("writing to a string cannot fail");
@@ -793,7 +672,7 @@ fn encode_manifest(lines: &BTreeMap<String, String>) -> Vec<u8> {
     output.into_bytes()
 }
 
-fn digest_file(path: &Path) -> Result<(String, u64), ImportExecutionError> {
+pub(crate) fn digest_file(path: &Path) -> Result<(String, u64), ImportExecutionError> {
     let mut file = File::open(path).map_err(|source| ImportExecutionError::Io {
         path: path.to_path_buf(),
         source,
@@ -817,7 +696,7 @@ fn digest_file(path: &Path) -> Result<(String, u64), ImportExecutionError> {
     Ok((format!("{:x}", hasher.finalize()), size))
 }
 
-fn digest_bytes(contents: &[u8]) -> String {
+pub(crate) fn digest_bytes(contents: &[u8]) -> String {
     format!("{:x}", Sha256::digest(contents))
 }
 
@@ -900,6 +779,201 @@ mod tests {
         assert_eq!(manifest.lines().count(), 4);
         assert!(manifest.contains("2026-10-10 10-11-12 003.jpg"));
         assert!(manifest.contains("2026-10-10 10-11-13 004.jpg"));
+    }
+
+    #[test]
+    fn executes_compound_item_with_shared_stem_and_original_only_manifest() {
+        let fixture = compound_fixture();
+        let prepared = ImportExecutionService::prepare(fixture.request()).unwrap();
+        let outcome = ImportExecutionService::execute(prepared, |_| {}).unwrap();
+
+        assert_eq!(outcome.copied_count, 3);
+        assert_eq!(outcome.left_on_source_count, 0);
+        let collection = fixture
+            .catalog
+            .join("2026")
+            .join("2026-10-10 Recovery Import");
+        let raw = collection.join("2026-10-10 12-00-00 001.CR3");
+        let jpeg = collection.join("2026-10-10 12-00-00 001.JPG");
+        let sidecar = collection.join("2026-10-10 12-00-00 001.JPG.xmp");
+        assert!(raw.is_file());
+        assert!(jpeg.is_file());
+        assert!(sidecar.is_file());
+
+        let manifest = fs::read_to_string(collection.join("SHA256SUMS")).unwrap();
+        assert_eq!(manifest.lines().count(), 2);
+        assert!(manifest.contains(&format!(
+            "{}  {}",
+            super::digest_file(&raw).unwrap().0,
+            raw.file_name().unwrap().to_string_lossy()
+        )));
+        assert!(manifest.contains(&format!(
+            "{}  {}",
+            super::digest_file(&jpeg).unwrap().0,
+            jpeg.file_name().unwrap().to_string_lossy()
+        )));
+        assert!(!manifest.contains(".xmp"));
+
+        let mut existing_request = fixture.request();
+        existing_request.destination_mode = DestinationMode::Existing;
+        let prepared = ImportExecutionService::prepare(existing_request).unwrap();
+        ImportExecutionService::execute(prepared, |_| {}).unwrap();
+        assert!(collection.join("2026-10-10 12-00-00 002.CR3").is_file());
+        assert!(collection.join("2026-10-10 12-00-00 002.JPG").is_file());
+        assert!(collection.join("2026-10-10 12-00-00 002.JPG.xmp").is_file());
+    }
+
+    #[test]
+    fn cancellation_keeps_compound_sidecar_out_of_manifest() {
+        let fixture = compound_fixture();
+        let prepared = ImportExecutionService::prepare(fixture.request()).unwrap();
+        let layout = CatalogLayout::new(&fixture.catalog);
+        let lock = CatalogLock::acquire(&layout).unwrap();
+        let mut journal =
+            OperationJournal::create(&layout, &lock, prepared.operation_id(), &prepared.plan)
+                .unwrap();
+        journal
+            .record_metadata(
+                &layout,
+                &lock,
+                prepared.plan.collection_name.clone(),
+                prepared.plan.source_path.clone(),
+                prepared.plan.copies.len(),
+            )
+            .unwrap();
+        for directory in prepared
+            .plan
+            .directories
+            .iter()
+            .filter(|directory| directory.create)
+        {
+            journal
+                .create_destination_directory(&layout, &lock, &directory.step_id, &directory.path)
+                .unwrap();
+        }
+        for copy in &prepared.plan.copies {
+            layout
+                .copy_verified(
+                    &lock,
+                    &mut journal,
+                    &copy.source,
+                    &copy.destination,
+                    &copy.step_id,
+                    CopyExpectation {
+                        sha256: copy.digest.clone(),
+                        size_bytes: copy.size_bytes,
+                    },
+                )
+                .unwrap();
+        }
+        drop(journal);
+        lock.release().unwrap();
+
+        let (outcome, result) = ImportRecoveryService::recover(
+            &fixture.catalog,
+            prepared.operation_id(),
+            ImportRecoveryMode::Cancel,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(outcome, RecoveryOutcome::Cancelled);
+        assert_eq!(result.copied_count, 3);
+        let manifest =
+            fs::read_to_string(layout.root().join(&prepared.plan.manifest.path)).unwrap();
+        assert_eq!(manifest.lines().count(), 2);
+        assert!(!manifest.contains(".xmp"));
+    }
+
+    #[test]
+    fn compound_sidecar_drift_is_not_published_or_manifested() {
+        let fixture = compound_fixture();
+        let prepared = ImportExecutionService::prepare(fixture.request()).unwrap();
+        let operation_id = prepared.operation_id().to_owned();
+        let sidecar = prepared
+            .plan
+            .copies
+            .iter()
+            .find(|copy| !copy.manifested)
+            .unwrap();
+        let sidecar_destination = fixture.catalog.join(&sidecar.destination);
+        fs::write(
+            fixture.source.join("IMG_20261010_120000.JPG.xmp"),
+            b"changed",
+        )
+        .unwrap();
+
+        let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("does not match the confirmed plan"));
+        assert!(!sidecar_destination.exists());
+        let resume_error = ImportRecoveryService::recover(
+            &fixture.catalog,
+            &operation_id,
+            ImportRecoveryMode::Resume,
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(resume_error.to_string().contains("source changed"));
+        let (outcome, result) = ImportRecoveryService::recover(
+            &fixture.catalog,
+            &operation_id,
+            ImportRecoveryMode::Cancel,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome, RecoveryOutcome::Cancelled);
+        assert_eq!(result.copied_count, 2);
+        let manifest = fs::read_to_string(
+            fixture
+                .catalog
+                .join("2026/2026-10-10 Recovery Import/SHA256SUMS"),
+        )
+        .unwrap();
+        assert_eq!(manifest.lines().count(), 2);
+        assert!(!manifest.contains(".xmp"));
+    }
+
+    #[test]
+    fn compound_sidecar_destination_is_never_overwritten() {
+        let fixture = compound_fixture();
+        let collection = fixture
+            .catalog
+            .join("2026")
+            .join("2026-10-10 Recovery Import");
+        fs::create_dir_all(&collection).unwrap();
+        let mut request = fixture.request();
+        request.destination_mode = DestinationMode::Existing;
+        let prepared = ImportExecutionService::prepare(request).unwrap();
+        let sidecar = prepared
+            .plan
+            .copies
+            .iter()
+            .find(|copy| !copy.manifested)
+            .unwrap();
+        let sidecar_destination = fixture.catalog.join(&sidecar.destination);
+        fs::write(&sidecar_destination, b"existing sidecar").unwrap();
+
+        let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
+
+        assert!(error.to_string().contains("occupied destination"));
+        assert_eq!(fs::read(sidecar_destination).unwrap(), b"existing sidecar");
+    }
+
+    #[test]
+    fn legacy_execution_plan_defaults_copies_to_manifested() {
+        let fixture = fixture();
+        let prepared = ImportExecutionService::prepare(fixture.request()).unwrap();
+        let mut value = serde_json::to_value(&prepared.plan).unwrap();
+        for copy in value["copies"].as_array_mut().unwrap() {
+            copy.as_object_mut().unwrap().remove("manifested");
+        }
+
+        let legacy: super::ExecutionPlan = serde_json::from_value(value).unwrap();
+
+        assert!(legacy.copies.iter().all(|copy| copy.manifested));
     }
 
     #[test]
@@ -1357,6 +1431,23 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("IMG_20261010_101112.jpg"), b"one").unwrap();
         fs::write(source.join("IMG_20261010_101113.jpg"), b"two").unwrap();
+        CatalogService::create(&catalog, "Test Catalog").unwrap();
+        Fixture {
+            _temporary: temporary,
+            catalog,
+            source,
+        }
+    }
+
+    fn compound_fixture() -> Fixture {
+        let temporary = tempdir().unwrap();
+        let catalog = temporary.path().join("catalog");
+        let source = temporary.path().join("source");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("IMG_20261010_120000.CR3"), b"raw").unwrap();
+        fs::write(source.join("IMG_20261010_120000.JPG"), b"jpeg").unwrap();
+        fs::write(source.join("IMG_20261010_120000.JPG.xmp"), b"xmp").unwrap();
         CatalogService::create(&catalog, "Test Catalog").unwrap();
         Fixture {
             _temporary: temporary,

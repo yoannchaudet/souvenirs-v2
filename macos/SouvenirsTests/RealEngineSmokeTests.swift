@@ -74,6 +74,49 @@ final class RealEngineSmokeTests: XCTestCase {
         try await supervisor.stop()
     }
 
+    func testRealEnginePreservesCompoundItemAndVerifiesOriginals() async throws {
+        let fixture = try makeCompoundFixture()
+        let supervisor = EngineSupervisor()
+        _ = try await supervisor.start()
+        addTeardownBlock {
+            try? await supervisor.stop()
+        }
+        _ = try await supervisor.handshake()
+        _ = try await supervisor.createCatalog(
+            path: fixture.catalog.path,
+            displayName: "Compound Catalog"
+        )
+        let review = try await plannedImport(
+            supervisor: supervisor,
+            fixture: fixture,
+            collectionName: "Compound Import"
+        )
+        XCTAssertEqual(review.transferCount, 2)
+        XCTAssertEqual(review.leftOnSourceCount, 0)
+        XCTAssertEqual(review.scan.unsupportedCount, 0)
+
+        let operationID = try await supervisor.requestOperation(
+            method: "operation.start",
+            parameters: StartImportParameters(
+                catalogPath: fixture.catalog.path,
+                sourcePath: fixture.source.path,
+                collectionName: review.collectionName,
+                destinationMode: review.destinationMode,
+                acceptedDate: review.acceptedDate,
+                dateResolution: review.dateResolution
+            )
+        )
+        let events = try await collectEvents(
+            try await supervisor.events(for: operationID)
+        )
+        guard case .completed = events.last?.payload else {
+            return XCTFail("Expected a completed terminal event")
+        }
+
+        try verifyCompoundCatalog(fixture.catalog)
+        try await supervisor.stop()
+    }
+
     func testRealEngineRoutesAndRecoversInterruptedImport() async throws {
         let fixture = try makeFixture(fileCount: 32, bytesPerFile: 8 * 1_024 * 1_024)
         let supervisor = EngineSupervisor()
@@ -235,6 +278,39 @@ final class RealEngineSmokeTests: XCTestCase {
         )
     }
 
+    private func makeCompoundFixture() throws -> Fixture {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "SouvenirsRealEngineCompound-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let catalog = root.appendingPathComponent("catalog", isDirectory: true)
+        let source = root.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: catalog,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: source,
+            withIntermediateDirectories: true
+        )
+        try Data("raw bytes".utf8).write(
+            to: source.appendingPathComponent("IMG_20261010_120000.CR3")
+        )
+        try Data("jpeg bytes".utf8).write(
+            to: source.appendingPathComponent("IMG_20261010_120000.JPG")
+        )
+        try Data("xmp bytes".utf8).write(
+            to: source.appendingPathComponent("IMG_20261010_120000.JPG.xmp")
+        )
+        temporaryDirectories.append(root)
+        return Fixture(
+            catalog: catalog,
+            source: source,
+            fileCount: 2
+        )
+    }
+
     private func verifyCatalog(
         _ catalog: URL,
         collectionName: String,
@@ -270,6 +346,51 @@ final class RealEngineSmokeTests: XCTestCase {
                 .map { String(format: "%02x", $0) }
                 .joined()
             XCTAssertEqual(entries[file.lastPathComponent], digest)
+        }
+    }
+
+    private func verifyCompoundCatalog(_ catalog: URL) throws {
+        let collection = catalog
+            .appendingPathComponent("2026", isDirectory: true)
+            .appendingPathComponent(
+                "2026-10-10 Compound Import",
+                isDirectory: true
+            )
+        let expectedOriginals = [
+            "2026-10-10 12-00-00 001.CR3",
+            "2026-10-10 12-00-00 001.JPG",
+        ]
+        let sidecar = "2026-10-10 12-00-00 001.JPG.xmp"
+        for filename in expectedOriginals + [sidecar] {
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: collection
+                        .appendingPathComponent(filename)
+                        .path
+                )
+            )
+        }
+
+        let manifest = collection.appendingPathComponent("SHA256SUMS")
+        let lines = try String(contentsOf: manifest, encoding: .utf8)
+            .split(separator: "\n")
+        XCTAssertEqual(lines.count, expectedOriginals.count)
+        XCTAssertFalse(lines.contains { $0.contains(".xmp") })
+        let entries = Dictionary(uniqueKeysWithValues: try lines.map { line in
+            guard let separator = line.range(of: "  ") else {
+                throw SmokeError.invalidManifest
+            }
+            return (
+                String(line[separator.upperBound...]),
+                String(line[..<separator.lowerBound])
+            )
+        })
+        for filename in expectedOriginals {
+            let file = collection.appendingPathComponent(filename)
+            let digest = SHA256.hash(data: try Data(contentsOf: file))
+                .map { String(format: "%02x", $0) }
+                .joined()
+            XCTAssertEqual(entries[filename], digest)
         }
     }
 }

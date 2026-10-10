@@ -1,6 +1,7 @@
 //! Caller-independent application services for catalog and import workflows.
 
 mod execution;
+mod planning;
 
 pub use execution::{
     ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest, ImportExecutionService,
@@ -29,7 +30,7 @@ use souvenirs_storage::{
     DurableTransition, OperationRecord, StorageCapabilities, StorageCapabilityError,
     WriteSuitability, FORMAT_VERSION,
 };
-use time::{macros::format_description, Date, UtcOffset};
+use time::{Date, UtcOffset};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogIntent {
@@ -306,71 +307,7 @@ impl ImportPlanningService {
     }
 
     pub fn review(request: ImportReviewRequest) -> Result<ImportReview, ImportPlanningError> {
-        CatalogService::open(&request.catalog_path).map_err(ImportPlanningError::Catalog)?;
-        if request.date_resolution == Some(DateResolution::ConvertFromUtc) {
-            return Err(ImportPlanningError::UnsupportedDateResolution);
-        }
-        let collection = CatalogLabel::new(&request.collection_name)
-            .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?;
-        let inspected = inspect_source(&request.source_path, request.date_resolution)?;
-        let scan = scan_summary(&request.source_path, &inspected)?;
-        if scan.media_count == 0 {
-            return Err(ImportPlanningError::NoSupportedMedia);
-        }
-        let Some(range_start) = inspected.range_start else {
-            return Ok(ImportReview {
-                scan,
-                collection_name: collection.to_string(),
-                destination_mode: request.destination_mode,
-                destination_path: request.catalog_path.clone(),
-                accepted_date: String::new(),
-                date_resolution: request.date_resolution,
-                required_decision_count: inspected.pending_item_count
-                    + inspected.unresolved_item_count,
-                transfer_count: 0,
-                skipped_count: 0,
-                left_on_source_count: inspected.excluded_file_count,
-                operation_count: 0,
-                required_space_bytes: 0,
-                can_start: false,
-            });
-        };
-        let range_end = inspected.range_end.expect("a range start has a range end");
-        let accepted_date = format_date(range_start)?;
-        let (year, directory) = dated_collection_components(range_start, range_end, &collection)?;
-        let destination_path = request.catalog_path.join(year).join(directory);
-        match request.destination_mode {
-            DestinationMode::Create if destination_path.exists() => {
-                return Err(ImportPlanningError::DestinationAlreadyExists(
-                    destination_path,
-                ));
-            }
-
-            DestinationMode::Existing if !destination_path.is_dir() => {
-                return Err(ImportPlanningError::DestinationMissing(destination_path));
-            }
-            DestinationMode::Create | DestinationMode::Existing => {}
-        }
-        let required_decision_count = if request.date_resolution.is_none() {
-            inspected.pending_item_count + inspected.unresolved_item_count
-        } else {
-            0
-        };
-        Ok(ImportReview {
-            collection_name: collection.to_string(),
-            destination_mode: request.destination_mode,
-            destination_path,
-            accepted_date,
-            date_resolution: request.date_resolution,
-            required_decision_count,
-            transfer_count: inspected.transfer_media_count,
-            skipped_count: 0,
-            left_on_source_count: inspected.excluded_file_count,
-            operation_count: inspected.transfer_file_count + 2,
-            required_space_bytes: inspected.transfer_bytes,
-            can_start: required_decision_count == 0,
-            scan,
-        })
+        planning::review_import(request)
     }
 }
 
@@ -395,8 +332,8 @@ fn scan_summary(
         uncertain_time_count: inspected.pending_item_count,
         total_bytes: inspected.total_bytes,
         suggested_collection_name: title_case_source_name(&source_name),
-        suggested_accepted_date: format_optional_date(inspected.range_start)?,
-        suggested_range_end: format_optional_date(inspected.range_end)?,
+        suggested_accepted_date: inspected.range_start.map(|date| date.to_string()),
+        suggested_range_end: inspected.range_end.map(|date| date.to_string()),
         pending_item_count: inspected.pending_item_count,
         unresolved_item_count: inspected.unresolved_item_count,
         datetime_sources: inspected.datetime_sources.clone(),
@@ -461,8 +398,18 @@ pub(crate) fn inspect_source(
             .expect("collected paths are below the source");
         let components = relative
             .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        ImportPlanningError::InvalidSource(
+                            "source path is not valid UTF-8".to_owned(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let source_path = SourcePath::new(components)
             .map_err(|error| ImportPlanningError::InvalidSource(error.to_string()))?;
         let id = SourceFileId::new(source_path.to_string())
@@ -716,16 +663,6 @@ fn import_date_source(source: DateTimeSource) -> ImportDateSource {
     }
 }
 
-fn format_optional_date(value: Option<Date>) -> Result<Option<String>, ImportPlanningError> {
-    value.map(format_date).transpose()
-}
-
-fn format_date(value: Date) -> Result<String, ImportPlanningError> {
-    value
-        .format(format_description!("[year]-[month]-[day]"))
-        .map_err(|error| ImportPlanningError::InvalidDate(error.to_string()))
-}
-
 pub(crate) fn dated_collection_components(
     start: Date,
     end: Date,
@@ -769,6 +706,7 @@ pub enum ImportPlanningError {
     InvalidDate(String),
     InvalidMetadata(String),
     InvalidSource(String),
+    InvalidPlan(String),
     Io {
         path: PathBuf,
         source: std::io::Error,
@@ -789,6 +727,7 @@ impl ImportPlanningError {
             Self::InvalidDate(_) => "invalid_date",
             Self::InvalidMetadata(_) => "invalid_metadata",
             Self::InvalidSource(_) => "invalid_source",
+            Self::InvalidPlan(_) => "invalid_plan",
             Self::Io { .. } => "source_io",
             Self::NoSupportedMedia => "no_supported_media",
             Self::SourceTooLarge => "source_too_large",
@@ -822,6 +761,7 @@ impl fmt::Display for ImportPlanningError {
                 write!(formatter, "Could not read media metadata: {message}")
             }
             Self::InvalidSource(message) => write!(formatter, "Invalid source file: {message}"),
+            Self::InvalidPlan(message) => formatter.write_str(message),
             Self::Io { path, source } => {
                 write!(formatter, "Could not scan {}: {source}", path.display())
             }
@@ -1085,12 +1025,13 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("IMG_20241010_101112.jpg"), b"photo").unwrap();
         fs::write(source.join("VID_20241011_121314.mov"), b"video").unwrap();
+        fs::write(source.join("undated.jpg"), b"undated").unwrap();
         fs::write(source.join("notes.txt"), b"notes").unwrap();
         CatalogService::create(&catalog, "Family").unwrap();
 
         let scan = ImportPlanningService::scan(&source).unwrap();
-        assert_eq!(scan.media_count, 2);
         assert_eq!(scan.uncertain_time_count, 2);
+        assert_eq!(scan.unresolved_item_count, 1);
         assert_eq!(scan.unsupported_count, 1);
 
         let unresolved = ImportPlanningService::review(ImportReviewRequest {
@@ -1103,7 +1044,7 @@ mod tests {
         })
         .unwrap();
         assert!(!unresolved.can_start);
-        assert_eq!(unresolved.required_decision_count, 2);
+        assert_eq!(unresolved.required_decision_count, 3);
 
         let resolved = ImportPlanningService::review(ImportReviewRequest {
             catalog_path: catalog.clone(),
@@ -1116,7 +1057,7 @@ mod tests {
         .unwrap();
         assert!(resolved.can_start);
         assert_eq!(resolved.transfer_count, 2);
-        assert_eq!(resolved.accepted_date, "2024-10-10");
+        assert_eq!(resolved.left_on_source_count, 2);
         assert!(resolved
             .destination_path
             .ends_with("2024-10-10 +1d Dolomites"));
