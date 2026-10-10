@@ -19,19 +19,21 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
+      - name: Install just
+        uses: taiki-e/install-action@just
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build and test
-        run: >-
-          xcodebuild test
-          -project macos/Souvenirs.xcodeproj
-          -scheme Souvenirs
-          -configuration Debug
-          -destination 'platform=macOS'
-          -derivedDataPath "$RUNNER_TEMP/SouvenirsDerivedData"
-          CODE_SIGN_IDENTITY=-
-          DEVELOPMENT_TEAM=
+      - name: Build and test Swift state
+        run: just test-swift
+        env:
+          SWIFT_DERIVED_DATA_PATH: ${{ runner.temp }}/SouvenirsStateDerivedData
+
+      - name: Run Swift UI tests
+        run: just test-ui
+        env:
+          SWIFT_DERIVED_DATA_PATH: ${{ runner.temp }}/SouvenirsUIDerivedData
 
       - name: Build and verify Release app
         run: |

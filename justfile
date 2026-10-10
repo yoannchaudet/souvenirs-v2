@@ -15,6 +15,30 @@ test-core-performance:
 test-rust:
     cargo test --workspace --all-targets
 
+# Run macOS state and unit tests without launching UI automation.
+test-swift:
+    xcodebuild test \
+        -project macos/Souvenirs.xcodeproj \
+        -scheme SouvenirsStateTests \
+        -configuration Debug \
+        -destination 'platform=macOS' \
+        -derivedDataPath "${SWIFT_DERIVED_DATA_PATH:-${TMPDIR:-/tmp}/SouvenirsStateDerivedData}" \
+        -only-testing:SouvenirsTests \
+        CODE_SIGN_IDENTITY=- \
+        DEVELOPMENT_TEAM=
+
+# Run macOS UI tests separately from the fast local gate.
+test-ui:
+    xcodebuild test \
+        -project macos/Souvenirs.xcodeproj \
+        -scheme Souvenirs \
+        -configuration Debug \
+        -destination 'platform=macOS' \
+        -derivedDataPath "${SWIFT_DERIVED_DATA_PATH:-${TMPDIR:-/tmp}/SouvenirsUIDerivedData}" \
+        -only-testing:SouvenirsUITests \
+        CODE_SIGN_IDENTITY=- \
+        DEVELOPMENT_TEAM=
+
 # Validate interruption recovery on disposable APFS and exFAT disk images.
 test-representative-storage:
     ./scripts/validate-representative-storage.sh
@@ -36,4 +60,5 @@ check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     if [[ "$(uname -s)" == "Darwin" ]]; then just test-core-performance; fi
+    if [[ "$(uname -s)" == "Darwin" ]]; then just test-swift; fi
     just test-rust
