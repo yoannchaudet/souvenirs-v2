@@ -229,9 +229,7 @@ impl OperationJournal {
                 path: parent.to_path_buf(),
                 source,
             })?;
-        if canonical_parent != canonical_journal_directory
-            || path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
-        {
+        if canonical_parent != canonical_journal_directory || !is_operation_journal(path) {
             return Err(OperationJournalError::InvalidJournalPath(
                 path.to_path_buf(),
             ));
@@ -476,9 +474,7 @@ pub fn read_operation_records(
         path: path.to_path_buf(),
         source,
     })?;
-    if !metadata.file_type().is_file()
-        || path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
-    {
+    if !metadata.file_type().is_file() || !is_operation_journal(path) {
         return Err(OperationJournalError::InvalidJournalPath(
             path.to_path_buf(),
         ));
@@ -526,7 +522,7 @@ fn ensure_no_unfinished_journal(layout: &CatalogLayout) -> Result<(), OperationJ
             source,
         })?;
         let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+        if !is_operation_journal(&path) {
             continue;
         }
         let finished = journal_has_outcome(&path)?;
@@ -535,6 +531,14 @@ fn ensure_no_unfinished_journal(layout: &CatalogLayout) -> Result<(), OperationJ
         }
     }
     Ok(())
+}
+
+fn is_operation_journal(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+        && !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("._"))
 }
 
 fn journal_has_outcome(path: &Path) -> Result<bool, OperationJournalError> {

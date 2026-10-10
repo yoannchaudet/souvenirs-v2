@@ -15,6 +15,18 @@ test-core-performance:
 test-rust:
     cargo test --workspace --all-targets
 
+# Validate interruption recovery on disposable APFS and exFAT disk images.
+test-representative-storage:
+    ./scripts/validate-representative-storage.sh
+
+# Validate interruption recovery on a disposable local SMB share.
+test-smb-storage:
+    ./scripts/validate-smb-storage.sh
+
+# Build and verify a Developer ID signed Release archive.
+build-release:
+    ./scripts/build-release.sh
+
 # Regenerate the committed engine protocol schema.
 protocol-schema:
     cargo run -p souvenirs-protocol --example generate_schema

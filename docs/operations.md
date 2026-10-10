@@ -167,6 +167,43 @@ Conversion uses the [Organize backlog](#organize-backlog) workflow with two addi
 Conversion copies into a new catalog and leaves the legacy catalog unchanged.
 Legacy-specific name parsing remains an open question until the legacy format is documented here.
 
+## Release validation
+
+The Release configuration enables Hardened Runtime for the application and embedded Rust engine.
+The build signs both executables with the same identity.
+
+Run `just build-release` to create and verify a Developer ID signed archive.
+The command requires one local Developer ID Application identity.
+The verification checks both signatures, Hardened Runtime flags, and signing teams.
+The command requests a secure timestamp by default.
+Set `SOUVENIRS_TIMESTAMP=none` only for an offline local test build.
+An artifact without a secure timestamp must not be notarized or released.
+
+Set `SOUVENIRS_NOTARY_PROFILE` and run `scripts/notarize-release.sh APP`.
+The profile must refer to credentials stored by `notarytool store-credentials`.
+The command submits a ZIP archive, staples the accepted ticket, and validates the result.
+The final validation includes Gatekeeper assessment.
+The command does not print credentials.
+
+Run `just test-representative-storage` to test APFS and exFAT.
+The command creates disposable disk images and removes them after the test.
+The test interrupts a verified copy before publication, resumes it, and checks bytes, the manifest, staging cleanup, and the terminal journal record.
+
+Run `just test-smb-storage` to test SMB.
+The command starts a disposable local Samba container and mounts its share.
+The command uses temporary credentials and removes the container, mount, and files after the test.
+The default image is `dockurr/samba:4.23.10`.
+Set `SOUVENIRS_SMB_IMAGE` to test another fixed image.
+
+The release operator must complete these environment-dependent checks:
+
+- Run the signed archive on a separate supported Mac that does not contain the development certificate.
+- Notarize and staple the final distribution artifact with the release Apple account.
+- Repeat the SMB harness against the supported NAS model and production SMB configuration.
+- Disconnect the NAS during copy, reconnect it, resume recovery, and run an integrity check.
+- Connect each supported physical APFS and exFAT device and repeat interruption recovery.
+- Confirm that Gatekeeper opens the downloaded artifact after quarantine is applied.
+
 ## Open questions
 
 - Should conversion also support in-place renaming, to avoid doubling disk usage for a large archive?
