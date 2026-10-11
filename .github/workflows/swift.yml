@@ -25,6 +25,9 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Validate shared protocol contract
+        run: just test-protocol
+
       - name: Test engine architecture verification
         run: ./scripts/test-engine-architectures.sh
 

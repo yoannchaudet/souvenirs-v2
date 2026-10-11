@@ -574,28 +574,6 @@ private struct Fixture {
     let fileCount: Int
 }
 
-private struct StartImportParameters: Encodable, Sendable {
-    let name = "import.execute"
-    let reviewedPlan: String
-
-    enum CodingKeys: String, CodingKey {
-        case name
-        case reviewedPlan = "reviewed_plan"
-    }
-}
-
-private struct RecoverOperationParameters: Encodable, Sendable {
-    let name = "operation.recover"
-    let catalogPath: String
-    let operationID: String
-
-    enum CodingKeys: String, CodingKey {
-        case name
-        case catalogPath = "catalog_path"
-        case operationID = "operation_id"
-    }
-}
-
 private enum SmokeError: Error {
     case invalidManifest
 }

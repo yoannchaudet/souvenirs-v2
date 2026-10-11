@@ -367,7 +367,7 @@ final class ImportExecutionCoordinator: ObservableObject {
     }
 }
 
-private struct StartImportParameters: Encodable, Sendable {
+struct StartImportParameters: Encodable, Sendable {
     let name = "import.execute"
     let reviewedPlan: String
 
@@ -377,7 +377,7 @@ private struct StartImportParameters: Encodable, Sendable {
     }
 }
 
-private struct RecoverOperationParameters: Encodable, Sendable {
+struct RecoverOperationParameters: Encodable, Sendable {
     let name = "operation.recover"
     let catalogPath: String
     let operationID: String
