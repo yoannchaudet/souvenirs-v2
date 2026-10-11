@@ -75,6 +75,7 @@ impl CatalogService {
                 if layout.config_path().exists() && !layout.has_pending_initialization()? {
                     return Err(CatalogServiceError::AlreadyCatalog(path.to_path_buf()));
                 }
+                capabilities.ensure_writable(path)?;
             }
             CatalogIntent::Open => {
                 let layout = CatalogLayout::new(path);
@@ -965,6 +966,9 @@ mod tests {
 
     use tempfile::tempdir;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use super::{
         CatalogInitializationError, CatalogIntent, CatalogService, CatalogServiceError,
         DateResolution, DestinationMode, ImportPlanningError, ImportPlanningService,
@@ -1024,6 +1028,32 @@ mod tests {
         assert_eq!(
             CatalogService::open(future.path()).unwrap_err().code(),
             "unsupported_catalog_version"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_validation_rejects_directory_without_write_access() {
+        let directory = tempdir().expect("temporary directory");
+        let original_permissions = fs::metadata(directory.path())
+            .expect("read temporary directory metadata")
+            .permissions();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o555))
+            .expect("make temporary directory read-only");
+
+        let error = CatalogService::validate(directory.path(), CatalogIntent::Create)
+            .expect_err("read-only directory must fail create validation");
+
+        fs::set_permissions(directory.path(), original_permissions)
+            .expect("restore temporary directory permissions");
+
+        assert_eq!(error.code(), "catalog_io");
+        assert!(error.to_string().starts_with("Souvenirs cannot write to "));
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .expect("read temporary directory")
+                .count(),
+            0
         );
     }
 
