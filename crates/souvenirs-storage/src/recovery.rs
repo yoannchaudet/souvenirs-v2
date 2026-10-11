@@ -181,8 +181,8 @@ fn recover_directories(
         journal
             .ensure_active(layout, lock)
             .map_err(RecoveryError::Journal)?;
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
+        let observed = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_dir() => true,
             Ok(_) => return Err(RecoveryError::PathConflict(path)),
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
                 fs::create_dir(&path).map_err(|source| RecoveryError::Io {
@@ -190,12 +190,7 @@ fn recover_directories(
                     path: path.clone(),
                     source,
                 })?;
-                let parent = path.parent().expect("recovered directory has a parent");
-                sync_directory(parent).map_err(|source| RecoveryError::Io {
-                    action: "persist recovered destination directory",
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
+                false
             }
             Err(source) => {
                 return Err(RecoveryError::Io {
@@ -204,7 +199,20 @@ fn recover_directories(
                     source,
                 });
             }
+        };
+        if observed {
+            journal
+                .check_failpoint(
+                    crate::operation::Failpoint::RecoveryDirectoryObservedBeforePersistence,
+                )
+                .map_err(RecoveryError::Journal)?;
         }
+        let parent = path.parent().expect("recovered directory has a parent");
+        sync_directory(parent).map_err(|source| RecoveryError::Io {
+            action: "persist recovered destination directory",
+            path: parent.to_path_buf(),
+            source,
+        })?;
         journal
             .record_transition(DurableTransition::DirectoryCreated {
                 step_id,
@@ -371,23 +379,41 @@ fn recover_copies(
             if staged_digest.is_some() {
                 return Err(RecoveryError::PathConflict(staged_path));
             }
+            journal
+                .ensure_active(layout, lock)
+                .map_err(RecoveryError::Journal)?;
             remove_apple_double_sidecar(&staged_path).map_err(|source| RecoveryError::Io {
                 action: "remove recovered staged AppleDouble sidecar",
                 path: staged_path.clone(),
                 source,
             })?;
+            persist_observed_copy_stage_removal(layout, journal)?;
             continue;
         }
 
         if let Some(expected) = state.sha256.as_deref() {
             match (staged_digest.as_deref(), destination_digest.as_deref()) {
                 (None, Some(actual)) if actual == expected => {
+                    journal
+                        .ensure_active(layout, lock)
+                        .map_err(RecoveryError::Journal)?;
                     remove_apple_double_sidecar(&staged_path).map_err(|source| {
                         RecoveryError::Io {
                             action: "remove recovered staged AppleDouble sidecar",
                             path: staged_path.clone(),
                             source,
                         }
+                    })?;
+                    persist_observed_copy_stage_removal(layout, journal)?;
+                    journal
+                        .check_failpoint(
+                            crate::operation::Failpoint::RecoveryCopyDestinationObservedBeforePersistence,
+                        )
+                        .map_err(RecoveryError::Journal)?;
+                    sync_file(&destination.directory).map_err(|source| RecoveryError::Io {
+                        action: "persist observed copy destination directory",
+                        path: destination.directory_path.clone(),
+                        source,
                     })?;
                     record_copy_published(
                         layout,
@@ -535,6 +561,20 @@ fn recover_copies(
     Ok(())
 }
 
+fn persist_observed_copy_stage_removal(
+    layout: &CatalogLayout,
+    journal: &mut OperationJournal,
+) -> Result<(), RecoveryError> {
+    journal
+        .check_failpoint(crate::operation::Failpoint::RecoveryCopyStageObservedBeforePersistence)
+        .map_err(RecoveryError::Journal)?;
+    sync_directory(&layout.staging_directory()).map_err(|source| RecoveryError::Io {
+        action: "persist staging directory after observed publication",
+        path: layout.staging_directory(),
+        source,
+    })
+}
+
 fn record_copy_published(
     layout: &CatalogLayout,
     lock: &CatalogLock,
@@ -656,6 +696,26 @@ fn recover_recorded_manifests(
             journal
                 .ensure_active(layout, lock)
                 .map_err(RecoveryError::Journal)?;
+            journal
+                .check_failpoint(
+                    crate::operation::Failpoint::RecoveryManifestStageObservedBeforePersistence,
+                )
+                .map_err(RecoveryError::Journal)?;
+            sync_directory(&layout.staging_directory()).map_err(|source| RecoveryError::Io {
+                action: "persist staging directory after observed manifest replacement",
+                path: layout.staging_directory(),
+                source,
+            })?;
+            journal
+                .check_failpoint(
+                    crate::operation::Failpoint::RecoveryManifestDestinationObservedBeforePersistence,
+                )
+                .map_err(RecoveryError::Journal)?;
+            sync_file(&manifest.directory).map_err(|source| RecoveryError::Io {
+                action: "persist observed manifest directory",
+                path: manifest.directory_path.clone(),
+                source,
+            })?;
             journal
                 .record_transition(DurableTransition::ManifestReplaced {
                     step_id: state.step_id,
@@ -811,7 +871,14 @@ fn cleanup_owned_stages(
     journal: &mut OperationJournal,
     records: &[OperationRecord],
 ) -> Result<(), RecoveryError> {
-    let mut paths = BTreeMap::new();
+    #[derive(Default)]
+    struct CleanupState {
+        step_id: String,
+        removal_started: bool,
+        removed: bool,
+    }
+
+    let mut paths = BTreeMap::<PathBuf, CleanupState>::new();
     for transition in transitions(records) {
         match transition {
             DurableTransition::CopyStarted { staged_path, .. }
@@ -830,14 +897,53 @@ fn cleanup_owned_stages(
                     _ => unreachable!(),
                 };
                 validate_owned_stage(layout, journal.operation_id(), staged_path)?;
-                paths.insert(staged_path.clone(), step_id.clone());
+                let state = paths.entry(staged_path.clone()).or_default();
+                if !state.step_id.is_empty() && state.step_id != *step_id {
+                    return Err(RecoveryError::InconsistentStep(step_id.clone()));
+                }
+                state.step_id = step_id.clone();
+                if state.removed {
+                    state.removal_started = false;
+                    state.removed = false;
+                }
+            }
+            DurableTransition::StageRemovalStarted {
+                step_id,
+                staged_path,
+            } => {
+                validate_owned_stage(layout, journal.operation_id(), staged_path)?;
+                let state = paths
+                    .get_mut(staged_path)
+                    .ok_or_else(|| RecoveryError::InconsistentStep(step_id.clone()))?;
+                if state.step_id != *step_id || state.removed {
+                    return Err(RecoveryError::InconsistentStep(step_id.clone()));
+                }
+                state.removal_started = true;
+            }
+            DurableTransition::StageRemoved {
+                step_id,
+                staged_path,
+            } => {
+                validate_owned_stage(layout, journal.operation_id(), staged_path)?;
+                let state = paths
+                    .get_mut(staged_path)
+                    .ok_or_else(|| RecoveryError::InconsistentStep(step_id.clone()))?;
+                if state.step_id != *step_id || !state.removal_started {
+                    return Err(RecoveryError::InconsistentStep(step_id.clone()));
+                }
+                state.removed = true;
             }
             _ => {}
         }
     }
-    for (path, step_id) in paths {
-        if digest_if_file(&layout.root().join(&path))?.is_some() {
-            remove_owned_stage(layout, lock, journal, &step_id, &path)?;
+    for (path, state) in paths {
+        if state.removed {
+            continue;
+        }
+        if state.removal_started {
+            finish_owned_stage_removal(layout, lock, journal, &state.step_id, &path)?;
+        } else if digest_if_file(&layout.root().join(&path))?.is_some() {
+            remove_owned_stage(layout, lock, journal, &state.step_id, &path)?;
         }
     }
     Ok(())
@@ -952,21 +1058,42 @@ fn remove_owned_stage(
     journal
         .check_failpoint(crate::operation::Failpoint::StageRemovalIntentPersisted)
         .map_err(RecoveryError::Journal)?;
+    finish_owned_stage_removal(layout, lock, journal, step_id, relative_path)
+}
+
+fn finish_owned_stage_removal(
+    layout: &CatalogLayout,
+    lock: &CatalogLock,
+    journal: &mut OperationJournal,
+    step_id: &str,
+    relative_path: &Path,
+) -> Result<(), RecoveryError> {
+    validate_owned_stage(layout, journal.operation_id(), relative_path)?;
+    journal
+        .ensure_active(layout, lock)
+        .map_err(RecoveryError::Journal)?;
     let path = layout.root().join(relative_path);
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+    let observed_absent = match fs::remove_file(&path) {
+        Ok(()) => false,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => true,
         Err(source) => Err(RecoveryError::Io {
             action: "remove journal-owned staging file",
             path: path.clone(),
             source,
         })?,
-    }
+    };
     remove_apple_double_sidecar(&path).map_err(|source| RecoveryError::Io {
         action: "remove recovered staged AppleDouble sidecar",
         path: path.clone(),
         source,
     })?;
+    if observed_absent {
+        journal
+            .check_failpoint(
+                crate::operation::Failpoint::RecoveryStageRemovalObservedBeforePersistence,
+            )
+            .map_err(RecoveryError::Journal)?;
+    }
     sync_directory(&layout.staging_directory()).map_err(|source| RecoveryError::Io {
         action: "persist recovered staging cleanup",
         path: layout.staging_directory(),
