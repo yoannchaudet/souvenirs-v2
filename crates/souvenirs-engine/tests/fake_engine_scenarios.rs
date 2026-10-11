@@ -5,6 +5,15 @@ use serde_json::{json, Value};
 use souvenirs_protocol::PROTOCOL_VERSION;
 
 #[test]
+fn startup_failure_returns_structured_handshake_error() {
+    let output = run("startup-failure", &[handshake()]);
+
+    assert!(output.status.success());
+    let messages = messages(&output);
+    assert_eq!(messages[0]["error"]["code"], "startup_failed");
+}
+
+#[test]
 fn ready_scenario_rejects_requests_and_exits_cleanly_on_eof() {
     let output = run("ready", &[handshake(), start_request()]);
 

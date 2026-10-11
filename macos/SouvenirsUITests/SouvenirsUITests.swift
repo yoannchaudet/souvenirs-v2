@@ -31,6 +31,30 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
+    func testStartupFailureDisablesCatalogActionsAndSupportsRetry() throws {
+        let app = launch(scenario: "startup-failure")
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["catalog-actions-unavailable"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(app.buttons["create-catalog"].isEnabled)
+        XCTAssertFalse(app.buttons["open-catalog"].isEnabled)
+        XCTAssertTrue(app.buttons["retry-engine"].isEnabled)
+
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertFalse(app.textFields["catalog-name"].exists)
+
+        app.buttons["retry-engine"].click()
+        XCTAssertTrue(app.buttons["retry-engine"].waitForNonExistence(timeout: 2))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["catalog-actions-unavailable"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(app.buttons["create-catalog"].isEnabled)
+    }
+
+    @MainActor
     func testStorageValidationFailureIsActionable() throws {
         let app = launch(scenario: "catalog-error")
 

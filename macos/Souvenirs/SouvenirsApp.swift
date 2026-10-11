@@ -13,6 +13,24 @@ final class EngineAppModel: ObservableObject {
         case connecting
         case ready(engineVersion: String)
         case failed(String)
+
+        var catalogActionsAvailable: Bool {
+            if case .ready = self {
+                return true
+            }
+            return false
+        }
+
+        var catalogActionsUnavailableDescription: String? {
+            switch self {
+            case .connecting:
+                return "Souvenirs is still connecting to its engine."
+            case .ready:
+                return nil
+            case .failed(let message):
+                return "The Souvenirs engine is unavailable. \(message)"
+            }
+        }
     }
 
     @Published private(set) var status: Status = .connecting
@@ -46,11 +64,13 @@ final class EngineAppModel: ObservableObject {
     }
 
     func start() {
-        guard lifecycleTask == nil else {
+        guard lifecycleTask == nil, !isStopping else {
             return
         }
 
+        status = .connecting
         lifecycleTask = Task {
+            defer { lifecycleTask = nil }
             do {
                 guard !Task.isCancelled else {
                     return
@@ -78,6 +98,13 @@ final class EngineAppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    func retry() {
+        guard case .failed = status else {
+            return
+        }
+        start()
     }
 
     func stop() async {
@@ -149,7 +176,8 @@ private struct EngineRootView: View {
         ContentView(
             engineStatus: engine.status,
             model: welcome,
-            imports: imports
+            imports: imports,
+            onRetryEngine: engine.retry
         )
     }
 }

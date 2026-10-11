@@ -29,6 +29,7 @@ fn main() {
 
 #[derive(Clone, Copy)]
 enum Scenario {
+    StartupFailure,
     Ready,
     SuccessfulOperation,
     FailedOperation,
@@ -58,6 +59,7 @@ fn parse_scenario() -> Result<Scenario, String> {
         return Err(usage());
     }
     let scenario = match arguments.next().as_deref() {
+        Some("startup-failure") => Scenario::StartupFailure,
         Some("ready") => Scenario::Ready,
         Some("successful-operation") => Scenario::SuccessfulOperation,
         Some("failed-operation") => Scenario::FailedOperation,
@@ -85,6 +87,7 @@ fn usage() -> String {
         "Usage: souvenirs-fake-engine --scenario <name>",
         "",
         "Scenarios:",
+        "  startup-failure",
         "  ready",
         "  successful-operation",
         "  failed-operation",
@@ -126,6 +129,14 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
             "Client version must use major.minor.patch unsigned decimal syntax.",
         );
     }
+    if matches!(scenario, Scenario::StartupFailure) {
+        return write_protocol_error(
+            &mut output,
+            handshake.id,
+            "startup_failed",
+            "The test engine could not start.",
+        );
+    }
     write_message(
         &mut output,
         &EngineMessage::success(
@@ -149,6 +160,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
     )?;
 
     match scenario {
+        Scenario::StartupFailure => unreachable!("startup failure exits before dispatch"),
         Scenario::Ready => {
             while let Some(request) = next_request(&mut input, &mut output)? {
                 reject_request(&mut output, request)?;

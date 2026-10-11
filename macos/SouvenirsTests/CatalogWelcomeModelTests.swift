@@ -3,6 +3,25 @@ import XCTest
 
 @MainActor
 final class CatalogWelcomeModelTests: XCTestCase {
+    func testCatalogActionsRequireReadyEngine() {
+        let connecting = EngineAppModel.Status.connecting
+        let ready = EngineAppModel.Status.ready(engineVersion: "0.1.0")
+        let failed = EngineAppModel.Status.failed("Could not start.")
+
+        XCTAssertFalse(connecting.catalogActionsAvailable)
+        XCTAssertEqual(
+            connecting.catalogActionsUnavailableDescription,
+            "Souvenirs is still connecting to its engine."
+        )
+        XCTAssertTrue(ready.catalogActionsAvailable)
+        XCTAssertNil(ready.catalogActionsUnavailableDescription)
+        XCTAssertFalse(failed.catalogActionsAvailable)
+        XCTAssertEqual(
+            failed.catalogActionsUnavailableDescription,
+            "The Souvenirs engine is unavailable. Could not start."
+        )
+    }
+
     func testCreateNavigationValidationAndRecentCatalog() async {
         let engine = FakeCatalogEngine()
         let model = CatalogWelcomeModel(

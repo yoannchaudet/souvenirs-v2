@@ -22,6 +22,29 @@ final class CatalogVisualTests: XCTestCase {
 
         try capture(
             ContentView(
+                engineStatus: .connecting,
+                model: model,
+                imports: imports
+            ),
+            size: NSSize(width: 586, height: 386),
+            name: "catalog-welcome-connecting",
+            assertsHeightFits: true
+        )
+
+        try capture(
+            ContentView(
+                engineStatus: .failed("The test engine could not start."),
+                model: model,
+                imports: imports,
+                onRetryEngine: {}
+            ),
+            size: NSSize(width: 586, height: 386),
+            name: "catalog-welcome-engine-failed",
+            assertsHeightFits: true
+        )
+
+        try capture(
+            ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
                 model: model,
                 imports: imports
