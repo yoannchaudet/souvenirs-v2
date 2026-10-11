@@ -959,6 +959,7 @@ struct CatalogCreationSheet: View {
 private struct ImportPlanningSheet: View {
     private enum FocusTarget: Hashable {
         case cancel
+        case retry
         case collectionName
         case dateSummary
         case asShown
@@ -971,7 +972,9 @@ private struct ImportPlanningSheet: View {
     @FocusState private var keyboardFocus: FocusTarget?
     @AccessibilityFocusState private var titleFocused: Bool
     @AccessibilityFocusState private var dateFocused: FocusTarget?
+    @AccessibilityFocusState private var recoveryFocused: FocusTarget?
     @State private var requestedDateFocus: FocusTarget?
+    @State private var requestedRecoveryFocus: FocusTarget?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1004,13 +1007,41 @@ private struct ImportPlanningSheet: View {
                     }
 
                     if let message = model.errorMessage {
-                        Label(message, systemImage: "exclamationmark.triangle.fill")
-                            .font(.callout)
-                            .foregroundStyle(.red)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
-                            .accessibilityIdentifier("import-planning-error")
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label(message, systemImage: "exclamationmark.triangle.fill")
+                                .font(.callout)
+                                .foregroundStyle(.red)
+                                .accessibilityLabel(
+                                    model.canRetryScan
+                                        ? "Import source unavailable. \(message)"
+                                        : message
+                                )
+                                .accessibilityIdentifier("import-planning-error")
+                            if model.canRetryScan {
+                                Button("Try Again") {
+                                    requestedRecoveryFocus = .collectionName
+                                    Task { await model.retryScan() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .accessibilityHint(
+                                    "Scans the same source again without closing this sheet."
+                                )
+                                .accessibilityIdentifier("retry-import-scan")
+                                .focusable()
+                                .focused($keyboardFocus, equals: .retry)
+                                .accessibilityFocused($recoveryFocused, equals: .retry)
+                                .task {
+                                    requestedRecoveryFocus = nil
+                                    await Task.yield()
+                                    guard model.canRetryScan else { return }
+                                    keyboardFocus = .retry
+                                    recoveryFocused = .retry
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
                     }
                 }
                 .padding(24)
@@ -1052,8 +1083,18 @@ private struct ImportPlanningSheet: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
-            keyboardFocus = model.scan == nil ? .cancel : .collectionName
-            titleFocused = true
+            if model.canRetryScan {
+                keyboardFocus = .retry
+                recoveryFocused = .retry
+            } else {
+                keyboardFocus = model.scan == nil ? .cancel : .collectionName
+                titleFocused = true
+            }
+        }
+        .onChange(of: model.canRetryScan) {
+            if $1 {
+                keyboardFocus = .retry
+            }
         }
         .onChange(of: model.scan != nil) {
             if $1 {
@@ -1079,6 +1120,13 @@ private struct ImportPlanningSheet: View {
                         .onSubmit { Task { await model.refreshReview() } }
                         .accessibilityIdentifier("import-collection-name")
                         .focused($keyboardFocus, equals: .collectionName)
+                        .accessibilityFocused($recoveryFocused, equals: .collectionName)
+                        .onAppear {
+                            guard requestedRecoveryFocus == .collectionName else { return }
+                            requestedRecoveryFocus = nil
+                            keyboardFocus = .collectionName
+                            recoveryFocused = .collectionName
+                        }
                     Button(
                         model.destinationMode == .create
                             ? "Add to Existing…" : "Create New…"
