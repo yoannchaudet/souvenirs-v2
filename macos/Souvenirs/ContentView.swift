@@ -1436,6 +1436,8 @@ private struct ImportPlanningSheet: View {
                     detailSection(title: "Where the files go") {
                         Text(review.destinationPath)
                             .textSelection(.enabled)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(review.destinationPath)
                             .accessibilityIdentifier("import-detail-destination")
                         if !review.preflight.representativeFileNames.isEmpty {
                             Text("Example file names")
@@ -1447,6 +1449,8 @@ private struct ImportPlanningSheet: View {
                             ) { index, fileName in
                                 Text(fileName)
                                     .textSelection(.enabled)
+                                    .accessibilityElement(children: .ignore)
+                                    .accessibilityLabel(fileName)
                                     .accessibilityIdentifier("import-detail-file-\(index)")
                             }
                         }
