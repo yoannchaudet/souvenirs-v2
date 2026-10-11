@@ -27,8 +27,8 @@ pub use operation::{
     OperationJournalError, OperationOutcome, OperationRecord,
 };
 pub use recovery::{
-    RecoveryCopy, RecoveryDirectory, RecoveryError, RecoveryManifest, RecoveryMode,
-    RecoveryOutcome, RecoveryRequest,
+    CancellableRecoveryOutcome, RecoveryCheckpoint, RecoveryCopy, RecoveryDirectory, RecoveryError,
+    RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest,
 };
 
 #[cfg(test)]

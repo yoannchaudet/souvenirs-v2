@@ -60,6 +60,18 @@ pub enum RecoveryOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancellableRecoveryOutcome {
+    Finished(RecoveryOutcome),
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryCheckpoint {
+    DurableBoundary,
+    CompletionBoundary,
+}
+
 impl CatalogLayout {
     pub fn recover_operation(
         &self,
@@ -67,7 +79,28 @@ impl CatalogLayout {
         journal_path: impl AsRef<Path>,
         request: RecoveryRequest,
     ) -> Result<RecoveryOutcome, RecoveryError> {
-        self.recover_operation_inner(lock, journal_path.as_ref(), request, None)
+        match self.recover_operation_inner(
+            lock,
+            journal_path.as_ref(),
+            request,
+            None,
+            &mut |_| false,
+        )? {
+            CancellableRecoveryOutcome::Finished(outcome) => Ok(outcome),
+            CancellableRecoveryOutcome::Interrupted => {
+                unreachable!("non-cancellable recovery cannot be interrupted")
+            }
+        }
+    }
+
+    pub fn recover_operation_cancellable(
+        &self,
+        lock: &CatalogLock,
+        journal_path: impl AsRef<Path>,
+        request: RecoveryRequest,
+        mut interrupt: impl FnMut(RecoveryCheckpoint) -> bool,
+    ) -> Result<CancellableRecoveryOutcome, RecoveryError> {
+        self.recover_operation_inner(lock, journal_path.as_ref(), request, None, &mut interrupt)
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -78,7 +111,18 @@ impl CatalogLayout {
         request: RecoveryRequest,
         failpoint: crate::Failpoint,
     ) -> Result<RecoveryOutcome, RecoveryError> {
-        self.recover_operation_inner(lock, journal_path.as_ref(), request, Some(failpoint))
+        match self.recover_operation_inner(
+            lock,
+            journal_path.as_ref(),
+            request,
+            Some(failpoint),
+            &mut |_| false,
+        )? {
+            CancellableRecoveryOutcome::Finished(outcome) => Ok(outcome),
+            CancellableRecoveryOutcome::Interrupted => {
+                unreachable!("non-cancellable recovery cannot be interrupted")
+            }
+        }
     }
 
     fn recover_operation_inner(
@@ -87,11 +131,12 @@ impl CatalogLayout {
         journal_path: &Path,
         request: RecoveryRequest,
         failpoint: Option<crate::operation::Failpoint>,
-    ) -> Result<RecoveryOutcome, RecoveryError> {
+        interrupt: &mut impl FnMut(RecoveryCheckpoint) -> bool,
+    ) -> Result<CancellableRecoveryOutcome, RecoveryError> {
         let (mut journal, records) = OperationJournal::open_for_recovery(self, lock, journal_path)
             .map_err(RecoveryError::Journal)?;
         if let Some(outcome) = terminal_outcome(&records) {
-            return Ok(outcome);
+            return Ok(CancellableRecoveryOutcome::Finished(outcome));
         }
         #[cfg(feature = "test-failpoints")]
         if let Some(failpoint) = failpoint {
@@ -103,17 +148,42 @@ impl CatalogLayout {
         validate_requests(&request)?;
         let manifests = validate_manifest_requests(&request.manifests)?;
         recover_directories(self, lock, &mut journal, &records, &request.directories)?;
-        recover_copies(
-            self,
-            lock,
-            &mut journal,
-            &records,
-            request.mode,
-            &request.copies,
-        )?;
-        recover_recorded_manifests(self, lock, &mut journal, &records, request.mode, &manifests)?;
-        recover_missing_manifests(self, lock, &mut journal, &records, &request.manifests)?;
+        if interrupt(RecoveryCheckpoint::DurableBoundary)
+            || recover_copies(
+                self,
+                lock,
+                &mut journal,
+                &records,
+                request.mode,
+                &request.copies,
+                interrupt,
+            )?
+            || recover_recorded_manifests(
+                self,
+                lock,
+                &mut journal,
+                &records,
+                request.mode,
+                &manifests,
+                interrupt,
+            )?
+            || recover_missing_manifests(
+                self,
+                lock,
+                &mut journal,
+                &records,
+                &request.manifests,
+                interrupt,
+            )?
+        {
+            return Ok(CancellableRecoveryOutcome::Interrupted);
+        }
         cleanup_owned_stages(self, lock, &mut journal, &records)?;
+        if interrupt(RecoveryCheckpoint::DurableBoundary)
+            || interrupt(RecoveryCheckpoint::CompletionBoundary)
+        {
+            return Ok(CancellableRecoveryOutcome::Interrupted);
+        }
 
         let outcome = match request.mode {
             RecoveryMode::Resume => {
@@ -127,7 +197,7 @@ impl CatalogLayout {
                 RecoveryOutcome::Cancelled
             }
         };
-        Ok(outcome)
+        Ok(CancellableRecoveryOutcome::Finished(outcome))
     }
 }
 
@@ -251,7 +321,8 @@ fn recover_copies(
     records: &[OperationRecord],
     mode: RecoveryMode,
     requests: &[RecoveryCopy],
-) -> Result<(), RecoveryError> {
+    interrupt: &mut impl FnMut(RecoveryCheckpoint) -> bool,
+) -> Result<bool, RecoveryError> {
     let requests = requests
         .iter()
         .map(|request| (request.step_id.as_str(), request))
@@ -334,6 +405,9 @@ fn recover_copies(
     }
 
     for step_id in order {
+        if interrupt(RecoveryCheckpoint::DurableBoundary) {
+            return Ok(true);
+        }
         let state = &copies[&step_id];
         let request = requests
             .get(step_id.as_str())
@@ -532,6 +606,9 @@ fn recover_copies(
             .map_err(RecoveryError::Copy)?;
     }
     for request in requests.values() {
+        if interrupt(RecoveryCheckpoint::DurableBoundary) {
+            return Ok(true);
+        }
         if let Some(recorded) = copies.get(&request.step_id) {
             if recorded.source != request.source || recorded.destination != request.destination {
                 return Err(RecoveryError::RequestMismatch(request.step_id.clone()));
@@ -558,7 +635,7 @@ fn recover_copies(
             )
             .map_err(RecoveryError::Copy)?;
     }
-    Ok(())
+    Ok(interrupt(RecoveryCheckpoint::DurableBoundary))
 }
 
 fn persist_observed_copy_stage_removal(
@@ -602,7 +679,8 @@ fn recover_recorded_manifests(
     records: &[OperationRecord],
     mode: RecoveryMode,
     requests: &BTreeMap<PathBuf, &RecoveryManifest>,
-) -> Result<(), RecoveryError> {
+    interrupt: &mut impl FnMut(RecoveryCheckpoint) -> bool,
+) -> Result<bool, RecoveryError> {
     let mut manifests = BTreeMap::<PathBuf, ManifestState>::new();
     let mut order = Vec::new();
     for transition in transitions(records) {
@@ -671,6 +749,9 @@ fn recover_recorded_manifests(
     }
 
     for manifest_path in order {
+        if interrupt(RecoveryCheckpoint::DurableBoundary) {
+            return Ok(true);
+        }
         let state = manifests
             .remove(&manifest_path)
             .expect("ordered manifest state exists");
@@ -810,7 +891,7 @@ fn recover_recorded_manifests(
             })
             .map_err(RecoveryError::Journal)?;
     }
-    Ok(())
+    Ok(interrupt(RecoveryCheckpoint::DurableBoundary))
 }
 
 #[derive(Clone)]
@@ -829,7 +910,8 @@ fn recover_missing_manifests(
     journal: &mut OperationJournal,
     records: &[OperationRecord],
     requests: &[RecoveryManifest],
-) -> Result<(), RecoveryError> {
+    interrupt: &mut impl FnMut(RecoveryCheckpoint) -> bool,
+) -> Result<bool, RecoveryError> {
     let recorded: BTreeSet<_> = transitions(records)
         .filter_map(|transition| match transition {
             DurableTransition::ManifestReplacementStarted { manifest_path, .. } => {
@@ -839,6 +921,9 @@ fn recover_missing_manifests(
         })
         .collect();
     for request in requests {
+        if interrupt(RecoveryCheckpoint::DurableBoundary) {
+            return Ok(true);
+        }
         if recorded.contains(&request.path) {
             continue;
         }
@@ -862,7 +947,7 @@ fn recover_missing_manifests(
             )
             .map_err(RecoveryError::Manifest)?;
     }
-    Ok(())
+    Ok(interrupt(RecoveryCheckpoint::DurableBoundary))
 }
 
 fn cleanup_owned_stages(

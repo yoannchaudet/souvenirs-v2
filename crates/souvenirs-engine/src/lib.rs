@@ -181,17 +181,46 @@ pub fn run_engine_with_options(
                                 name: "operation.recover".to_owned(),
                             },
                         )?;
-                        let mut sequence = 1_u64;
-                        let result = ImportRecoveryService::recover(
-                            catalog_path,
-                            &operation_id,
-                            ImportRecoveryMode::Resume,
-                            |progress| {
-                                let _ =
-                                    write_progress(&output, &operation_id, &mut sequence, progress);
-                            },
-                        );
-                        write_recovery_result(&output, &operation_id, sequence, result)?;
+                        let cancellation = ImportCancellation::default();
+                        let worker_cancellation = cancellation.clone();
+                        let worker_output = Arc::clone(&output);
+                        let worker_operation_id = operation_id.clone();
+                        let terminal_ready = Arc::new(AtomicBool::new(false));
+                        let worker_terminal_ready = Arc::clone(&terminal_ready);
+                        let handle = scope.spawn(move || {
+                            let mut sequence = 1_u64;
+                            let result = ImportRecoveryService::recover_cancellable(
+                                catalog_path,
+                                &worker_operation_id,
+                                ImportRecoveryMode::Resume,
+                                &worker_cancellation,
+                                |progress| {
+                                    let _ = write_progress(
+                                        &worker_output,
+                                        &worker_operation_id,
+                                        &mut sequence,
+                                        progress,
+                                    );
+                                    if !options.progress_delay.is_zero() {
+                                        thread::sleep(options.progress_delay);
+                                    }
+                                },
+                            );
+                            worker_cancellation.finish();
+                            worker_terminal_ready.store(true, Ordering::Release);
+                            let _ = write_recovery_result(
+                                &worker_output,
+                                &worker_operation_id,
+                                sequence,
+                                result,
+                            );
+                        });
+                        active = Some(ActiveOperation {
+                            operation_id,
+                            cancellation,
+                            terminal_ready,
+                            handle,
+                        });
                     }
                 }
             }
@@ -239,7 +268,7 @@ fn finish_active(operation: ActiveOperation<'_>, connection: &mut Connection) ->
     operation
         .handle
         .join()
-        .map_err(|_| io::Error::other("import execution worker panicked"))?;
+        .map_err(|_| io::Error::other("operation worker panicked"))?;
     connection.operation_catalogs.remove(&operation_id);
     Ok(())
 }
@@ -857,21 +886,25 @@ fn request_id(line: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Cursor};
     use std::{
+        fs,
+        io::{BufRead, BufReader, Cursor, Write},
+        net::Shutdown,
+        os::unix::net::UnixStream,
         sync::atomic::{AtomicBool, Ordering},
         sync::Arc,
+        thread,
         time::Duration,
     };
 
     use serde_json::{json, Value};
     use souvenirs_application::{
         CatalogService, DateResolution, DestinationMode, ImportCancellation,
-        ImportExecutionService, ImportPlanningService, ImportReviewRequest,
+        ImportExecutionRequest, ImportExecutionService, ImportPlanningService, ImportReviewRequest,
     };
     use souvenirs_protocol::PROTOCOL_VERSION;
 
-    use super::run_engine;
+    use super::{run_engine, run_engine_with_options, EngineOptions};
 
     #[test]
     fn reaps_worker_when_terminal_is_ready_before_thread_exit() {
@@ -1211,6 +1244,180 @@ mod tests {
         assert_eq!(responses[1]["error"]["code"], "not_a_catalog");
     }
 
+    #[test]
+    fn cancels_real_recovery_after_a_durable_copy_boundary() {
+        let temporary = tempfile::tempdir().unwrap();
+        let catalog = temporary.path().join("catalog");
+        let source = temporary.path().join("source");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir(&source).unwrap();
+        let files = [
+            ("IMG_20261010_101101.jpg", b"first".as_slice()),
+            ("IMG_20261010_101102.jpg", b"second".as_slice()),
+            ("IMG_20261010_101103.jpg", b"third".as_slice()),
+        ];
+        for (name, contents) in files {
+            fs::write(source.join(name), contents).unwrap();
+        }
+        CatalogService::create(&catalog, "Catalog").unwrap();
+        let review = ImportPlanningService::review(ImportReviewRequest {
+            catalog_path: catalog.clone(),
+            source_path: source.clone(),
+            collection_name: "Recovery".to_owned(),
+            destination_mode: DestinationMode::Create,
+            accepted_date: "2026-10-10".to_owned(),
+            date_resolution: Some(DateResolution::AsShown),
+        })
+        .unwrap();
+        let prepared = ImportExecutionService::prepare(ImportExecutionRequest {
+            reviewed_plan: review.reviewed_plan.unwrap(),
+        })
+        .unwrap();
+        let operation_id = prepared.operation_id().to_owned();
+        let unavailable = source.join("IMG_20261010_101102.jpg");
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |progress| {
+                if progress.completed_units == 1 {
+                    fs::remove_file(&unavailable).unwrap();
+                }
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "source_unavailable");
+        fs::write(&unavailable, b"second").unwrap();
+
+        let (mut client, engine) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let engine_input = BufReader::new(engine.try_clone().unwrap());
+        let engine_thread = thread::spawn(move || {
+            run_engine_with_options(
+                engine_input,
+                engine,
+                EngineOptions {
+                    progress_delay: Duration::from_millis(500),
+                },
+            )
+            .unwrap();
+        });
+        let mut output = BufReader::new(client.try_clone().unwrap());
+        client
+            .write_all(
+                format!(
+                    "{}{}",
+                    request("request-1", "handshake", json!({"client_version": "0.1.0"})),
+                    request(
+                        "request-2",
+                        "operation.start",
+                        json!({
+                            "name": "operation.recover",
+                            "catalog_path": catalog.to_string_lossy(),
+                            "operation_id": operation_id
+                        })
+                    )
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+
+        let handshake = read_message(&mut output);
+        let accepted = read_message(&mut output);
+        let started = read_message(&mut output);
+        let progress = read_message(&mut output);
+        assert_eq!(handshake["id"], "request-1");
+        assert_eq!(accepted["id"], "request-2");
+        assert_eq!(started["event"], "started");
+        assert_eq!(progress["event"], "progress");
+        assert_eq!(progress["completed_units"], 2);
+
+        client
+            .write_all(
+                request(
+                    "request-3",
+                    "operation.cancel",
+                    json!({"operation_id": operation_id}),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut cancellation_response = None;
+        let mut terminal = None;
+        let mut last_sequence = progress["sequence"].as_u64().unwrap();
+        while cancellation_response.is_none() || terminal.is_none() {
+            let message = read_message(&mut output);
+            if let Some(sequence) = message["sequence"].as_u64() {
+                assert_eq!(sequence, last_sequence + 1);
+                last_sequence = sequence;
+            }
+            if message["id"] == "request-3" {
+                cancellation_response = Some(message);
+            } else if matches!(
+                message["event"].as_str(),
+                Some("completed" | "cancelled" | "failed")
+            ) {
+                assert!(terminal.replace(message).is_none());
+            }
+        }
+        assert_eq!(
+            cancellation_response.unwrap()["result"]["type"],
+            "cancellation_accepted"
+        );
+        let terminal = terminal.unwrap();
+        assert_eq!(terminal["event"], "cancelled");
+        assert_eq!(terminal["copied_count"], 2);
+        assert_eq!(terminal["sequence"], last_sequence);
+
+        client
+            .write_all(
+                request(
+                    "request-4",
+                    "operation.inspect",
+                    json!({"path": catalog.to_string_lossy()}),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let inspection = read_message(&mut output);
+        assert_eq!(inspection["id"], "request-4");
+        assert!(inspection["result"]["operation"].is_null());
+
+        let collection = catalog.join("2026/2026-10-10 Recovery");
+        assert_eq!(
+            fs::read_to_string(collection.join("SHA256SUMS"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        let journal_path = fs::read_dir(catalog.join(".souvenirs/journal"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(&operation_id))
+            })
+            .unwrap();
+        let last_record: Value = serde_json::from_str(
+            fs::read_to_string(journal_path)
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            last_record,
+            json!({"kind": "outcome", "outcome": "cancelled"})
+        );
+
+        client.shutdown(Shutdown::Write).unwrap();
+        engine_thread.join().unwrap();
+    }
+
     fn request(id: &str, method: &str, params: Value) -> String {
         format!(
             "{}\n",
@@ -1235,5 +1442,12 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("line should be valid JSON"))
             .collect()
+    }
+
+    fn read_message(reader: &mut impl BufRead) -> Value {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(!line.is_empty(), "engine closed before emitting a message");
+        serde_json::from_str(&line).unwrap()
     }
 }
