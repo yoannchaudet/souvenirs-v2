@@ -45,6 +45,17 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
     ]));
     assert_eq!(initialized["command"], "catalog.initialize");
     assert_eq!(initialized["result"]["format_version"], 2);
+    let journal = fs::read_dir(catalog.join(".souvenirs/journal"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(
+        journal,
+        b"{\"kind\":\"plan\",\"operation\":\"initialize\",\"format_version\":2}\n",
+    )
+    .unwrap();
 
     let inspected = json_stdout(&run(&[
         "catalog",
@@ -53,6 +64,7 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
         catalog.to_str().unwrap(),
     ]));
     assert_eq!(inspected["command"], "catalog.inspect");
+    assert_eq!(inspected["result"]["unfinished_operation_count"], 0);
     assert_eq!(inspected["result"]["managed_file_count"], 0);
 
     let scanned = json_stdout(&run(&[

@@ -887,6 +887,9 @@ impl CatalogServiceError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::AlreadyCatalog(_) => "catalog_already_exists",
+            Self::Initialization(CatalogInitializationError::ConfigurationMismatch { .. }) => {
+                "catalog_configuration_mismatch"
+            }
             Self::Initialization(CatalogInitializationError::UnsupportedFormatVersion(_))
             | Self::UnsupportedFormat(_) => "unsupported_catalog_version",
             Self::Initialization(_) | Self::Io { .. } | Self::Storage(_) => "catalog_io",
@@ -904,6 +907,17 @@ impl fmt::Display for CatalogServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyCatalog(_) => formatter.write_str("This folder is already a catalog."),
+            Self::Initialization(CatalogInitializationError::ConfigurationMismatch {
+                confirmed_display_name,
+                ..
+            }) => match confirmed_display_name {
+                Some(name) => write!(
+                    formatter,
+                    "This catalog was initialized as {name:?} with different settings."
+                ),
+                None => formatter
+                    .write_str("This catalog was initialized with different settings."),
+            },
             Self::Initialization(error) => error.fmt(formatter),
             Self::Io { path, source } => {
                 write!(formatter, "Could not inspect {}: {source}", path.display())
@@ -952,9 +966,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CatalogIntent, CatalogService, CatalogServiceError, DateResolution, DestinationMode,
-        ImportPlanningError, ImportPlanningService, ImportReviewRequest,
-        OperationInspectionService,
+        CatalogInitializationError, CatalogIntent, CatalogService, CatalogServiceError,
+        DateResolution, DestinationMode, ImportPlanningError, ImportPlanningService,
+        ImportReviewRequest, OperationInspectionService,
     };
 
     #[test]
@@ -975,6 +989,17 @@ mod tests {
             CatalogService::validate(directory.path(), CatalogIntent::Create),
             Err(CatalogServiceError::AlreadyCatalog(_))
         ));
+        let error = CatalogServiceError::Initialization(
+            CatalogInitializationError::ConfigurationMismatch {
+                confirmed_display_name: Some("Family Catalog".to_owned()),
+                confirmed_config_yaml: "raw catalog configuration".to_owned(),
+            },
+        );
+        assert_eq!(error.code(), "catalog_configuration_mismatch");
+        assert_eq!(
+            error.to_string(),
+            "This catalog was initialized as \"Family Catalog\" with different settings."
+        );
     }
 
     #[test]

@@ -33,30 +33,8 @@ A persistence failure stops the operation with a contextual error.
 
 ## Catalog initialization
 
-Catalog initialization reserves a transient bootstrap lock and JSON Lines journal in the catalog root before catalog state becomes authoritative.
-The lock uses the catalog lock's holder and stale-holder rules.
-The journal plan contains the format version, complete configuration bytes and digest, final journal name, and owned configuration stage.
-
-Initialization performs these durable transitions:
-
-1. Create and persist the bootstrap journal.
-2. Append and persist the complete initialization plan.
-3. Record intent, create `.souvenirs/`, persist the catalog root, and record completion.
-4. Record intent, create `.souvenirs/journal/`, persist `.souvenirs/`, and record completion.
-5. Record intent, move the bootstrap journal, persist both directories, and record relocation.
-6. Record intent, create `.souvenirs/staging/`, persist `.souvenirs/`, and record completion.
-7. Record intent, create the configuration stage, persist its contents and directory, and record completion.
-8. Record publication intent, publish `.souvenirs.yml`, persist both directories, and record completion.
-9. Append the `completed` outcome, remove the bootstrap lock, and persist the catalog root.
-
-Initialization is complete only when `.souvenirs.yml` contains the planned bytes and the journal has a `completed` outcome.
-A retry with the same configuration verifies completion; a different configuration conflicts.
-A valid partial initialization resumes forward and persists observed mutations before recording progress.
-Observed directories must have the expected type, relocation must leave exactly one journal, and configuration bytes must match the plan digest.
-
-Recovery removes only a pre-plan bootstrap journal, an incomplete plan-owned configuration stage, and AppleDouble sidecars for relocated or published plan-owned artifacts.
-It never removes catalog directories, published configuration, or unknown content, and never overwrites an occupied path.
-Unexpected types, digests, journals, or preexisting content stop initialization unchanged.
+Initialization creates a transient lock and journal in the catalog root before it creates catalog state.
+A retry verifies the requested configuration and resumes valid state under the bootstrap lock.
 
 ## Lock
 

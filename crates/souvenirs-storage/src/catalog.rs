@@ -128,11 +128,10 @@ impl CatalogLayout {
         };
         let parsed = read_parsed_operation_records(&path, "inspect initialization journal")
             .map_err(CatalogInitializationError::Journal)?;
-        if let Some(format_version) = parsed.legacy_initialization_format {
-            verify_legacy_completed_initialization(self, &path, format_version)?;
-            return Ok(false);
+        if let Some((format_version, completed)) = parsed.legacy_initialization {
+            verify_legacy_initialization(self, &path, format_version, !completed)?;
+            return Ok(!completed);
         }
-        reject_unfinished_legacy_initialization(&path, &parsed)?;
         if parsed.records.is_empty() {
             return Ok(false);
         }
@@ -265,12 +264,8 @@ impl CatalogLayout {
     }
 
     fn validate_root(&self) -> Result<(), CatalogInitializationError> {
-        let root_metadata =
-            fs::metadata(&self.root).map_err(|source| CatalogInitializationError::Io {
-                action: "inspect catalog root",
-                path: self.root.clone(),
-                source,
-            })?;
+        let root_metadata = fs::metadata(&self.root)
+            .map_err(|source| io_error("inspect catalog root", &self.root, source))?;
         if !root_metadata.is_dir() {
             return Err(CatalogInitializationError::RootIsNotDirectory(
                 self.root.clone(),
@@ -287,8 +282,18 @@ impl CatalogLayout {
     ) -> Result<(), CatalogInitializationError> {
         let discovered = discover_initialization_journal(self)?;
         let (journal, plan) = match discovered {
-            Some(DiscoveredJournal::LegacyCompleted(path, format_version)) => {
-                verify_legacy_completed_initialization(self, &path, format_version)?;
+            Some(DiscoveredJournal::Legacy(path, format_version, unfinished)) => {
+                let confirmed =
+                    verify_legacy_initialization(self, &path, format_version, unfinished)?;
+                if config_bytes != confirmed.as_bytes() {
+                    return Err(CatalogInitializationError::ConfigurationMismatch {
+                        confirmed_display_name: config_display_name(&confirmed),
+                        confirmed_config_yaml: confirmed,
+                    });
+                }
+                if unfinished {
+                    complete_legacy_initialization(&path)?;
+                }
                 return Ok(());
             }
             Some(DiscoveredJournal::Preparation(path)) => {
@@ -296,10 +301,12 @@ impl CatalogLayout {
                     failpoint,
                     InitializationRecoveryCleanupObservedBeforePersistence
                 )?;
-                fs::remove_file(&path).map_err(|source| CatalogInitializationError::Io {
-                    action: "remove interrupted bootstrap journal preparation",
-                    path: path.clone(),
-                    source,
+                fs::remove_file(&path).map_err(|source| {
+                    io_error(
+                        "remove interrupted bootstrap journal preparation",
+                        &path,
+                        source,
+                    )
                 })?;
                 persist(
                     path.parent().expect("bootstrap preparation has a parent"),
@@ -332,9 +339,12 @@ impl CatalogLayout {
     fn resume_initialization_locked(&self) -> Result<bool, CatalogInitializationError> {
         let (journal, plan) = match discover_initialization_journal(self)? {
             Some(DiscoveredJournal::Valid(journal, plan)) => (journal, plan),
-            Some(DiscoveredJournal::LegacyCompleted(path, format_version)) => {
-                verify_legacy_completed_initialization(self, &path, format_version)?;
-                return Ok(false);
+            Some(DiscoveredJournal::Legacy(path, format_version, unfinished)) => {
+                verify_legacy_initialization(self, &path, format_version, unfinished)?;
+                if unfinished {
+                    complete_legacy_initialization(&path)?;
+                }
+                return Ok(unfinished);
             }
             _ => return Ok(false),
         };
@@ -423,11 +433,7 @@ impl CatalogLayout {
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|source| CatalogInitializationError::Io {
-                action: "create bootstrap journal exclusively",
-                path: path.clone(),
-                source,
-            })?;
+            .map_err(|source| io_error("create bootstrap journal exclusively", &path, source))?;
         persist(&self.root, "persist bootstrap journal entry")?;
         stop_at!(failpoint, InitializationJournalCreated)?;
         let mut journal = InitializationJournal {
@@ -487,10 +493,7 @@ impl InitializationPlan {
     }
 
     fn display_name(&self) -> Option<String> {
-        self.config_yaml.lines().find_map(|line| {
-            line.strip_prefix("display_name: ")
-                .and_then(|value| serde_json::from_str(value).ok())
-        })
+        config_display_name(&self.config_yaml)
     }
 
     fn journal_relative_path(&self) -> PathBuf {
@@ -514,18 +517,18 @@ impl InitializationJournal {
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
-            .map_err(|source| CatalogInitializationError::Io {
-                action: "open initialization journal for recovery",
-                path: path.clone(),
-                source,
+            .map_err(|source| {
+                io_error("open initialization journal for recovery", &path, source)
             })?;
         if parsed.interrupted_tail {
             file.set_len(parsed.complete_length)
                 .and_then(|()| sync_file(&file))
-                .map_err(|source| CatalogInitializationError::Io {
-                    action: "discard interrupted initialization journal append",
-                    path: path.clone(),
-                    source,
+                .map_err(|source| {
+                    io_error(
+                        "discard interrupted initialization journal append",
+                        &path,
+                        source,
+                    )
                 })?;
         }
         Ok(Self {
@@ -553,7 +556,7 @@ impl InitializationJournal {
 }
 
 enum DiscoveredJournal {
-    LegacyCompleted(PathBuf, u32),
+    Legacy(PathBuf, u32, bool),
     Preparation(PathBuf),
     Valid(InitializationJournal, InitializationPlan),
 }
@@ -566,13 +569,13 @@ fn discover_initialization_journal(
     };
     let parsed = read_parsed_operation_records(&path, "read initialization journal for recovery")
         .map_err(CatalogInitializationError::Journal)?;
-    if let Some(format_version) = parsed.legacy_initialization_format {
-        return Ok(Some(DiscoveredJournal::LegacyCompleted(
+    if let Some((format_version, completed)) = parsed.legacy_initialization {
+        return Ok(Some(DiscoveredJournal::Legacy(
             path,
             format_version,
+            !completed,
         )));
     }
-    reject_unfinished_legacy_initialization(&path, &parsed)?;
     if parsed.records.is_empty() && path == layout.bootstrap_journal_path() {
         return Ok(Some(DiscoveredJournal::Preparation(path)));
     }
@@ -588,38 +591,34 @@ fn discover_initialization_journal(
     Ok(Some(DiscoveredJournal::Valid(journal, plan)))
 }
 
-fn reject_unfinished_legacy_initialization(
-    path: &Path,
-    parsed: &crate::operation::ParsedOperationRecords,
-) -> Result<(), CatalogInitializationError> {
-    if parsed.legacy_initialization_unfinished {
-        return Err(CatalogInitializationError::InvalidBootstrapJournal {
-            path: path.to_path_buf(),
-            details: "unfinished legacy initialization cannot be resumed safely",
-        });
-    }
-    Ok(())
-}
-
-fn verify_legacy_completed_initialization(
+fn verify_legacy_initialization(
     layout: &CatalogLayout,
     path: &Path,
     format_version: u32,
-) -> Result<(), CatalogInitializationError> {
-    ensure_directory(&layout.state_directory())?;
-    ensure_directory(&layout.journal_directory())?;
-    if path.parent() != Some(layout.journal_directory().as_path()) {
+    unfinished: bool,
+) -> Result<String, CatalogInitializationError> {
+    let mut required = vec![layout.state_directory(), layout.journal_directory()];
+    if unfinished {
+        required.push(layout.staging_directory());
+    }
+    if path.parent() != Some(layout.journal_directory().as_path())
+        || required.iter().any(|required| {
+            !fs::symlink_metadata(required).is_ok_and(|metadata| metadata.file_type().is_dir())
+        })
+        || !fs::symlink_metadata(layout.config_path())
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+    {
         return Err(CatalogInitializationError::InvalidBootstrapJournal {
             path: path.to_path_buf(),
-            details: "legacy initialization journal is not completed catalog history",
+            details: "legacy initialization journal conflicts with published catalog state",
         });
     }
     let config = fs::read_to_string(layout.config_path()).map_err(|source| {
-        CatalogInitializationError::Io {
-            action: "read legacy catalog configuration",
-            path: layout.config_path(),
+        io_error(
+            "read legacy catalog configuration",
+            &layout.config_path(),
             source,
-        }
+        )
     })?;
     let config_version = parse_config_format_version(&config);
     if format_version != FORMAT_VERSION || config_version != Some(format_version) {
@@ -629,7 +628,29 @@ fn verify_legacy_completed_initialization(
         });
     }
 
-    Ok(())
+    Ok(config)
+}
+
+fn complete_legacy_initialization(path: &Path) -> Result<(), CatalogInitializationError> {
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(|source| io_error("open legacy initialization journal", path, source))?;
+    append_operation_record(
+        &mut file,
+        path,
+        &OperationRecord::Outcome {
+            outcome: OperationOutcome::Completed,
+        },
+    )
+    .map_err(CatalogInitializationError::Journal)
+}
+
+fn config_display_name(config: &str) -> Option<String> {
+    config.lines().find_map(|line| {
+        line.strip_prefix("display_name: ")
+            .and_then(|value| serde_json::from_str(value).ok())
+    })
 }
 
 fn parse_config_format_version(config: &str) -> Option<u32> {
@@ -649,17 +670,19 @@ fn initialization_journal_path(
         && directory_if_exists(&layout.journal_directory())?
     {
         for entry in fs::read_dir(layout.journal_directory()).map_err(|source| {
-            CatalogInitializationError::Io {
-                action: "scan initialization journals",
-                path: layout.journal_directory(),
+            io_error(
+                "scan initialization journals",
+                &layout.journal_directory(),
                 source,
-            }
+            )
         })? {
             let path = entry
-                .map_err(|source| CatalogInitializationError::Io {
-                    action: "read initialization journal entry",
-                    path: layout.journal_directory(),
-                    source,
+                .map_err(|source| {
+                    io_error(
+                        "read initialization journal entry",
+                        &layout.journal_directory(),
+                        source,
+                    )
                 })?
                 .path();
             if path
@@ -781,10 +804,8 @@ fn ensure_initialization_directory(
         }
         Ok(_) => return Err(CatalogInitializationError::PathConflict(path)),
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(&path).map_err(|source| CatalogInitializationError::Io {
-                action: "create initialization directory exclusively",
-                path: path.clone(),
-                source,
+            fs::create_dir(&path).map_err(|source| {
+                io_error("create initialization directory exclusively", &path, source)
             })?;
             persist(
                 path.parent()
@@ -793,13 +814,7 @@ fn ensure_initialization_directory(
             )?;
             fail(failpoint, mutation_failpoint)?;
         }
-        Err(source) => {
-            return Err(CatalogInitializationError::Io {
-                action: "inspect initialization directory",
-                path,
-                source,
-            });
-        }
+        Err(source) => return Err(io_error("inspect initialization directory", &path, source)),
     }
     journal.append(OperationRecord::Transition {
         transition: completed,
@@ -842,11 +857,11 @@ fn relocate_initialization_journal(
             publish_path_exclusively(&layout.bootstrap_journal_path(), &destination)
                 .map_err(|error| publication_error(error, &destination))?;
             remove_apple_double_sidecar(&layout.bootstrap_journal_path()).map_err(|source| {
-                CatalogInitializationError::Io {
-                    action: "remove bootstrap journal AppleDouble sidecar",
-                    path: layout.bootstrap_journal_path(),
+                io_error(
+                    "remove bootstrap journal AppleDouble sidecar",
+                    &layout.bootstrap_journal_path(),
                     source,
-                }
+                )
             })?;
             persist(&layout.root, "persist bootstrap journal removal")?;
             persist(
@@ -861,11 +876,11 @@ fn relocate_initialization_journal(
                 return Err(CatalogInitializationError::PathConflict(destination));
             }
             remove_apple_double_sidecar(&layout.bootstrap_journal_path()).map_err(|source| {
-                CatalogInitializationError::Io {
-                    action: "remove observed bootstrap journal AppleDouble sidecar",
-                    path: layout.bootstrap_journal_path(),
+                io_error(
+                    "remove observed bootstrap journal AppleDouble sidecar",
+                    &layout.bootstrap_journal_path(),
                     source,
-                }
+                )
             })?;
             stop_at!(
                 failpoint,
@@ -920,16 +935,15 @@ fn stage_configuration(
                     failpoint,
                     InitializationRecoveryConfigStageObservedBeforePersistence
                 )?;
-                let file =
-                    File::open(&staged_path).map_err(|source| CatalogInitializationError::Io {
-                        action: "open observed staged configuration",
-                        path: staged_path.clone(),
+                let file = File::open(&staged_path).map_err(|source| {
+                    io_error("open observed staged configuration", &staged_path, source)
+                })?;
+                sync_file(&file).map_err(|source| {
+                    io_error(
+                        "persist observed staged configuration",
+                        &staged_path,
                         source,
-                    })?;
-                sync_file(&file).map_err(|source| CatalogInitializationError::Io {
-                    action: "persist observed staged configuration",
-                    path: staged_path.clone(),
-                    source,
+                    )
                 })?;
                 persist(
                     &layout.staging_directory(),
@@ -991,11 +1005,11 @@ fn publish_configuration(
             publish_path_exclusively(&staged_path, &destination)
                 .map_err(|error| publication_error(error, &destination))?;
             remove_apple_double_sidecar(&staged_path).map_err(|source| {
-                CatalogInitializationError::Io {
-                    action: "remove initialization stage AppleDouble sidecar",
-                    path: staged_path.clone(),
+                io_error(
+                    "remove initialization stage AppleDouble sidecar",
+                    &staged_path,
                     source,
-                }
+                )
             })?;
             persist(
                 &layout.staging_directory(),
@@ -1007,11 +1021,11 @@ fn publish_configuration(
         (false, true) => {
             verify_file_digest(&destination, &plan.config_sha256)?;
             remove_apple_double_sidecar(&staged_path).map_err(|source| {
-                CatalogInitializationError::Io {
-                    action: "remove observed initialization stage AppleDouble sidecar",
-                    path: staged_path.clone(),
+                io_error(
+                    "remove observed initialization stage AppleDouble sidecar",
+                    &staged_path,
                     source,
-                }
+                )
             })?;
             stop_at!(
                 failpoint,
@@ -1043,18 +1057,10 @@ fn write_stage(
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|source| CatalogInitializationError::Io {
-            action: "create configuration stage exclusively",
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| io_error("create configuration stage exclusively", path, source))?;
     file.write_all(bytes)
         .and_then(|()| sync_file(&file))
-        .map_err(|source| CatalogInitializationError::Io {
-            action: "write and persist staged configuration",
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| io_error("write and persist staged configuration", path, source))?;
     persist(
         &layout.staging_directory(),
         "persist staged configuration entry",
@@ -1132,19 +1138,13 @@ fn digest_bytes(bytes: &[u8]) -> String {
 }
 
 fn file_digest(path: &Path) -> Result<String, CatalogInitializationError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| CatalogInitializationError::Io {
-        action: "inspect initialization file",
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io_error("inspect initialization file", path, source))?;
     if !metadata.file_type().is_file() {
         return Err(CatalogInitializationError::PathConflict(path.to_path_buf()));
     }
-    let bytes = fs::read(path).map_err(|source| CatalogInitializationError::Io {
-        action: "read initialization file",
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let bytes =
+        fs::read(path).map_err(|source| io_error("read initialization file", path, source))?;
     Ok(digest_bytes(&bytes))
 }
 
@@ -1165,11 +1165,7 @@ fn ensure_directory(path: &Path) -> Result<(), CatalogInitializationError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
         Ok(_) => Err(CatalogInitializationError::PathConflict(path.to_path_buf())),
-        Err(source) => Err(CatalogInitializationError::Io {
-            action: "inspect initialization directory",
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(io_error("inspect initialization directory", path, source)),
     }
 }
 
@@ -1179,11 +1175,7 @@ fn ensure_absent(path: &Path) -> Result<(), CatalogInitializationError> {
             path.to_path_buf(),
         )),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(CatalogInitializationError::Io {
-            action: "inspect initialization destination",
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(io_error("inspect initialization destination", path, source)),
     }
 }
 
@@ -1191,11 +1183,7 @@ fn path_exists(path: &Path) -> Result<bool, CatalogInitializationError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(CatalogInitializationError::Io {
-            action: "inspect initialization path",
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(io_error("inspect initialization path", path, source)),
     }
 }
 
@@ -1204,11 +1192,7 @@ fn regular_file_if_exists(path: &Path) -> Result<bool, CatalogInitializationErro
         Ok(metadata) if metadata.file_type().is_file() => Ok(true),
         Ok(_) => Err(CatalogInitializationError::PathConflict(path.to_path_buf())),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(CatalogInitializationError::Io {
-            action: "inspect initialization journal",
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(io_error("inspect initialization journal", path, source)),
     }
 }
 
@@ -1217,30 +1201,32 @@ fn directory_if_exists(path: &Path) -> Result<bool, CatalogInitializationError> 
         Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
         Ok(_) => Err(CatalogInitializationError::PathConflict(path.to_path_buf())),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(CatalogInitializationError::Io {
-            action: "inspect initialization journal directory",
-            path: path.to_path_buf(),
+        Err(source) => Err(io_error(
+            "inspect initialization journal directory",
+            path,
             source,
-        }),
+        )),
     }
 }
 
 fn persist(path: &Path, action: &'static str) -> Result<(), CatalogInitializationError> {
-    sync_directory(path).map_err(|source| CatalogInitializationError::Io {
+    sync_directory(path).map_err(|source| io_error(action, path, source))
+}
+
+fn io_error(action: &'static str, path: &Path, source: io::Error) -> CatalogInitializationError {
+    CatalogInitializationError::Io {
         action,
         path: path.to_path_buf(),
         source,
-    })
+    }
 }
 
 fn publication_error(error: PublishError, path: &Path) -> CatalogInitializationError {
     match error {
         PublishError::Occupied => CatalogInitializationError::AlreadyExists(path.to_path_buf()),
-        PublishError::Io(source) => CatalogInitializationError::Io {
-            action: "publish initialization artifact exclusively",
-            path: path.to_path_buf(),
-            source,
-        },
+        PublishError::Io(source) => {
+            io_error("publish initialization artifact exclusively", path, source)
+        }
     }
 }
 
@@ -1301,19 +1287,15 @@ impl fmt::Display for CatalogInitializationError {
             }
             Self::ConfigurationMismatch {
                 confirmed_display_name,
-                confirmed_config_yaml,
+                ..
             } => {
-                write!(
-                    formatter,
-                    "catalog initialization configuration differs from the confirmed bootstrap plan"
+                formatter.write_str(
+                    "catalog initialization configuration differs from the confirmed configuration",
                 )?;
                 if let Some(display_name) = confirmed_display_name {
                     write!(formatter, " for {display_name:?}")?;
                 }
-                write!(
-                    formatter,
-                    "; confirmed configuration: {confirmed_config_yaml:?}"
-                )
+                Ok(())
             }
             Self::DeserializePlan { path, source } => write!(
                 formatter,
@@ -1456,16 +1438,25 @@ mod tests {
             format!("{plan}{{\"kind\":\"outcome\",\"outcome\":\"completed\"}}\n"),
         )
         .unwrap();
-        fs::remove_dir(layout.staging_directory()).unwrap();
+        let mut different = CatalogConfig::default();
+        different.display_name.replace("Different".to_owned());
+        let error = CatalogLayout::initialize(temporary.path(), &different).unwrap_err();
+        assert!(matches!(
+            error,
+            CatalogInitializationError::ConfigurationMismatch { .. }
+        ));
         CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap();
-        fs::write(journals[0].path(), plan).unwrap();
+        fs::write(journals[0].path(), &plan).unwrap();
+        assert!(CatalogLayout::resume_initialization(temporary.path())
+            .unwrap()
+            .is_some());
+        fs::write(journals[0].path(), &plan).unwrap();
+        fs::remove_dir(layout.staging_directory()).unwrap();
         let error = CatalogLayout::resume_initialization(temporary.path()).unwrap_err();
         assert!(matches!(
             error,
-            CatalogInitializationError::InvalidBootstrapJournal { details, .. }
-                if details.contains("legacy")
+            CatalogInitializationError::InvalidBootstrapJournal { .. }
         ));
-        assert!(journals[0].path().exists());
     }
 
     #[test]

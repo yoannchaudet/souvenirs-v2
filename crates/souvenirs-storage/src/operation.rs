@@ -505,8 +505,7 @@ pub(crate) struct ParsedOperationRecords {
     pub records: Vec<OperationRecord>,
     pub complete_length: u64,
     pub interrupted_tail: bool,
-    pub legacy_initialization_format: Option<u32>,
-    pub legacy_initialization_unfinished: bool,
+    pub legacy_initialization: Option<(u32, bool)>,
 }
 
 pub(crate) fn read_parsed_operation_records(
@@ -518,19 +517,21 @@ pub(crate) fn read_parsed_operation_records(
         path: path.to_path_buf(),
         source,
     })?;
-    if let Some(legacy) = parse_legacy_initialization(path, &bytes) {
-        let (records, format_version, unfinished) = match legacy {
-            LegacyInitialization::Completed(records, format_version) => {
-                (records, Some(format_version), false)
-            }
-            LegacyInitialization::Unfinished => (Vec::new(), None, true),
-        };
+    if let Some((format_version, completed)) = parse_legacy_initialization(path, &bytes) {
+        let mut records = vec![OperationRecord::Plan {
+            operation_id: INITIALIZATION_OPERATION_ID.to_owned(),
+            plan: serde_json::json!({"legacy_initialization":true,"format_version":format_version}),
+        }];
+        if completed {
+            records.push(OperationRecord::Outcome {
+                outcome: OperationOutcome::Completed,
+            });
+        }
         return Ok(ParsedOperationRecords {
             records,
             complete_length: bytes.len() as u64,
             interrupted_tail: false,
-            legacy_initialization_format: format_version,
-            legacy_initialization_unfinished: unfinished,
+            legacy_initialization: Some((format_version, completed)),
         });
     }
     let mut records = Vec::new();
@@ -558,65 +559,33 @@ pub(crate) fn read_parsed_operation_records(
         records,
         complete_length: start as u64,
         interrupted_tail: start < bytes.len(),
-        legacy_initialization_format: None,
-        legacy_initialization_unfinished: false,
+        legacy_initialization: None,
     })
 }
 
-enum LegacyInitialization {
-    Completed(Vec<OperationRecord>, u32),
-    Unfinished,
-}
-
-fn parse_legacy_initialization(path: &Path, bytes: &[u8]) -> Option<LegacyInitialization> {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacyPlan {
-        kind: String,
-        operation: String,
-        format_version: u32,
-    }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacyOutcome {
-        kind: String,
-        outcome: String,
-    }
-
+fn parse_legacy_initialization(path: &Path, bytes: &[u8]) -> Option<(u32, bool)> {
     if !is_initialization_journal(path) || !bytes.ends_with(b"\n") {
         return None;
     }
     let mut lines = bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty());
-    let plan: LegacyPlan = serde_json::from_slice(lines.next()?).ok()?;
-    if plan.kind != "plan" || plan.operation != INITIALIZATION_OPERATION_ID {
+    let plan = serde_json::from_slice::<serde_json::Value>(lines.next()?).ok()?;
+    let fields = plan.as_object()?;
+    if fields.len() != 3
+        || fields.get("kind")? != "plan"
+        || fields.get("operation")? != INITIALIZATION_OPERATION_ID
+    {
         return None;
     }
-    let Some(outcome) = lines
-        .next()
-        .and_then(|line| serde_json::from_slice::<LegacyOutcome>(line).ok())
-    else {
-        return Some(LegacyInitialization::Unfinished);
-    };
-    if lines.next().is_some() || outcome.kind != "outcome" || outcome.outcome != "completed" {
-        return Some(LegacyInitialization::Unfinished);
-    }
-    Some(LegacyInitialization::Completed(
-        vec![
-            OperationRecord::Plan {
-                operation_id: INITIALIZATION_OPERATION_ID.to_owned(),
-                plan: serde_json::json!({
-                    "legacy_initialization": true,
-                    "format_version": plan.format_version,
-                }),
-            },
-            OperationRecord::Outcome {
-                outcome: OperationOutcome::Completed,
-            },
-        ],
-        plan.format_version,
-    ))
+    let format_version = fields.get("format_version")?.as_u64()?.try_into().ok()?;
+    let completed = matches!(
+        lines
+            .next()
+            .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok()),
+        Some(outcome) if outcome == serde_json::json!({"kind":"outcome","outcome":"completed"})
+    ) && lines.next().is_none();
+    Some((format_version, completed))
 }
 
 pub(crate) fn append_operation_record(
