@@ -711,9 +711,14 @@ pub(crate) fn inspect_source(
             let Some(confirmation) = confirmation else {
                 continue;
             };
-            for item in confirm_batch(batch, confirmation)
-                .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?
-            {
+            let items = match confirm_batch(batch, confirmation) {
+                Ok(items) => items,
+                Err(DateTimeError::UtcInterpretationOutOfRange) => continue,
+                Err(error) => {
+                    return Err(ImportPlanningError::InvalidMetadata(error.to_string()));
+                }
+            };
+            for item in items {
                 confirmed.insert(item.item_id, item.accepted);
             }
         }
@@ -1330,6 +1335,19 @@ mod tests {
         assert_eq!(
             super::interpretation_preview(&batch, time::UtcOffset::UTC).unwrap(),
             Some(("12:14".to_owned(), "12:14".to_owned()))
+        );
+        let mut out_of_range = batch;
+        out_of_range.items[0].pending.candidate.value =
+            souvenirs_domain::datetime::DateTimeValue::AmbiguousContainer(
+                time::macros::datetime!(9999-12-31 23:59:59),
+            );
+        assert_eq!(
+            super::interpretation_preview(
+                &out_of_range,
+                time::UtcOffset::from_hms(2, 0, 0).unwrap()
+            )
+            .unwrap(),
+            None
         );
     }
 

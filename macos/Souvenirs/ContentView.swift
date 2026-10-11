@@ -901,6 +901,7 @@ private struct ImportPlanningSheet: View {
     @FocusState private var keyboardFocus: FocusTarget?
     @AccessibilityFocusState private var titleFocused: Bool
     @AccessibilityFocusState private var dateFocused: FocusTarget?
+    @State private var requestedDateFocus: FocusTarget?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1048,13 +1049,19 @@ private struct ImportPlanningSheet: View {
                         .accessibilityLabel("Selected date interpretation")
                         .accessibilityValue(selectedDateSummary(resolution))
                         .onAppear {
+                            guard requestedDateFocus == .dateSummary else { return }
+                            requestedDateFocus = nil
                             keyboardFocus = .dateSummary
                             dateFocused = .dateSummary
                         }
                     Spacer()
                     Button("Change") {
                         Task {
+                            requestedDateFocus = .asShown
                             await model.changeDateResolution()
+                            if model.dateResolution != nil {
+                                requestedDateFocus = nil
+                            }
                         }
                     }
                     .accessibilityIdentifier("change-date-selection")
@@ -1134,7 +1141,11 @@ private struct ImportPlanningSheet: View {
     ) -> some View {
         Button {
             Task {
+                requestedDateFocus = .dateSummary
                 await model.resolveDate(value)
+                if model.dateResolution == nil {
+                    requestedDateFocus = nil
+                }
             }
         } label: {
             VStack(alignment: .leading, spacing: 2) {
@@ -1162,7 +1173,8 @@ private struct ImportPlanningSheet: View {
         .focused($keyboardFocus, equals: focus)
         .accessibilityFocused($dateFocused, equals: focus)
         .onAppear {
-            guard focus == .asShown else { return }
+            guard focus == .asShown, requestedDateFocus == .asShown else { return }
+            requestedDateFocus = nil
             keyboardFocus = .asShown
             dateFocused = .asShown
         }
@@ -1193,7 +1205,7 @@ private struct ImportPlanningSheet: View {
         case .asShown:
             return model.supportsUTCConversion ? "As shown" : "Proposed dates"
         case .convertFromUTC:
-            return "Converted from UTC"
+            return "Converted from UTC where applicable"
         }
     }
 
