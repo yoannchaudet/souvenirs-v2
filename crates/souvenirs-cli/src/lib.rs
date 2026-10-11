@@ -1006,12 +1006,14 @@ fn import_execute(
     }
     validate_plan_state(&layout, &stored)?;
     let progress_path = validate_progress_path(&layout, plan_path, &stored, progress_path)?;
+    validate_plan_destinations(&layout, &stored.import_plan)?;
     let operation_id = stored.import_plan.document().plan_id.as_str().to_owned();
     let mut progress = ProgressWriter::new(&progress_path, &operation_id)?;
     progress.write("started", None)?;
 
     let lock = CatalogLock::acquire(&layout)
         .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
+    // Recheck under the lock to close the race after the read-only preflight.
     validate_plan_destinations(&layout, &stored.import_plan)?;
     let mut journal = OperationJournal::create(&layout, &lock, &operation_id, &stored.import_plan)
         .map_err(|error| CliError::conflict(format!("create operation journal: {error}")))?;

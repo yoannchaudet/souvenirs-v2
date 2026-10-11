@@ -373,15 +373,19 @@ fn refuses_to_execute_an_unconfirmed_plan_without_mutating_the_catalog() {
 }
 
 #[test]
-fn rejects_portable_directory_drift_without_creating_a_journal() {
+fn rejects_portable_directory_drift_before_creating_progress_or_mutating_inputs() {
     let temporary = TempDir::new().unwrap();
-    let (catalog, _source, plan) = prepare_plan_with_existing_year(&temporary, true, true);
+    let (catalog, source, plan) = prepare_plan_with_existing_year(&temporary, true, true);
     let plan_json: Value = serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
     let operation_id = plan_json["import_plan"]["document"]["plan_id"]
         .as_str()
         .unwrap();
     let occupied = catalog.join("2026").join("2026-10-10 VACATION");
     fs::create_dir(&occupied).unwrap();
+    let progress = temporary.path().join("progress.jsonl");
+    let catalog_before = tree_snapshot(&catalog);
+    let source_before = tree_snapshot(&source);
+    let plan_before = fs::read(&plan).unwrap();
 
     let output = run(&[
         "import",
@@ -390,6 +394,8 @@ fn rejects_portable_directory_drift_without_creating_a_journal() {
         catalog.to_str().unwrap(),
         "--plan",
         plan.to_str().unwrap(),
+        "--progress",
+        progress.to_str().unwrap(),
     ]);
 
     assert_eq!(output.status.code(), Some(4));
@@ -400,8 +406,12 @@ fn rejects_portable_directory_drift_without_creating_a_journal() {
         .as_str()
         .unwrap()
         .contains("planned destination is occupied"));
+    assert!(!progress.exists());
+    assert!(!catalog.join(".souvenirs").join("lock").exists());
     assert_eq!(operation_journal_count(&catalog, operation_id), 0);
-    assert!(occupied.is_dir());
+    assert_eq!(tree_snapshot(&catalog), catalog_before);
+    assert_eq!(tree_snapshot(&source), source_before);
+    assert_eq!(fs::read(&plan).unwrap(), plan_before);
 }
 
 #[test]
