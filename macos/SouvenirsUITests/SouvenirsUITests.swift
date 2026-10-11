@@ -146,22 +146,31 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-operation-summary"].exists
         )
-        for identifier in [
-            "import-detail-destination",
-            "import-detail-file-0",
-            "import-detail-space",
-            "import-detail-write-probe",
-            "import-detail-portable-names",
-            "import-detail-no-replacement",
-            "import-detail-copy-sequence",
-            "import-detail-recovery"
+        for text in [
+            "/Volumes/photos/Family Catalog/2026/2026-10-10 Dolomites",
+            "2026-10-10 12-14-00 001.jpg",
+            "The archive accepted a confirmed test write",
+            "Every planned name works on supported storage",
+            "The planned names do not replace existing files",
+            "1. Copy it to a hidden working folder.",
+            "2. Read the copy back and compare it with the source.",
+            "3. Publish the final name and checksum."
         ] {
             XCTAssertTrue(
-                sheet.descendants(matching: .any)[identifier]
-                    .waitForExistence(timeout: 3),
-                "\(identifier) should appear in the expanded import details"
+                sheet.staticTexts[text].waitForExistence(timeout: 3),
+                "\(text) should appear in the expanded import details"
             )
         }
+        XCTAssertTrue(
+            sheet.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "available when reviewed")
+            ).firstMatch.exists
+        )
+        XCTAssertTrue(
+            sheet.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "resume or cancel safely")
+            ).firstMatch.exists
+        )
     }
 
     @MainActor
