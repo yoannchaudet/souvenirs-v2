@@ -1177,6 +1177,7 @@ private struct ImportPlanningSheet: View {
                         Task { await model.loadCollections() }
                     }
                     .accessibilityIdentifier("import-destination-mode")
+                    .focusable()
                     .focused($keyboardFocus, equals: .destination)
                     .accessibilityFocused($destinationFocused)
                     if model.destinationMode == .existing {
