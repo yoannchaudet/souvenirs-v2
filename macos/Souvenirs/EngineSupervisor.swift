@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public actor EngineSupervisor {
-    public static let protocolVersion: UInt32 = 2
+    public static let protocolVersion: UInt32 = 3
     public static let protocolClientVersion = "0.2.0"
 
     public struct Handshake: Equatable, Sendable {
@@ -33,6 +33,163 @@ public actor EngineSupervisor {
         public let volumeName: String
         public let displayName: String?
         public let detail: String
+    }
+
+    public enum CatalogCollectionIdentity: Codable, Equatable, Sendable {
+        case dated(year: String, directory: String)
+        case ongoing(key: String)
+
+        private enum Kind: String, Codable {
+            case dated
+            case ongoing
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case year
+            case directory
+            case key
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            switch try container.decode(Kind.self, forKey: .kind) {
+            case .dated:
+                self = try .dated(
+                    year: container.decode(String.self, forKey: .year),
+                    directory: container.decode(String.self, forKey: .directory)
+                )
+            case .ongoing:
+                self = try .ongoing(
+                    key: container.decode(String.self, forKey: .key)
+                )
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .dated(let year, let directory):
+                try container.encode(Kind.dated, forKey: .kind)
+                try container.encode(year, forKey: .year)
+                try container.encode(directory, forKey: .directory)
+            case .ongoing(let key):
+                try container.encode(Kind.ongoing, forKey: .kind)
+                try container.encode(key, forKey: .key)
+            }
+        }
+    }
+
+    public struct CatalogCollectionPart: Codable, Equatable, Sendable {
+        public let year: Int
+        public let yearDirectory: String
+        public let collectionDirectory: String
+
+        enum CodingKeys: String, CodingKey {
+            case year
+            case yearDirectory = "year_directory"
+            case collectionDirectory = "collection_directory"
+        }
+    }
+
+    public enum CatalogCollection: Codable, Equatable, Sendable {
+        case dated(
+            identity: CatalogCollectionIdentity,
+            label: String,
+            startDate: String,
+            endDate: String
+        )
+        case ongoing(
+            identity: CatalogCollectionIdentity,
+            label: String,
+            parts: [CatalogCollectionPart]
+        )
+
+        public var identity: CatalogCollectionIdentity {
+            switch self {
+            case .dated(let identity, _, _, _), .ongoing(let identity, _, _):
+                return identity
+            }
+        }
+
+        public var label: String {
+            switch self {
+            case .dated(_, let label, _, _), .ongoing(_, let label, _):
+                return label
+            }
+        }
+
+        private enum Kind: String, Codable {
+            case dated
+            case ongoing
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case identity
+            case label
+            case startDate = "start_date"
+            case endDate = "end_date"
+            case parts
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let identity = try container.decode(
+                CatalogCollectionIdentity.self,
+                forKey: .identity
+            )
+            let label = try container.decode(String.self, forKey: .label)
+            switch try container.decode(Kind.self, forKey: .kind) {
+            case .dated:
+                guard case .dated = identity else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .identity,
+                        in: container,
+                        debugDescription: "A dated collection requires a dated identity"
+                    )
+                }
+                self = try .dated(
+                    identity: identity,
+                    label: label,
+                    startDate: container.decode(String.self, forKey: .startDate),
+                    endDate: container.decode(String.self, forKey: .endDate)
+                )
+            case .ongoing:
+                guard case .ongoing = identity else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .identity,
+                        in: container,
+                        debugDescription: "An ongoing collection requires an ongoing identity"
+                    )
+                }
+                self = try .ongoing(
+                    identity: identity,
+                    label: label,
+                    parts: container.decode(
+                        [CatalogCollectionPart].self,
+                        forKey: .parts
+                    )
+                )
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .dated(let identity, let label, let startDate, let endDate):
+                try container.encode(Kind.dated, forKey: .kind)
+                try container.encode(identity, forKey: .identity)
+                try container.encode(label, forKey: .label)
+                try container.encode(startDate, forKey: .startDate)
+                try container.encode(endDate, forKey: .endDate)
+            case .ongoing(let identity, let label, let parts):
+                try container.encode(Kind.ongoing, forKey: .kind)
+                try container.encode(identity, forKey: .identity)
+                try container.encode(label, forKey: .label)
+                try container.encode(parts, forKey: .parts)
+            }
+        }
     }
 
     public enum ImportDestinationMode: String, Codable, Equatable, Sendable {
@@ -604,6 +761,20 @@ public actor EngineSupervisor {
             timeout: requestTimeout
         )
         return try catalogLocation(from: result)
+    }
+
+    public func catalogCollections(path: String) async throws -> [CatalogCollection] {
+        let result: CatalogCollectionsResult = try await sendRequest(
+            method: "catalog.collections",
+            parameters: CatalogPathParameters(path: path),
+            timeout: requestTimeout
+        )
+        guard result.type == "catalog_collections" else {
+            throw SupervisorError.malformedResponse(
+                "The response result type is not catalog_collections"
+            )
+        }
+        return result.collections
     }
 
     public func scanImport(sourcePath: String) async throws -> ImportScan {
@@ -1792,6 +1963,11 @@ private struct CatalogResult: Decodable, Sendable {
         case displayName = "display_name"
         case detail
     }
+}
+
+struct CatalogCollectionsResult: Decodable, Sendable {
+    let type: String
+    let collections: [EngineSupervisor.CatalogCollection]
 }
 
 private struct ImportScanResult: Decodable, Sendable {

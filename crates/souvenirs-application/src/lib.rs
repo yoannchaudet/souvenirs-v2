@@ -18,7 +18,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use souvenirs_domain::catalog::{year_directory, DatedCollectionRange};
+use souvenirs_domain::catalog::{
+    parse_collection_directory, parse_year_directory, year_directory, CollectionIdentity,
+    DatedCollectionRange, ParsedCollectionDirectory,
+};
 use souvenirs_domain::datetime::{
     confirm_batch, AcceptedDateTime, AcceptedDateTimeSource, ConfirmationDecision,
     ConfirmationRequirement, DateTimeResolution, DateTimeSource,
@@ -47,6 +50,28 @@ pub struct CatalogLocation {
     pub volume_name: String,
     pub display_name: Option<String>,
     pub detail: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogCollectionPart {
+    pub year: i32,
+    pub year_directory: String,
+    pub collection_directory: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogCollection {
+    Dated {
+        identity: CollectionIdentity,
+        label: String,
+        start_date: Date,
+        end_date: Date,
+    },
+    Ongoing {
+        identity: CollectionIdentity,
+        label: String,
+        parts: Vec<CatalogCollectionPart>,
+    },
 }
 
 pub struct CatalogService;
@@ -119,6 +144,166 @@ impl CatalogService {
         CatalogLayout::resume_initialization(path)?;
         Self::validate(path, CatalogIntent::Open)
     }
+
+    pub fn collections(
+        path: impl AsRef<Path>,
+    ) -> Result<Vec<CatalogCollection>, CatalogServiceError> {
+        let path = path.as_ref();
+        Self::validate(path, CatalogIntent::Open)?;
+
+        let mut dated = Vec::new();
+        let mut ongoing = BTreeMap::new();
+        for year_entry in read_directory(path)? {
+            let year_entry = year_entry.map_err(|source| CatalogServiceError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let year_path = year_entry.path();
+            let Some(year_name) = year_entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if parse_year_directory(&year_name).is_none() {
+                continue;
+            }
+            if !year_entry
+                .file_type()
+                .map_err(|source| CatalogServiceError::Io {
+                    path: year_path.clone(),
+                    source,
+                })?
+                .is_dir()
+            {
+                continue;
+            }
+            for collection_entry in read_directory(&year_path)? {
+                let collection_entry =
+                    collection_entry.map_err(|source| CatalogServiceError::Io {
+                        path: year_path.clone(),
+                        source,
+                    })?;
+                let collection_path = collection_entry.path();
+                if !collection_entry
+                    .file_type()
+                    .map_err(|source| CatalogServiceError::Io {
+                        path: collection_path,
+                        source,
+                    })?
+                    .is_dir()
+                {
+                    continue;
+                }
+                let Some(directory_name) = collection_entry.file_name().to_str().map(str::to_owned)
+                else {
+                    continue;
+                };
+                match parse_collection_directory(&year_name, &directory_name) {
+                    Some(ParsedCollectionDirectory::Dated {
+                        identity,
+                        label,
+                        range,
+                    }) => dated.push(DatedCollection {
+                        identity,
+                        label: label.to_string(),
+                        start_date: range.start(),
+                        end_date: range.end(),
+                    }),
+                    Some(ParsedCollectionDirectory::OngoingPart {
+                        label,
+                        year,
+                        directory,
+                        ..
+                    }) => {
+                        let key = label.collision_key();
+                        let builder = ongoing
+                            .entry(key)
+                            .or_insert_with(|| OngoingCollection { parts: Vec::new() });
+                        builder.parts.push((
+                            label,
+                            CatalogCollectionPart {
+                                year,
+                                year_directory: year_name.clone(),
+                                collection_directory: directory.to_string(),
+                            },
+                        ));
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        dated.sort();
+        let mut collections = dated
+            .into_iter()
+            .map(|collection| CatalogCollection::Dated {
+                identity: collection.identity,
+                label: collection.label,
+                start_date: collection.start_date,
+                end_date: collection.end_date,
+            })
+            .collect::<Vec<_>>();
+        for (key, builder) in ongoing {
+            collections.push(finish_ongoing_collection(key, builder)?);
+        }
+        Ok(collections)
+    }
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+struct DatedCollection {
+    start_date: Date,
+    end_date: Date,
+    label: String,
+    identity: CollectionIdentity,
+}
+
+struct OngoingCollection {
+    parts: Vec<(CatalogLabel, CatalogCollectionPart)>,
+}
+
+fn finish_ongoing_collection(
+    key: souvenirs_domain::names::CollisionKey,
+    mut builder: OngoingCollection,
+) -> Result<CatalogCollection, CatalogServiceError> {
+    builder.parts.sort_by(|left, right| {
+        (
+            left.1.year,
+            &left.1.year_directory,
+            &left.1.collection_directory,
+        )
+            .cmp(&(
+                right.1.year,
+                &right.1.year_directory,
+                &right.1.collection_directory,
+            ))
+    });
+    if builder
+        .parts
+        .windows(2)
+        .any(|parts| parts[0].1.year == parts[1].1.year)
+    {
+        return Err(CatalogServiceError::InvalidCollectionLayout(format!(
+            "Ongoing collection {:?} has more than one part in the same year.",
+            key.as_str()
+        )));
+    }
+    let label = builder
+        .parts
+        .first()
+        .expect("ongoing collection has at least one part")
+        .0
+        .to_string();
+    Ok(CatalogCollection::Ongoing {
+        identity: CollectionIdentity::Ongoing { key },
+        label,
+        parts: builder.parts.into_iter().map(|(_, part)| part).collect(),
+    })
+}
+
+fn read_directory(path: &Path) -> Result<fs::ReadDir, CatalogServiceError> {
+    fs::read_dir(path).map_err(|source| CatalogServiceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -886,6 +1071,7 @@ pub enum CatalogServiceError {
         source: std::io::Error,
     },
     InvalidConfig(PathBuf),
+    InvalidCollectionLayout(String),
     InvalidOperationJournal {
         path: PathBuf,
         message: String,
@@ -909,6 +1095,7 @@ impl CatalogServiceError {
             | Self::UnsupportedFormat(_) => "unsupported_catalog_version",
             Self::Initialization(_) | Self::Io { .. } | Self::Storage(_) => "catalog_io",
             Self::InvalidConfig(_) => "invalid_catalog",
+            Self::InvalidCollectionLayout(_) => "invalid_catalog",
             Self::InvalidOperationJournal { .. } => "invalid_operation_journal",
             Self::InvalidName(_) => "invalid_catalog_name",
             Self::NotCatalog(_) => "not_a_catalog",
@@ -940,6 +1127,7 @@ impl fmt::Display for CatalogServiceError {
             Self::InvalidConfig(_) => {
                 formatter.write_str("The catalog configuration is damaged or unreadable.")
             }
+            Self::InvalidCollectionLayout(message) => formatter.write_str(message),
             Self::InvalidOperationJournal { path, message } => write!(
                 formatter,
                 "Could not read operation journal {}: {message}",
@@ -1018,6 +1206,95 @@ mod tests {
             error.to_string(),
             "This catalog was initialized as \"Family Catalog\" with different settings."
         );
+    }
+
+    #[test]
+    fn queries_stable_exact_dated_and_ongoing_collection_identities() {
+        let directory = tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Family Catalog").unwrap();
+        for relative in [
+            "2025/2025-12-31 +2d New Year",
+            "2023/z kids",
+            "2025/z Kids",
+            "2025/not a collection",
+            "other/private",
+        ] {
+            fs::create_dir_all(directory.path().join(relative)).unwrap();
+        }
+
+        let collections = CatalogService::collections(directory.path()).unwrap();
+
+        assert_eq!(
+            collections,
+            vec![
+                super::CatalogCollection::Dated {
+                    identity: souvenirs_domain::catalog::CollectionIdentity::Dated {
+                        year: souvenirs_domain::names::PortableComponent::new("2025").unwrap(),
+                        directory: souvenirs_domain::names::PortableComponent::new(
+                            "2025-12-31 +2d New Year"
+                        )
+                        .unwrap(),
+                    },
+                    label: "New Year".to_owned(),
+                    start_date: time::macros::date!(2025 - 12 - 31),
+                    end_date: time::macros::date!(2026 - 01 - 02),
+                },
+                super::CatalogCollection::Ongoing {
+                    identity: souvenirs_domain::catalog::CollectionIdentity::Ongoing {
+                        key: souvenirs_domain::names::CatalogLabel::new("Kids")
+                            .unwrap()
+                            .collision_key(),
+                    },
+                    label: "kids".to_owned(),
+                    parts: vec![
+                        super::CatalogCollectionPart {
+                            year: 2023,
+                            year_directory: "2023".to_owned(),
+                            collection_directory: "z kids".to_owned(),
+                        },
+                        super::CatalogCollectionPart {
+                            year: 2025,
+                            year_directory: "2025".to_owned(),
+                            collection_directory: "z Kids".to_owned(),
+                        },
+                    ],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_ongoing_parts_in_one_year() {
+        let label = souvenirs_domain::names::CatalogLabel::new("Kids").unwrap();
+        let error = super::finish_ongoing_collection(
+            label.collision_key(),
+            super::OngoingCollection {
+                parts: vec![
+                    (
+                        label.clone(),
+                        super::CatalogCollectionPart {
+                            year: 2025,
+                            year_directory: "2025".to_owned(),
+                            collection_directory: "z Kids".to_owned(),
+                        },
+                    ),
+                    (
+                        label,
+                        super::CatalogCollectionPart {
+                            year: 2025,
+                            year_directory: "2025".to_owned(),
+                            collection_directory: "z kids".to_owned(),
+                        },
+                    ),
+                ],
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "invalid_catalog");
+        assert!(error
+            .to_string()
+            .contains("more than one part in the same year"));
     }
 
     #[test]

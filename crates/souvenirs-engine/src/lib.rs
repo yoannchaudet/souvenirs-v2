@@ -9,22 +9,23 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use souvenirs_application::{
-    CatalogIntent as ApplicationIntent, CatalogService, DateResolution, DestinationMode,
-    ImportCancellation, ImportDateSource as ApplicationDateSource,
+    CatalogCollection as ApplicationCollection, CatalogIntent as ApplicationIntent, CatalogService,
+    DateResolution, DestinationMode, ImportCancellation, ImportDateSource as ApplicationDateSource,
     ImportDateState as ApplicationDateState, ImportExecutionRequest, ImportExecutionResult,
     ImportExecutionService, ImportPlanningService, ImportRecoveryMode, ImportRecoveryService,
     ImportReviewRequest, OperationInspectionService, OperationProgress, PreparedImport,
     RecoveryOutcome,
 };
 use souvenirs_protocol::{
+    CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart, CatalogCollectionsResult,
     CatalogIntent, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
     ImportDateResolution, ImportDateSource, ImportDateSourceSummary, ImportDateState,
     ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent,
     OperationEventPayload, OperationInspectionResult, ProtocolError, Request, RequestPayload,
     ResponseResult, StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
-    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD,
-    IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
-    START_OPERATION_METHOD,
+    CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
+    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
+    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -344,6 +345,7 @@ impl Connection {
                         compatible_client_version: MINIMUM_CLIENT_VERSION.to_owned(),
                         capabilities: vec![
                             CANCEL_OPERATION_METHOD.to_owned(),
+                            CATALOG_COLLECTIONS_METHOD.to_owned(),
                             CATALOG_VALIDATE_METHOD.to_owned(),
                             CATALOG_CREATE_METHOD.to_owned(),
                             CATALOG_OPEN_METHOD.to_owned(),
@@ -381,6 +383,10 @@ impl Connection {
             RequestPayload::OpenCatalog(parameters) => {
                 catalog_response(request.id, CatalogService::open(parameters.path))
             }
+            RequestPayload::ListCatalogCollections(parameters) => catalog_collections_response(
+                request.id,
+                CatalogService::collections(parameters.path),
+            ),
             RequestPayload::ScanImport(parameters) => import_scan_response(
                 request.id,
                 ImportPlanningService::scan(parameters.source_path),
@@ -414,6 +420,7 @@ impl Connection {
                             self.operation_catalogs
                                 .insert(operation.operation_id.clone(), parameters.path.clone());
                         }
+
                         EngineMessage::success(
                             request.id,
                             ResponseResult::OperationInspection(OperationInspectionResult {
@@ -481,6 +488,74 @@ impl Connection {
                 Some(request_id),
                 ProtocolError::new(error.code(), error.to_string()),
             ),
+        }
+    }
+}
+
+fn catalog_collections_response(
+    request_id: String,
+    result: Result<Vec<ApplicationCollection>, souvenirs_application::CatalogServiceError>,
+) -> EngineMessage {
+    match result {
+        Ok(collections) => EngineMessage::success(
+            request_id,
+            ResponseResult::CatalogCollections(CatalogCollectionsResult {
+                collections: collections.into_iter().map(protocol_collection).collect(),
+            }),
+        ),
+        Err(error) => EngineMessage::error(
+            Some(request_id),
+            ProtocolError::new(error.code(), error.to_string()),
+        ),
+    }
+}
+
+fn protocol_collection(collection: ApplicationCollection) -> CatalogCollection {
+    match collection {
+        ApplicationCollection::Dated {
+            identity,
+            label,
+            start_date,
+            end_date,
+        } => CatalogCollection::Dated {
+            identity: protocol_identity(identity),
+            label,
+            start_date: start_date.to_string(),
+            end_date: end_date.to_string(),
+        },
+        ApplicationCollection::Ongoing {
+            identity,
+            label,
+            parts,
+        } => CatalogCollection::Ongoing {
+            identity: protocol_identity(identity),
+            label,
+            parts: parts
+                .into_iter()
+                .map(|part| CatalogCollectionPart {
+                    year: part.year,
+                    year_directory: part.year_directory,
+                    collection_directory: part.collection_directory,
+                })
+                .collect(),
+        },
+    }
+}
+
+fn protocol_identity(
+    identity: souvenirs_application::domain::catalog::CollectionIdentity,
+) -> CatalogCollectionIdentity {
+    match identity {
+        souvenirs_application::domain::catalog::CollectionIdentity::Dated { year, directory } => {
+            CatalogCollectionIdentity::Dated {
+                year: year.to_string(),
+                directory: directory.to_string(),
+            }
+        }
+        souvenirs_application::domain::catalog::CollectionIdentity::Ongoing { key } => {
+            CatalogCollectionIdentity::Ongoing {
+                key: key.as_str().to_owned(),
+            }
         }
     }
 }
@@ -960,6 +1035,7 @@ mod tests {
                 "compatible_client_version": "0.2.0",
                 "capabilities": [
                     "operation.cancel",
+                    "catalog.collections",
                     "catalog.validate",
                     "catalog.create",
                     "catalog.open",
@@ -1224,6 +1300,66 @@ mod tests {
         assert_eq!(responses[1]["result"]["type"], "catalog");
         assert_eq!(responses[1]["result"]["display_name"], "Family Catalog");
         assert_eq!(responses[2]["result"]["display_name"], "Family Catalog");
+    }
+
+    #[test]
+    fn catalog_collection_query_returns_exact_typed_identities() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Catalog").unwrap();
+        fs::create_dir_all(directory.path().join("2024/2024-07-14 +6d Brittany")).unwrap();
+        fs::create_dir_all(directory.path().join("2023/z Kids")).unwrap();
+        fs::create_dir_all(directory.path().join("2025/z Kids")).unwrap();
+        let input = format!(
+            "{}{}",
+            request("request-1", "handshake", json!({"client_version": "0.2.0"})),
+            request(
+                "request-2",
+                "catalog.collections",
+                json!({"path": directory.path().to_string_lossy()})
+            )
+        );
+
+        let responses = run_lines(input);
+
+        assert_eq!(
+            responses[1]["result"],
+            json!({
+                "type": "catalog_collections",
+                "collections": [
+                    {
+                        "kind": "dated",
+                        "identity": {
+                            "kind": "dated",
+                            "year": "2024",
+                            "directory": "2024-07-14 +6d Brittany"
+                        },
+                        "label": "Brittany",
+                        "start_date": "2024-07-14",
+                        "end_date": "2024-07-20"
+                    },
+                    {
+                        "kind": "ongoing",
+                        "identity": {
+                            "kind": "ongoing",
+                            "key": "kids"
+                        },
+                        "label": "Kids",
+                        "parts": [
+                            {
+                                "year": 2023,
+                                "year_directory": "2023",
+                                "collection_directory": "z Kids"
+                            },
+                            {
+                                "year": 2025,
+                                "year_directory": "2025",
+                                "collection_directory": "z Kids"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
     }
 
     #[test]

@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU32;
 
-use time::{Date, PrimitiveDateTime};
+use time::macros::format_description;
+use time::{Date, Duration, PrimitiveDateTime};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::names::{CatalogLabel, NameError, PortableComponent};
 
@@ -54,6 +56,100 @@ pub fn ongoing_collection_directory(
     label: &CatalogLabel,
 ) -> Result<PortableComponent, CatalogError> {
     Ok(PortableComponent::new(format!("z {label}"))?)
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum CollectionIdentity {
+    Dated {
+        year: PortableComponent,
+        directory: PortableComponent,
+    },
+    Ongoing {
+        key: crate::names::CollisionKey,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ParsedCollectionDirectory {
+    Dated {
+        identity: CollectionIdentity,
+        label: CatalogLabel,
+        range: DatedCollectionRange,
+    },
+    OngoingPart {
+        label: CatalogLabel,
+        year: i32,
+        directory: PortableComponent,
+    },
+}
+
+pub fn parse_collection_directory(
+    year: &str,
+    directory: &str,
+) -> Option<ParsedCollectionDirectory> {
+    let year_number = parse_year_directory(year)?;
+    let year_component = PortableComponent::new(year).ok()?;
+    let directory_component = PortableComponent::new(directory).ok()?;
+
+    if let Some(label) = directory.strip_prefix("z ") {
+        let label = CatalogLabel::new(label).ok()?;
+        if !is_canonical_directory_name(
+            directory,
+            ongoing_collection_directory(&label).ok()?.as_str(),
+        ) {
+            return None;
+        }
+        return Some(ParsedCollectionDirectory::OngoingPart {
+            label,
+            year: year_number,
+            directory: directory_component,
+        });
+    }
+
+    let start = directory
+        .get(..10)
+        .and_then(|value| Date::parse(value, format_description!("[year]-[month]-[day]")).ok())?;
+    if start.year() != year_number {
+        return None;
+    }
+    let remainder = directory.get(10..)?.strip_prefix(' ')?;
+    let (span_days, label) = match remainder.split_once(' ') {
+        Some((token, label)) if token.starts_with('+') && token.ends_with('d') => {
+            let span = token.get(1..token.len() - 1)?.parse::<i64>().ok()?;
+            if span <= 0 {
+                return None;
+            }
+            (span, label)
+        }
+        _ => (0, remainder),
+    };
+    let end = start.checked_add(Duration::days(span_days))?;
+    let label = CatalogLabel::new(label).ok()?;
+    let range = DatedCollectionRange::new(start, end).ok()?;
+    if !is_canonical_directory_name(directory, range.folder_name(&label).ok()?.as_str()) {
+        return None;
+    }
+    Some(ParsedCollectionDirectory::Dated {
+        identity: CollectionIdentity::Dated {
+            year: year_component,
+            directory: directory_component,
+        },
+        label,
+        range,
+    })
+}
+
+fn is_canonical_directory_name(actual: &str, canonical: &str) -> bool {
+    actual.nfc().eq(canonical.chars())
+}
+
+pub fn parse_year_directory(value: &str) -> Option<i32> {
+    if value.len() != 4 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let year = value.parse().ok()?;
+    let first = Date::from_ordinal_date(year, 1).ok()?;
+    (year_directory(first).ok()?.as_str() == value).then_some(year)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -407,6 +503,82 @@ mod tests {
             ongoing_collection_directory(&label).unwrap().as_str(),
             "z Kids"
         );
+    }
+
+    #[test]
+    fn parses_exact_dated_and_ongoing_collection_identities() {
+        assert_eq!(
+            parse_collection_directory("2025", "2025-12-31 +2d New Year"),
+            Some(ParsedCollectionDirectory::Dated {
+                identity: CollectionIdentity::Dated {
+                    year: PortableComponent::new("2025").unwrap(),
+                    directory: PortableComponent::new("2025-12-31 +2d New Year").unwrap(),
+                },
+                label: CatalogLabel::new("New Year").unwrap(),
+                range: DatedCollectionRange::new(
+                    date(2025, Month::December, 31),
+                    date(2026, Month::January, 2),
+                )
+                .unwrap(),
+            })
+        );
+        assert_eq!(
+            parse_collection_directory("2024", "z Kids"),
+            Some(ParsedCollectionDirectory::OngoingPart {
+                label: CatalogLabel::new("Kids").unwrap(),
+                year: 2024,
+                directory: PortableComponent::new("z Kids").unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_exact_decomposed_collection_directories() {
+        let decomposed_label = "Cafe\u{301}";
+        let dated_directory = format!("2024-01-01 {decomposed_label}");
+        assert_eq!(
+            parse_collection_directory("2024", &dated_directory),
+            Some(ParsedCollectionDirectory::Dated {
+                identity: CollectionIdentity::Dated {
+                    year: PortableComponent::new("2024").unwrap(),
+                    directory: PortableComponent::new(&dated_directory).unwrap(),
+                },
+                label: CatalogLabel::new(decomposed_label).unwrap(),
+                range: DatedCollectionRange::new(
+                    date(2024, Month::January, 1),
+                    date(2024, Month::January, 1),
+                )
+                .unwrap(),
+            })
+        );
+
+        let ongoing_directory = format!("z {decomposed_label}");
+        assert_eq!(
+            parse_collection_directory("2024", &ongoing_directory),
+            Some(ParsedCollectionDirectory::OngoingPart {
+                label: CatalogLabel::new(decomposed_label).unwrap(),
+                year: 2024,
+                directory: PortableComponent::new(ongoing_directory).unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_collection_directories() {
+        for (year, directory) in [
+            ("24", "2024-01-01 Trip"),
+            ("2023", "2024-01-01 Trip"),
+            ("2024", "2024-01-01 +0d Trip"),
+            ("2024", "2024-01-01 +01d Trip"),
+            ("2024", "z  Kids"),
+            ("2024", "notes"),
+        ] {
+            assert_eq!(
+                parse_collection_directory(year, directory),
+                None,
+                "{year}/{directory} should not identify a collection"
+            );
+        }
     }
 
     #[test]

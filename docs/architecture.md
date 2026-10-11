@@ -219,7 +219,15 @@ The protocol version remains the wire compatibility boundary.
 
 The Rust types generate a committed JSON Schema.
 Swift protocol fixtures must validate against this schema.
-Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v2.json`.
+Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v3.json`.
+
+The `catalog.collections` query returns engine-owned collection identities.
+A dated identity contains the exact year directory and collection directory.
+An ongoing identity contains the portable label collision key.
+Each ongoing result also contains the exact annual part directories.
+The earliest annual part supplies the ongoing display label.
+Dated collections sort by date range, label, and exact identity.
+Ongoing collections follow dated collections and sort by collision key.
 
 ### Engine
 

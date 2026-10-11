@@ -22,6 +22,133 @@
       },
       "additionalProperties": false
     },
+    "CatalogCollection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "end_date",
+            "identity",
+            "kind",
+            "label",
+            "start_date"
+          ],
+          "properties": {
+            "end_date": {
+              "type": "string"
+            },
+            "identity": {
+              "$ref": "#/definitions/CatalogCollectionIdentity"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "dated"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "start_date": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "identity",
+            "kind",
+            "label",
+            "parts"
+          ],
+          "properties": {
+            "identity": {
+              "$ref": "#/definitions/CatalogCollectionIdentity"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "ongoing"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "parts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CatalogCollectionPart"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CatalogCollectionIdentity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "directory",
+            "kind",
+            "year"
+          ],
+          "properties": {
+            "directory": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "dated"
+              ]
+            },
+            "year": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "key",
+            "kind"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "ongoing"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "CatalogCollectionPart": {
+      "type": "object",
+      "required": [
+        "collection_directory",
+        "year",
+        "year_directory"
+      ],
+      "properties": {
+        "collection_directory": {
+          "type": "string"
+        },
+        "year": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "year_directory": {
+          "type": "string"
+        }
+      }
+    },
     "CatalogIntent": {
       "type": "string",
       "enum": [
@@ -625,6 +752,24 @@
             "method": {
               "type": "string",
               "enum": [
+                "catalog.collections"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/CatalogPathParameters"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
                 "import.scan"
               ]
             },
@@ -787,6 +932,27 @@
             },
             "volume_name": {
               "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "collections",
+            "type"
+          ],
+          "properties": {
+            "collections": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CatalogCollection"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "catalog_collections"
+              ]
             }
           }
         },
