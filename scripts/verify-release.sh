@@ -46,6 +46,8 @@ engine="$app/Contents/MacOS/souvenirs-engine"
 }
 [[ -x "$engine" ]] || { echo "embedded engine not found: $engine" >&2; exit 1; }
 
+"$repo_root/scripts/engine-architectures.sh" verify "$app_executable" "$engine"
+
 for override in SOUVENIRS_ENGINE_EXECUTABLE SOUVENIRS_FAKE_ENGINE_SCENARIO; do
     if grep -aFrq -- "$override" "$app"; then
         echo "release app contains development engine override: $override" >&2

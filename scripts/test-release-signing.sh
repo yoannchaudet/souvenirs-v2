@@ -71,6 +71,18 @@ esac
 EOF
 chmod +x "$work_directory/bin/codesign"
 
+cat >"$work_directory/bin/lipo" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+[[ "$1" == -archs && $# -eq 2 ]] || exit 2
+if [[ "$2" == */souvenirs-engine ]]; then
+    echo "${ENGINE_ARCHITECTURES:-arm64}"
+else
+    echo "${APP_ARCHITECTURES:-arm64}"
+fi
+EOF
+chmod +x "$work_directory/bin/lipo"
+
 verify="$repo_root/scripts/verify-release.sh"
 test_path="$work_directory/bin:$PATH"
 
@@ -110,6 +122,12 @@ if is_developer_id_application_identity \
     exit 1
 fi
 echo "PASS: explicit signing identity policy"
+
+expect_failure \
+    "architecture mismatch" \
+    "application and embedded engine architectures differ" \
+    env PATH="$test_path" APP_ARCHITECTURES=x86_64 ENGINE_ARCHITECTURES=arm64 \
+    "$verify" "$app"
 
 expect_success \
     "Developer ID app and engine" \
