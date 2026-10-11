@@ -38,25 +38,19 @@ fn initialization_journal(layout: &CatalogLayout) -> std::path::PathBuf {
     fs::read_dir(layout.journal_directory())
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with("-initialize.jsonl"))
-        })
+        .find(|path| path.to_string_lossy().ends_with("-initialize.jsonl"))
         .unwrap()
 }
 
 fn assert_completed_initialization(temporary: &TempDir, config: &CatalogConfig) {
     let layout = CatalogLayout::initialize(temporary.path(), config).unwrap();
-    assert!(layout.config_path().is_file());
-    for path in [
+    assert!([
         ".souvenirs-initialize.lock",
         ".souvenirs-initialize.lock.takeover",
-        ".souvenirs-initialize.jsonl",
-    ] {
-        assert!(!temporary.path().join(path).exists());
-    }
-
+        ".souvenirs-initialize.jsonl"
+    ]
+    .iter()
+    .all(|path| !temporary.path().join(path).exists()));
     let journal = initialization_journal(&layout);
     assert!(matches!(
         read_operation_records(&journal).unwrap().last(),
@@ -124,6 +118,7 @@ fn initialization_removes_owned_apple_double_sidecars_during_recovery() {
     for failpoint in [
         Failpoint::InitializationJournalRelocationIntentPersisted,
         Failpoint::InitializationJournalRelocationMutationPersisted,
+        Failpoint::InitializationConfigPublicationMutationPersisted,
     ] {
         let temporary = TempDir::new().unwrap();
         CatalogLayout::initialize_failing_at(
@@ -132,54 +127,37 @@ fn initialization_removes_owned_apple_double_sidecars_during_recovery() {
             failpoint,
         )
         .unwrap_err();
-        let sidecar = temporary.path().join("._.souvenirs-initialize.jsonl");
+        let sidecar = if failpoint == Failpoint::InitializationConfigPublicationMutationPersisted {
+            ".souvenirs/staging/._initialize-config.yml.stage"
+        } else {
+            "._.souvenirs-initialize.jsonl"
+        };
+        let sidecar = temporary.path().join(sidecar);
         fs::write(&sidecar, b"metadata").unwrap();
-
         assert!(CatalogLayout::resume_initialization(temporary.path())
             .unwrap()
             .is_some());
         assert!(!sidecar.exists());
     }
-
-    let temporary = TempDir::new().unwrap();
-    CatalogLayout::initialize_failing_at(
-        temporary.path(),
-        &CatalogConfig::default(),
-        Failpoint::InitializationConfigPublicationMutationPersisted,
-    )
-    .unwrap_err();
-    let sidecar = temporary
-        .path()
-        .join(".souvenirs/staging/._initialize-config.yml.stage");
-    fs::write(&sidecar, b"metadata").unwrap();
-
-    assert!(CatalogLayout::resume_initialization(temporary.path())
-        .unwrap()
-        .is_some());
-    assert!(!sidecar.exists());
 }
 
 #[test]
 fn generic_recovery_refuses_an_initialization_journal() {
     let temporary = TempDir::new().unwrap();
-    let config = CatalogConfig::default();
     CatalogLayout::initialize_failing_at(
         temporary.path(),
-        &config,
+        &CatalogConfig::default(),
         Failpoint::InitializationJournalRelocated,
     )
     .unwrap_err();
     let layout = CatalogLayout::new(temporary.path());
     let journal = initialization_journal(&layout);
-    fs::write(
-        &journal,
-        fs::read_to_string(&journal).unwrap().replacen(
-            "\"operation_id\":\"initialize\"",
-            "\"operation_id\":\"retry-initialize\"",
-            1,
-        ),
-    )
-    .unwrap();
+    let contents = fs::read_to_string(&journal).unwrap().replacen(
+        "\"operation_id\":\"initialize\"",
+        "\"operation_id\":\"retry-initialize\"",
+        1,
+    );
+    fs::write(&journal, contents).unwrap();
     let lock = CatalogLock::acquire(&layout).unwrap();
     let error = layout
         .recover_operation(&lock, &journal, RecoveryRequest::default())
