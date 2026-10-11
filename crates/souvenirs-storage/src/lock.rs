@@ -146,7 +146,15 @@ impl CatalogLock {
         takeover_path: PathBuf,
         environment: &impl LockEnvironment,
     ) -> Result<Self, LockError> {
-        let _takeover =
+        Self::acquire_paths_with_takeover(path, takeover_path, environment).map(|(lock, _)| lock)
+    }
+
+    pub(crate) fn acquire_paths_with_takeover(
+        path: PathBuf,
+        takeover_path: PathBuf,
+        environment: &impl LockEnvironment,
+    ) -> Result<(Self, TakeoverGuard), LockError> {
+        let takeover =
             TakeoverGuard::acquire(&takeover_path, environment).map_err(|error| match error {
                 LockError::TakeoverBusy => report_takeover_busy(&path),
                 error => error,
@@ -155,11 +163,14 @@ impl CatalogLock {
 
         match write_holder_exclusively(&path, &holder) {
             Ok(()) => {
-                return Ok(Self {
-                    path,
-                    holder,
-                    released: false,
-                })
+                return Ok((
+                    Self {
+                        path,
+                        holder,
+                        released: false,
+                    },
+                    takeover,
+                ))
             }
             Err(LockError::Io { source, .. }) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -185,11 +196,14 @@ impl CatalogLock {
             }
             return Err(error);
         }
-        Ok(Self {
-            path,
-            holder,
-            released: false,
-        })
+        Ok((
+            Self {
+                path,
+                holder,
+                released: false,
+            },
+            takeover,
+        ))
     }
 
     pub fn holder(&self) -> &LockHolder {

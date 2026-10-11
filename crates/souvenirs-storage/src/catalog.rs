@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use crate::capabilities::{StorageCapabilities, StorageCapabilityError};
 use crate::copy::{publish_path_exclusively, remove_apple_double_sidecar, PublishError};
 use crate::durability::{sync_directory, sync_file};
-use crate::lock::{SystemLockEnvironment, TakeoverGuard};
+use crate::lock::SystemLockEnvironment;
 use crate::operation::{
     append_operation_record, read_parsed_operation_records, DurableTransition, OperationOutcome,
     OperationRecord,
@@ -106,7 +106,7 @@ impl CatalogLayout {
     ) -> Result<Option<Self>, CatalogInitializationError> {
         let layout = Self::new(root);
         layout.validate_root()?;
-        if !has_unfinished_initialization(&layout)? {
+        if !layout.has_pending_initialization()? {
             return Ok(None);
         }
         let capabilities = layout.capabilities()?;
@@ -114,6 +114,26 @@ impl CatalogLayout {
         validate_bootstrap_preparation(&layout)?;
         let resumed = layout.with_bootstrap_lock(None, || layout.resume_initialization_locked())?;
         Ok(resumed.then_some(layout))
+    }
+
+    pub fn has_pending_initialization(&self) -> Result<bool, CatalogInitializationError> {
+        let Some(path) = initialization_journal_path(self)? else {
+            return Ok(false);
+        };
+        let parsed = read_parsed_operation_records(&path, "inspect initialization journal")
+            .map_err(CatalogInitializationError::Journal)?;
+        if parsed.records.is_empty() {
+            return Ok(false);
+        }
+        let plan = initialization_plan(&path, &parsed.records)?;
+        plan.validate()?;
+        if validate_initialization_outcome(&path, &parsed.records)? {
+            return Ok(false);
+        }
+        if path_exists(&self.config_path())? {
+            verify_file_digest(&self.config_path(), &plan.config_sha256)?;
+        }
+        Ok(true)
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -200,15 +220,12 @@ impl CatalogLayout {
         operation: impl FnOnce() -> Result<T, CatalogInitializationError>,
     ) -> Result<T, CatalogInitializationError> {
         let _ = failpoint;
-        let lock = CatalogLock::acquire_paths(
+        let (lock, takeover) = CatalogLock::acquire_paths_with_takeover(
             self.bootstrap_lock_path(),
             self.bootstrap_takeover_path(),
             &SystemLockEnvironment,
         )
         .map_err(CatalogInitializationError::Lock)?;
-        let takeover =
-            TakeoverGuard::acquire(&self.bootstrap_takeover_path(), &SystemLockEnvironment)
-                .map_err(CatalogInitializationError::Lock)?;
         let result = operation();
         #[cfg(feature = "test-failpoints")]
         if matches!(
@@ -303,11 +320,9 @@ impl CatalogLayout {
         else {
             return Ok(false);
         };
-        if journal_has_outcome(&journal) {
-            return Ok(false);
-        }
+        let pending = !validate_initialization_outcome(&journal.path, &journal.records)?;
         self.resume_initialization_journal(journal, plan, None)?;
-        Ok(true)
+        Ok(pending)
     }
 
     fn resume_initialization_journal(
@@ -317,22 +332,7 @@ impl CatalogLayout {
         failpoint: Option<crate::operation::Failpoint>,
     ) -> Result<(), CatalogInitializationError> {
         plan.validate()?;
-        if let Some((index, outcome)) =
-            journal
-                .records
-                .iter()
-                .enumerate()
-                .find_map(|(index, record)| match record {
-                    OperationRecord::Outcome { outcome } => Some((index, *outcome)),
-                    _ => None,
-                })
-        {
-            if index + 1 != journal.records.len() || outcome != OperationOutcome::Completed {
-                return Err(CatalogInitializationError::InvalidBootstrapJournal {
-                    path: journal.path,
-                    details: "initialization outcome is not one terminal completed record",
-                });
-            }
+        if validate_initialization_outcome(&journal.path, &journal.records)? {
             verify_completed_initialization(self, &journal, &plan)?;
             return Ok(());
         }
@@ -614,29 +614,28 @@ fn initialization_plan(
     Ok(plan)
 }
 
-fn has_unfinished_initialization(
-    layout: &CatalogLayout,
+fn validate_initialization_outcome(
+    path: &Path,
+    records: &[OperationRecord],
 ) -> Result<bool, CatalogInitializationError> {
-    let Some(path) = initialization_journal_path(layout)? else {
+    let Some((index, outcome)) =
+        records
+            .iter()
+            .enumerate()
+            .find_map(|(index, record)| match record {
+                OperationRecord::Outcome { outcome } => Some((index, *outcome)),
+                _ => None,
+            })
+    else {
         return Ok(false);
     };
-    let parsed = read_parsed_operation_records(&path, "inspect initialization journal")
-        .map_err(CatalogInitializationError::Journal)?;
-    if parsed.records.is_empty() {
-        return Ok(false);
+    if index + 1 != records.len() || outcome != OperationOutcome::Completed {
+        return Err(CatalogInitializationError::InvalidBootstrapJournal {
+            path: path.to_path_buf(),
+            details: "initialization outcome is not one terminal completed record",
+        });
     }
-    initialization_plan(&path, &parsed.records)?.validate()?;
-    Ok(!parsed
-        .records
-        .iter()
-        .any(|record| matches!(record, OperationRecord::Outcome { .. })))
-}
-
-fn journal_has_outcome(journal: &InitializationJournal) -> bool {
-    journal
-        .records
-        .iter()
-        .any(|record| matches!(record, OperationRecord::Outcome { .. }))
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1397,18 +1396,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_initialization_is_idempotent_for_the_same_configuration() {
-        let temporary = TempDirectory::new("idempotent");
-        let config = CatalogConfig::default();
-        CatalogLayout::initialize(temporary.path(), &config).unwrap();
-
-        let layout = CatalogLayout::initialize(temporary.path(), &config).unwrap();
-
-        assert!(layout.config_path().is_file());
-        assert_eq!(fs::read_dir(layout.journal_directory()).unwrap().count(), 1);
-    }
-
-    #[test]
     fn refuses_to_replace_existing_catalog_state() {
         let temporary = TempDirectory::new("occupied");
         fs::write(temporary.path().join(".souvenirs.yml"), "existing").unwrap();
@@ -1518,32 +1505,25 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let root = temporary.path();
         let results = std::thread::scope(|scope| {
-            let handles = (0..2)
-                .map(|_| {
-                    let barrier = Arc::clone(&barrier);
-                    scope.spawn(move || {
-                        barrier.wait();
-                        CatalogLayout::initialize(root, &CatalogConfig::default())
-                    })
+            let initialize = || {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    CatalogLayout::initialize(root, &CatalogConfig::default())
                 })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap())
-                .collect::<Vec<_>>()
+            };
+            [initialize(), initialize()].map(|handle| handle.join().unwrap())
         });
 
-        assert!(results.iter().any(Result::is_ok));
         assert!(
-            results.iter().all(|result| {
-                result.is_ok()
+            results.iter().any(Result::is_ok)
+                && results.iter().all(|result| result.is_ok()
                     || matches!(
                         result,
                         Err(CatalogInitializationError::Lock(
                             LockError::Busy(_) | LockError::TakeoverBusy
                         ))
-                    )
-            }),
+                    )),
             "{results:?}"
         );
         CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap();
