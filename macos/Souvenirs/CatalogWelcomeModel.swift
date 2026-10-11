@@ -231,7 +231,7 @@ final class CatalogWelcomeModel: ObservableObject {
         if case EngineSupervisor.SupervisorError.protocolError(let code, let message) = error {
             return archiveUserMessage(code: code, message: message)
         }
-        return archiveUserMessage(code: "", message: error.localizedDescription)
+        return error.localizedDescription
     }
 }
 
@@ -451,7 +451,7 @@ final class ImportPlanningModel: ObservableObject {
         if case EngineSupervisor.SupervisorError.protocolError(let code, let message) = error {
             return archiveUserMessage(code: code, message: message)
         }
-        return archiveUserMessage(code: "", message: error.localizedDescription)
+        return error.localizedDescription
     }
 
     private func protocolErrorCode(for error: Error) -> String? {
@@ -463,37 +463,41 @@ final class ImportPlanningModel: ObservableObject {
 }
 
 func archiveUserMessage(code: String, message: String) -> String {
-    guard code.contains("catalog") || message.localizedCaseInsensitiveContains("catalog") else {
+    switch code {
+    case "catalog_already_exists":
+        return "This folder is already a Souvenirs archive."
+    case "catalog_configuration_mismatch":
+        return "This archive was created with different settings."
+    case "unsupported_catalog_version":
+        return "This archive uses a format that this version of Souvenirs cannot open."
+    case "catalog_io":
+        return """
+            Souvenirs couldn’t access this folder. Check that it’s available and allows changes, \
+            then try again.
+            """
+    case "invalid_catalog":
+        return "This archive is damaged or unreadable."
+    case "invalid_operation_journal":
+        return "Souvenirs couldn’t read this archive’s recovery information."
+    case "not_a_catalog":
+        return "This folder is not a Souvenirs archive. Choose a folder containing .souvenirs.yml."
+    case "synchronized_folder":
+        return """
+            This synchronized folder cannot hold an archive because it may rename files on its own.
+            """
+    case "catalog_error":
+        return "Souvenirs couldn’t access this archive. Check its folder or volume, then try again."
+    case "operation_conflict" where message.contains("catalog"):
+        return "The archive changed after review. Review the import again."
+    case "operation_failed" where message.contains("catalog"):
+        return "The import couldn’t update this archive. Check its folder or volume, then try again."
+    default:
+        if message.contains("catalog") {
+            return """
+                Souvenirs couldn’t complete this archive operation. Check the selected folders and \
+                volumes, then try again.
+                """
+        }
         return message
-    }
-
-    return [
-        ("This folder is already a catalog", "This folder is already an archive"),
-        ("This catalog was initialized", "This archive was initialized"),
-        ("The catalog configuration", "The archive configuration"),
-        ("This folder is not a Souvenirs catalog", "This folder is not a Souvenirs archive"),
-        ("This synchronized folder cannot hold a catalog", "This synchronized folder cannot hold an archive"),
-        ("This catalog uses format", "This archive uses format"),
-        ("The catalog changed after review", "The archive changed after review"),
-        ("catalog mutations", "archive changes"),
-        ("catalog is busy", "archive is busy"),
-        ("catalog lock changed", "archive lock changed"),
-        ("catalog lock contents changed", "archive lock contents changed"),
-        ("failed to validate catalog lock", "failed to validate archive lock"),
-        ("catalog initialization", "archive initialization"),
-        ("invalid catalog extension", "invalid archive extension"),
-        ("unsupported catalog format", "unsupported archive format"),
-        ("catalog root is not a directory", "archive root is not a directory"),
-        ("catalog path escapes", "archive path escapes"),
-        ("catalog path must be", "archive path must be"),
-        ("catalog path is reserved", "archive path is reserved"),
-        ("catalog index", "archive index"),
-        ("query catalog index", "query archive index"),
-        ("serialize catalog index path", "serialize archive index path"),
-        ("operation journal belongs to a different catalog", "operation journal belongs to a different archive"),
-        ("active lock for this catalog", "active lock for this archive"),
-        ("response result type is not catalog", "response result type is not archive")
-    ].reduce(message) { result, replacement in
-        result.replacingOccurrences(of: replacement.0, with: replacement.1)
     }
 }

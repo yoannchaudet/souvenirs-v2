@@ -280,7 +280,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                 if code == "source_unavailable" {
                     await routeSourceUnavailable(operationID: operationID)
                 } else {
-                    phase = .failed(message)
+                    phase = .failed(archiveUserMessage(code: code, message: message))
                 }
             case .cancelled(let copiedCount):
                 completedUnits = UInt64(copiedCount)
@@ -385,7 +385,7 @@ final class ImportExecutionCoordinator: ObservableObject {
         if case EngineSupervisor.SupervisorError.protocolError(let code, let message) = error {
             return archiveUserMessage(code: code, message: message)
         }
-        return archiveUserMessage(code: "", message: error.localizedDescription)
+        return error.localizedDescription
     }
 }
 

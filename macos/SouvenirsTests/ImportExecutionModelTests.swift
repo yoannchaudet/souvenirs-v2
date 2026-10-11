@@ -274,6 +274,52 @@ final class ImportExecutionModelTests: XCTestCase {
         }
     }
 
+    func testCatalogConflictFailureUsesArchiveTerminology() async {
+        let engine = FakeImportExecutionEngine()
+        let model = ImportExecutionCoordinator(engine: engine)
+        model.start(review: review, catalog: catalog)
+        await engine.waitForStream()
+
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 0,
+            payload: .failed(
+                code: "operation_conflict",
+                message: "The catalog changed after review. Review the import again."
+            )
+        ))
+        engine.finish()
+
+        await waitUntil {
+            model.phase == .failed(
+                "The archive changed after review. Review the import again."
+            )
+        }
+    }
+
+    func testCatalogStorageFailureUsesArchiveTerminology() async {
+        let engine = FakeImportExecutionEngine()
+        let model = ImportExecutionCoordinator(engine: engine)
+        model.start(review: review, catalog: catalog)
+        await engine.waitForStream()
+
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 0,
+            payload: .failed(
+                code: "operation_failed",
+                message: "failed to validate catalog lock: lock is busy"
+            )
+        ))
+        engine.finish()
+
+        await waitUntil {
+            model.phase == .failed(
+                "The import couldn’t update this archive. Check its folder or volume, then try again."
+            )
+        }
+    }
+
     private var catalog: RecentCatalog {
         RecentCatalog(
             path: "/Volumes/photos/Family Catalog",
