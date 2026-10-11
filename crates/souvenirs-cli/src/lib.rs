@@ -20,10 +20,12 @@ use souvenirs_domain::names::CatalogLabel;
 #[cfg(test)]
 use souvenirs_domain::plan::IMPORT_PLAN_SCHEMA_VERSION;
 use souvenirs_domain::plan::{
-    constrain_import_plan_schema, CatalogSnapshot, ContentDigest, ImportPlan, ManifestFingerprint,
-    PlanDateTime, PlanDateTimeCandidate, PlanDateTimeProvenance, PlanDocument, PlanFile,
-    PlanFileRole, PlanId, PlanItem, PlanItemDisposition, PlanItemFinding, PlanStep, PlanStepKind,
-    PlanTimestamp, SourceSnapshot, UnhandledContent, UnhandledContentFinding,
+    apply_duplicate_review, catalog_duplicate_findings, constrain_import_plan_schema,
+    CatalogDuplicateChoice, CatalogSnapshot, ContentDigest, DuplicateChoices, DuplicateDisposition,
+    ImportPlan, ManifestFingerprint, PlanDateTime, PlanDateTimeCandidate, PlanDateTimeProvenance,
+    PlanDocument, PlanFile, PlanFileRole, PlanId, PlanItem, PlanItemDisposition, PlanItemFinding,
+    PlanStep, PlanStepKind, PlanTimestamp, SourceDuplicateChoice, SourceSnapshot, UnhandledContent,
+    UnhandledContentFinding,
 };
 use souvenirs_domain::relationships::{
     resolve_directory_relationships, sidecar_suffix_for_item, RelationshipFinding,
@@ -34,15 +36,16 @@ use souvenirs_domain::source::{
     SourcePath,
 };
 use souvenirs_storage::{
-    is_operation_journal_file_name, CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError,
-    ManifestReplacementRequest, OperationJournal, OperationOutcome, OperationRecord,
-    PortableDestinationObserver, RecoveryCopy, RecoveryDirectory, RecoveryManifest, RecoveryMode,
-    RecoveryOutcome, RecoveryRequest, FORMAT_VERSION,
+    is_operation_journal_file_name, snapshot_catalog_manifests, CatalogConfig, CatalogIndex,
+    CatalogLayout, CatalogLock, CatalogPathError, ManifestReplacementRequest, OperationJournal,
+    OperationOutcome, OperationRecord, PortableDestinationObserver, RecoveryCopy,
+    RecoveryDirectory, RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest,
+    FORMAT_VERSION,
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
 const SOURCE_SCAN_SCHEMA_VERSION: u32 = 3;
-const EMITTED_IMPORT_PLAN_SCHEMA_VERSION: u32 = 3;
+const EMITTED_IMPORT_PLAN_SCHEMA_VERSION: u32 = 4;
 
 pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
@@ -103,6 +106,8 @@ enum ImportCommand {
         #[arg(long)]
         catalog: PathBuf,
         #[arg(long)]
+        index: Option<PathBuf>,
+        #[arg(long)]
         snapshot: PathBuf,
         #[arg(long)]
         output: PathBuf,
@@ -114,6 +119,10 @@ enum ImportCommand {
         accepted_at: PrimitiveDateTime,
         #[arg(long)]
         confirm: bool,
+        #[arg(long, value_enum, default_value = "import")]
+        catalog_duplicates: CatalogDuplicateChoiceArg,
+        #[arg(long, value_enum, default_value = "import-all")]
+        source_duplicates: SourceDuplicateChoiceArg,
     },
     Execute {
         #[arg(long)]
@@ -129,6 +138,36 @@ enum ImportCommand {
 enum DestinationMode {
     Create,
     Existing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CatalogDuplicateChoiceArg {
+    Import,
+    Skip,
+}
+
+impl From<CatalogDuplicateChoiceArg> for CatalogDuplicateChoice {
+    fn from(value: CatalogDuplicateChoiceArg) -> Self {
+        match value {
+            CatalogDuplicateChoiceArg::Import => Self::Import,
+            CatalogDuplicateChoiceArg::Skip => Self::Skip,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum SourceDuplicateChoiceArg {
+    ImportAll,
+    OnePerDigest,
+}
+
+impl From<SourceDuplicateChoiceArg> for SourceDuplicateChoice {
+    fn from(value: SourceDuplicateChoiceArg) -> Self {
+        match value {
+            SourceDuplicateChoiceArg::ImportAll => Self::ImportAll,
+            SourceDuplicateChoiceArg::OnePerDigest => Self::OnePerDigest,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -484,21 +523,29 @@ fn execute(cli: Cli) -> Result<(), CliError> {
             ImportCommand::Scan { source, output } => import_scan(&source, &output),
             ImportCommand::Plan {
                 catalog,
+                index,
                 snapshot,
                 output,
                 collection,
                 destination_mode,
                 accepted_at,
                 confirm,
-            } => import_plan(
-                &catalog,
-                &snapshot,
-                &output,
-                &collection,
+                catalog_duplicates,
+                source_duplicates,
+            } => import_plan(ImportPlanRequest {
+                catalog: &catalog,
+                index_path: index.as_deref(),
+                snapshot: &snapshot,
+                output: &output,
+                collection: &collection,
                 destination_mode,
                 accepted_at,
-                confirm,
-            ),
+                confirmed: confirm,
+                duplicate_choices: DuplicateChoices {
+                    catalog: catalog_duplicates.into(),
+                    source: source_duplicates.into(),
+                },
+            }),
             ImportCommand::Execute {
                 catalog,
                 plan,
@@ -653,15 +700,30 @@ fn import_scan(source: &Path, output: &Path) -> Result<(), CliError> {
     )
 }
 
-fn import_plan(
-    catalog: &Path,
-    snapshot: &Path,
-    output: &Path,
-    collection: &str,
+struct ImportPlanRequest<'a> {
+    catalog: &'a Path,
+    index_path: Option<&'a Path>,
+    snapshot: &'a Path,
+    output: &'a Path,
+    collection: &'a str,
     destination_mode: DestinationMode,
     accepted_at: PrimitiveDateTime,
     confirmed: bool,
-) -> Result<(), CliError> {
+    duplicate_choices: DuplicateChoices,
+}
+
+fn import_plan(request: ImportPlanRequest<'_>) -> Result<(), CliError> {
+    let ImportPlanRequest {
+        catalog,
+        index_path,
+        snapshot,
+        output,
+        collection,
+        destination_mode,
+        accepted_at,
+        confirmed,
+        duplicate_choices,
+    } = request;
     let layout = require_catalog(catalog)?;
     ensure_output_absent(output)?;
     let label = CatalogLabel::new(collection)
@@ -680,6 +742,19 @@ fn import_plan(
             "source contents changed after the saved scan",
         ));
     }
+    let catalog_id = digest_text(&canonical_path(layout.root())?.to_string_lossy());
+    let _lock = CatalogLock::acquire(&layout)
+        .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
+    let default_index_path = layout.index_path();
+    let index = CatalogIndex::rebuild(
+        index_path.unwrap_or(&default_index_path),
+        layout.root(),
+        &catalog_id,
+    )
+    .map_err(|error| CliError::conflict(format!("rebuild catalog index: {error}")))?;
+    let catalog_manifests = index
+        .manifest_snapshot()
+        .map_err(|error| CliError::invalid_data(format!("read catalog index snapshot: {error}")))?;
 
     let year_directory = year_directory(accepted_at.date())
         .map_err(|error| CliError::invalid_data(error.to_string()))?
@@ -832,12 +907,88 @@ fn import_plan(
             }
         }
     }
+    let mut items = Vec::new();
+    let previous_manifest = manifest_fingerprint(
+        layout.root(),
+        &[
+            year_directory.clone(),
+            collection_directory.clone(),
+            "SHA256SUMS".to_owned(),
+        ],
+    )?;
+    for item in &relationships.items {
+        let disposition = match item.status {
+            RelationshipStatus::Resolved => PlanItemDisposition::Transfer,
+            RelationshipStatus::NeedsDecision => PlanItemDisposition::Unresolved {
+                finding: item_relationship_finding(item, &unresolved_items).ok_or_else(|| {
+                    CliError::invalid_data(format!(
+                        "logical item '{}' needs a relationship decision without a finding",
+                        item.primary.as_str()
+                    ))
+                })?,
+            },
+        };
+        let mut files = Vec::new();
+        let originals = std::iter::once((&item.primary, PlanFileRole::Primary))
+            .chain(
+                item.companion
+                    .iter()
+                    .map(|id| (id, PlanFileRole::Companion)),
+            )
+            .collect::<Vec<_>>();
+        for (file_id, role) in originals {
+            let scanned = scanned_by_id[file_id];
+            files.push(plan_file(scanned, role));
+        }
+        for sidecar_id in &item.sidecars {
+            let scanned = scanned_by_id[sidecar_id];
+            files.push(plan_file(scanned, PlanFileRole::Sidecar));
+        }
+        items.push(PlanItem {
+            item_id: item.primary.as_str().to_owned(),
+            files,
+            accepted_datetime: Some(plan_datetime(accepted_at)),
+            datetime_disagreements: Some(
+                datetime_disagreements
+                    .remove(item.primary.as_str())
+                    .ok_or_else(|| {
+                        CliError::invalid_data(format!(
+                            "logical item '{}' has no datetime disagreement evidence",
+                            item.primary.as_str()
+                        ))
+                    })?,
+            ),
+            disposition,
+        });
+    }
+    let catalog_duplicates =
+        catalog_duplicate_findings(&items, |digest| index.paths_for_digest(digest))
+            .map_err(|error| CliError::invalid_data(format!("query catalog index: {error}")))?;
+    let duplicate_review =
+        apply_duplicate_review(&mut items, catalog_duplicates, duplicate_choices)
+            .map_err(|error| CliError::invalid_data(error.to_string()))?;
+    let transfers_by_item = items
+        .iter()
+        .map(|item| {
+            (
+                item.item_id.as_str(),
+                matches!(item.disposition, PlanItemDisposition::Transfer)
+                    && item.files.iter().any(|file| {
+                        file.role != PlanFileRole::Sidecar
+                            && matches!(
+                                file.duplicate_disposition,
+                                Some(DuplicateDisposition::Transfer)
+                            )
+                    }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let allocations = allocate_collection_counters(
         &BTreeMap::from([(accepted_at.date(), existing_counters)]),
         relationships
             .items
             .iter()
-            .filter(|item| item.status == RelationshipStatus::Resolved)
+            .filter(|item| transfers_by_item[item.primary.as_str()])
             .map(|item| NewItemCounterRequest {
                 item_id: item.primary.as_str().to_owned(),
                 source_path_order_key: source_by_id[&item.primary].path.order_key(),
@@ -846,10 +997,14 @@ fn import_plan(
     )
     .map_err(|error| CliError::invalid_data(error.to_string()))?;
     let has_transfers = !allocations.is_empty();
-    let counters: BTreeMap<_, _> = allocations
+    let counters = allocations
         .into_iter()
         .map(|allocation| (allocation.item_id, allocation.counter))
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    let planned_items = items
+        .iter()
+        .map(|item| (item.item_id.as_str(), item))
+        .collect::<BTreeMap<_, _>>();
 
     let mut steps = Vec::new();
     let mut sequence = 1_u32;
@@ -872,112 +1027,86 @@ fn import_plan(
         sequence += 1;
     }
 
-    let mut items = Vec::new();
     let mut manifest_lines = existing_manifest_lines(&collection_path.join("SHA256SUMS"))?;
-    let previous_manifest = manifest_fingerprint(
-        layout.root(),
-        &[
-            year_directory.clone(),
-            collection_directory.clone(),
-            "SHA256SUMS".to_owned(),
-        ],
-    )?;
     let mut required_space_bytes = 0_u64;
-    for item in relationships.items {
-        let disposition = match item.status {
-            RelationshipStatus::Resolved => PlanItemDisposition::Transfer,
-            RelationshipStatus::NeedsDecision => PlanItemDisposition::Unresolved {
-                finding: item_relationship_finding(&item, &unresolved_items).ok_or_else(|| {
-                    CliError::invalid_data(format!(
-                        "logical item '{}' needs a relationship decision without a finding",
-                        item.primary.as_str()
-                    ))
-                })?,
-            },
+    for item in &relationships.items {
+        let Some(counter) = counters.get(item.primary.as_str()) else {
+            continue;
         };
-        let mut files = Vec::new();
-        let originals = std::iter::once((&item.primary, PlanFileRole::Primary))
-            .chain(
-                item.companion
+        let stem = CanonicalStem::new(accepted_at, *counter)
+            .map_err(|error| CliError::invalid_data(error.to_string()))?;
+        let planned_item = planned_items[item.primary.as_str()];
+        let transferring_originals = std::iter::once(&item.primary)
+            .chain(item.companion.iter())
+            .filter(|file_id| {
+                planned_item
+                    .files
                     .iter()
-                    .map(|id| (id, PlanFileRole::Companion)),
-            )
-            .collect::<Vec<_>>();
-        let stem = counters
-            .get(item.primary.as_str())
-            .map(|counter| {
-                CanonicalStem::new(accepted_at, *counter)
-                    .map_err(|error| CliError::invalid_data(error.to_string()))
+                    .find(|file| file.source_file_id == file_id.as_str())
+                    .is_some_and(|file| {
+                        matches!(
+                            file.duplicate_disposition,
+                            Some(DuplicateDisposition::Transfer)
+                        )
+                    })
             })
-            .transpose()?;
-        for (file_id, role) in originals {
+            .map(|file_id| source_by_id[file_id])
+            .collect::<Vec<_>>();
+        for (file_id, role) in std::iter::once((&item.primary, PlanFileRole::Primary)).chain(
+            item.companion
+                .iter()
+                .map(|id| (id, PlanFileRole::Companion)),
+        ) {
+            let planned_file = planned_item
+                .files
+                .iter()
+                .find(|file| file.source_file_id == file_id.as_str())
+                .expect("relationship file belongs to its plan item");
+            if !matches!(
+                planned_file.duplicate_disposition,
+                Some(DuplicateDisposition::Transfer)
+            ) {
+                continue;
+            }
             let source = source_by_id[file_id];
             let scanned = scanned_by_id[file_id];
-            files.push(plan_file(scanned, role));
-            if let Some(stem) = &stem {
-                let filename = CanonicalFilename::new(stem, &source.extension)
-                    .map_err(|error| CliError::invalid_data(error.to_string()))?
-                    .to_string();
-                manifest_lines.insert(filename.clone(), scanned.digest.as_str().to_owned());
-                push_copy_step(
-                    &mut steps,
-                    &mut sequence,
-                    &mut required_space_bytes,
-                    scanned,
-                    vec![
-                        year_directory.clone(),
-                        collection_directory.clone(),
-                        filename,
-                    ],
-                )?;
-            }
+            let filename = CanonicalFilename::new(&stem, &source.extension)
+                .map_err(|error| CliError::invalid_data(error.to_string()))?
+                .to_string();
+            manifest_lines.insert(filename.clone(), scanned.digest.as_str().to_owned());
+            push_copy_step(
+                &mut steps,
+                &mut sequence,
+                &mut required_space_bytes,
+                scanned,
+                vec![
+                    year_directory.clone(),
+                    collection_directory.clone(),
+                    filename,
+                ],
+            )?;
+            debug_assert_ne!(role, PlanFileRole::Sidecar);
         }
         for sidecar_id in &item.sidecars {
             let source = source_by_id[sidecar_id];
             let scanned = scanned_by_id[sidecar_id];
-            files.push(plan_file(scanned, PlanFileRole::Sidecar));
-            if let Some(stem) = &stem {
-                let suffix = sidecar_suffix_for_item(
-                    source,
-                    std::iter::once(&item.primary)
-                        .chain(item.companion.iter())
-                        .map(|id| source_by_id[id]),
-                )
-                .ok_or_else(|| {
-                    CliError::invalid_data(format!(
-                        "resolved sidecar has no unambiguous preserved suffix: {}",
-                        source.path
-                    ))
-                })?;
-                push_copy_step(
-                    &mut steps,
-                    &mut sequence,
-                    &mut required_space_bytes,
-                    scanned,
-                    vec![
-                        year_directory.clone(),
-                        collection_directory.clone(),
-                        format!("{stem}{suffix}"),
-                    ],
-                )?;
-            }
+            let Some(suffix) =
+                sidecar_suffix_for_item(source, transferring_originals.iter().copied())
+            else {
+                continue;
+            };
+            push_copy_step(
+                &mut steps,
+                &mut sequence,
+                &mut required_space_bytes,
+                scanned,
+                vec![
+                    year_directory.clone(),
+                    collection_directory.clone(),
+                    format!("{stem}{suffix}"),
+                ],
+            )?;
         }
-        items.push(PlanItem {
-            item_id: item.primary.as_str().to_owned(),
-            files,
-            accepted_datetime: Some(plan_datetime(accepted_at)),
-            datetime_disagreements: Some(
-                datetime_disagreements
-                    .remove(item.primary.as_str())
-                    .ok_or_else(|| {
-                        CliError::invalid_data(format!(
-                            "logical item '{}' has no datetime disagreement evidence",
-                            item.primary.as_str()
-                        ))
-                    })?,
-            ),
-            disposition,
-        });
     }
     if has_transfers {
         let manifest_contents = encode_manifest(&manifest_lines);
@@ -1013,14 +1142,14 @@ fn import_plan(
         plan_id,
         created_at,
         catalog: CatalogSnapshot {
-            catalog_id: digest_text(&canonical_path(layout.root())?.to_string_lossy()),
-            manifests: previous_manifest.into_iter().collect(),
+            catalog_id,
+            manifests: catalog_manifests,
         },
         source: SourceSnapshot {
             source_id: scan.source_id.clone(),
             fingerprint: scan.fingerprint.clone(),
         },
-        duplicates: None,
+        duplicates: Some(duplicate_review),
         items,
         unhandled_content,
         steps,
@@ -1048,7 +1177,16 @@ fn import_plan(
                 .document()
                 .items
                 .iter()
-                .filter(|item| matches!(item.disposition, PlanItemDisposition::Transfer))
+                .filter(|item| {
+                    matches!(item.disposition, PlanItemDisposition::Transfer)
+                        && item.files.iter().any(|file| {
+                            file.role != PlanFileRole::Sidecar
+                                && matches!(
+                                    file.duplicate_disposition,
+                                    Some(DuplicateDisposition::Transfer)
+                                )
+                        })
+                })
                 .count(),
             unhandled_count: stored.import_plan.document().unhandled_content.len(),
             required_space_bytes,
@@ -1078,6 +1216,7 @@ fn import_execute(
     let lock = CatalogLock::acquire(&layout)
         .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
     // Recheck under the lock to close the race after the read-only preflight.
+    validate_catalog_snapshot(&layout, &stored.import_plan.document().catalog)?;
     validate_plan_destinations(&layout, &stored.import_plan)?;
     let mut journal = OperationJournal::create(&layout, &lock, &operation_id, &stored.import_plan)
         .map_err(|error| CliError::conflict(format!("create operation journal: {error}")))?;
@@ -1435,16 +1574,7 @@ fn validate_plan_state(layout: &CatalogLayout, stored: &StoredPlan) -> Result<()
     if catalog_id != plan.catalog.catalog_id {
         return Err(CliError::conflict("plan belongs to a different catalog"));
     }
-    for manifest in &plan.catalog.manifests {
-        let path = join_components(layout.root(), &manifest.path);
-        let (actual, _) = digest_file(&path)?;
-        if actual != manifest.digest {
-            return Err(CliError::conflict(format!(
-                "catalog manifest changed after planning: {}",
-                path.display()
-            )));
-        }
-    }
+    validate_catalog_snapshot(layout, &plan.catalog)?;
     for item in &plan.items {
         for file in &item.files {
             let path = join_components(&stored.source_root, &file.source_path);
@@ -1456,6 +1586,50 @@ fn validate_plan_state(layout: &CatalogLayout, stored: &StoredPlan) -> Result<()
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_catalog_snapshot(
+    layout: &CatalogLayout,
+    expected: &CatalogSnapshot,
+) -> Result<(), CliError> {
+    let actual = snapshot_catalog_manifests(layout.root())
+        .map_err(|error| CliError::io(format!("snapshot catalog manifests: {error}")))?;
+    let expected_by_path = expected
+        .manifests
+        .iter()
+        .map(|manifest| (&manifest.path, &manifest.digest))
+        .collect::<BTreeMap<_, _>>();
+    let actual_by_path = actual
+        .iter()
+        .map(|manifest| (&manifest.path, &manifest.digest))
+        .collect::<BTreeMap<_, _>>();
+    for (path, digest) in &expected_by_path {
+        match actual_by_path.get(path) {
+            None => {
+                return Err(CliError::conflict(format!(
+                    "catalog manifest is missing after planning: {}",
+                    path.join("/")
+                )));
+            }
+            Some(actual) if *actual != *digest => {
+                return Err(CliError::conflict(format!(
+                    "catalog manifest changed after planning: {}",
+                    path.join("/")
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(path) = actual_by_path
+        .keys()
+        .find(|path| !expected_by_path.contains_key(*path))
+    {
+        return Err(CliError::conflict(format!(
+            "unexpected catalog manifest appeared after planning: {}",
+            path.join("/")
+        )));
     }
     Ok(())
 }
@@ -2913,19 +3087,14 @@ mod tests {
     }
 
     #[test]
-    fn cli_keeps_emitting_version_three_while_version_four_is_staged() {
+    fn cli_emits_the_active_version_four_schema() {
         let current = serde_json::to_value(stored_plan_schema()).unwrap();
-        let staged = serde_json::to_value(stored_plan_schema_for_version(4).unwrap()).unwrap();
 
         assert_eq!(
             current["properties"]["schema_version"]["minimum"],
-            serde_json::json!(3.0)
-        );
-        assert_eq!(
-            staged["properties"]["schema_version"]["minimum"],
             serde_json::json!(4.0)
         );
-        assert!(staged["definitions"]["PlanDocument"]["properties"]["duplicates"].is_object());
+        assert!(current["definitions"]["PlanDocument"]["properties"]["duplicates"].is_object());
     }
 
     #[test]

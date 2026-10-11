@@ -25,6 +25,12 @@ fn json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout should be one JSON result")
 }
 
+fn sha256_hex(contents: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    format!("{:x}", Sha256::digest(contents))
+}
+
 fn prepare_plan(temporary: &TempDir, confirmed: bool) -> (PathBuf, PathBuf, PathBuf) {
     prepare_plan_with_existing_year(temporary, confirmed, false)
 }
@@ -81,6 +87,100 @@ fn prepare_plan_with_existing_year(
     }
     json_stdout(&run(&arguments));
     (catalog, source, plan)
+}
+
+#[test]
+fn execution_rejects_missing_changed_and_unexpected_manifest_namespace_entries() {
+    for (case, expected_message) in [
+        ("missing", "catalog manifest is missing after planning"),
+        ("changed", "catalog manifest changed after planning"),
+        (
+            "unexpected",
+            "unexpected catalog manifest appeared after planning",
+        ),
+    ] {
+        let temporary = TempDir::new().unwrap();
+        let catalog = temporary.path().join("catalog");
+        let source = temporary.path().join("source");
+        let snapshot = temporary.path().join("scan.json");
+        let plan = temporary.path().join("plan.json");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("photo.jpg"), b"photo").unwrap();
+        json_stdout(&run(&[
+            "catalog",
+            "initialize",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]));
+        let existing = catalog.join("2025/2025-01-01 Existing");
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(existing.join("old.jpg"), b"old").unwrap();
+        fs::write(
+            existing.join("SHA256SUMS"),
+            format!("{}  old.jpg\n", sha256_hex(b"old")),
+        )
+        .unwrap();
+        json_stdout(&run(&[
+            "import",
+            "scan",
+            "--source",
+            source.to_str().unwrap(),
+            "--output",
+            snapshot.to_str().unwrap(),
+        ]));
+        json_stdout(&run(&[
+            "import",
+            "plan",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--snapshot",
+            snapshot.to_str().unwrap(),
+            "--output",
+            plan.to_str().unwrap(),
+            "--collection",
+            "Vacation",
+            "--destination-mode",
+            "create",
+            "--accepted-at",
+            "2026-10-10T12:34:56",
+            "--confirm",
+        ]));
+
+        match case {
+            "missing" => fs::remove_file(existing.join("SHA256SUMS")).unwrap(),
+            "changed" => fs::write(
+                existing.join("SHA256SUMS"),
+                format!("{}  old.jpg\n", sha256_hex(b"changed")),
+            )
+            .unwrap(),
+            "unexpected" => {
+                let added = catalog.join("2025/2025-02-02 Added");
+                fs::create_dir_all(&added).unwrap();
+                fs::write(added.join("SHA256SUMS"), "").unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let output = run(&[
+            "import",
+            "execute",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--plan",
+            plan.to_str().unwrap(),
+        ]);
+
+        assert_eq!(output.status.code(), Some(4), "{case}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected_message),
+            "{case}: {error}"
+        );
+    }
 }
 
 fn operation_journal(catalog: &Path, operation_id: &str) -> PathBuf {

@@ -337,7 +337,7 @@ Each original records a transfer or retained duplicate disposition.
 A retained catalog duplicate names the first component-wise catalog path.
 A retained source duplicate names the selected source file.
 Sidecars use the transfer disposition.
-Execution copies a sidecar only when its item transfers at least one original.
+Execution copies a sidecar only when its item transfers an original that remains its local owner.
 
 The catalog skip choice takes precedence when a digest matches the catalog and the source.
 The one-copy choice selects the earliest accepted wall-clock datetime.
@@ -351,8 +351,11 @@ Source groups must exactly cover every repeated digest among source originals.
 The planner establishes catalog finding completeness from the catalog lookup.
 Versions 1 through 3 omit all duplicate fields and keep their original digest contracts.
 
-The CLI continues to emit version 3 plans until planning and locked drift validation support version 4.
-The committed version 4 schema defines the next producer and consumer contract.
+The CLI emits version 4 plans.
+Planning records structured duplicate choices and derives copy and manifest steps from those choices.
+Planning binds the disposable index to the catalog identity.
+The plan snapshots every manifest in the namespace used by duplicate lookup.
+Execution revalidates missing, changed, and unexpected manifest entries under the catalog lock before it creates the operation journal.
 
 The saved-plan `confirmed` field is not part of the digest.
 Execution must reject the plan unless this field is `true`.

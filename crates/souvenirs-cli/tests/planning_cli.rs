@@ -116,7 +116,7 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
 
     let plan_value: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
     let schema: Value = serde_json::from_slice(
-        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v3.json"))
+        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v4.json"))
             .unwrap(),
     )
     .unwrap();
@@ -130,6 +130,202 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
         plan_value["import_plan"]["document"]["items"][0]["disposition"]["kind"],
         "transfer"
     );
+    assert_eq!(
+        plan_value["import_plan"]["document"]["duplicates"]["choices"],
+        serde_json::json!({"catalog": "import", "source": "import_all"})
+    );
+    assert_eq!(
+        plan_value["import_plan"]["document"]["items"][0]["files"][0]["duplicate_disposition"]
+            ["kind"],
+        "transfer"
+    );
+}
+
+#[test]
+fn duplicate_choices_drive_retained_references_and_copy_steps() {
+    let temporary = TempDir::new().unwrap();
+    let catalog = temporary.path().join("catalog");
+    let source = temporary.path().join("source");
+    fs::create_dir(&catalog).unwrap();
+    fs::create_dir(&source).unwrap();
+    json_stdout(&run(&[
+        "catalog",
+        "initialize",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    let first_collection = catalog.join("2024/2024-01-01 First");
+    let second_collection = catalog.join("2025/2025-01-01 Second");
+    fs::create_dir_all(&first_collection).unwrap();
+    fs::create_dir_all(&second_collection).unwrap();
+    let catalog_bytes = b"catalog duplicate";
+    fs::write(first_collection.join("first.jpg"), catalog_bytes).unwrap();
+    fs::write(second_collection.join("second.heic"), catalog_bytes).unwrap();
+    fs::write(
+        first_collection.join("SHA256SUMS"),
+        format!("{}  first.jpg\n", sha256_hex(catalog_bytes)),
+    )
+    .unwrap();
+    fs::write(
+        second_collection.join("SHA256SUMS"),
+        format!("{}  second.heic\n", sha256_hex(catalog_bytes)),
+    )
+    .unwrap();
+    fs::write(source.join("a.jpg"), catalog_bytes).unwrap();
+    fs::write(source.join("b.heic"), catalog_bytes).unwrap();
+    fs::write(source.join("c.jpg"), b"source duplicate").unwrap();
+    fs::write(source.join("d.mov"), b"source duplicate").unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    let plan = temporary.path().join("plan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+
+    let result = json_stdout(&run(&[
+        "import",
+        "plan",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--snapshot",
+        snapshot.to_str().unwrap(),
+        "--output",
+        plan.to_str().unwrap(),
+        "--collection",
+        "Reviewed",
+        "--destination-mode",
+        "create",
+        "--accepted-at",
+        "2026-10-10T12:34:56",
+        "--catalog-duplicates",
+        "skip",
+        "--source-duplicates",
+        "one-per-digest",
+    ]));
+    assert_eq!(result["result"]["transfer_count"], 1);
+
+    let stored: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
+    let document = &stored["import_plan"]["document"];
+    let files = document["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["files"].as_array().unwrap())
+        .map(|file| (file["source_path"][0].as_str().unwrap(), file))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for path in ["a.jpg", "b.heic"] {
+        assert_eq!(
+            files[path]["duplicate_disposition"],
+            serde_json::json!({
+                "kind": "retain_catalog_duplicate",
+                "catalog_path": ["2024", "2024-01-01 First", "first.jpg"]
+            })
+        );
+    }
+    assert_eq!(files["c.jpg"]["duplicate_disposition"]["kind"], "transfer");
+    assert_eq!(
+        files["d.mov"]["duplicate_disposition"],
+        serde_json::json!({
+            "kind": "retain_source_duplicate",
+            "selected_source_file_id": files["c.jpg"]["source_file_id"]
+        })
+    );
+    let copied = document["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["action"]["kind"] == "copy_file")
+        .map(|step| step["action"]["source_file_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        copied,
+        vec![files["c.jpg"]["source_file_id"].as_str().unwrap()]
+    );
+    assert_eq!(
+        document["catalog"]["manifests"].as_array().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn retained_compound_original_leaves_its_sidecar_at_the_source() {
+    let temporary = TempDir::new().unwrap();
+    let catalog = temporary.path().join("catalog");
+    let source = temporary.path().join("source");
+    fs::create_dir(&catalog).unwrap();
+    fs::create_dir(&source).unwrap();
+    json_stdout(&run(&[
+        "catalog",
+        "initialize",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    let existing = catalog.join("2025/2025-01-01 Existing");
+    fs::create_dir_all(&existing).unwrap();
+    fs::write(existing.join("existing.CR3"), b"raw duplicate").unwrap();
+    fs::write(
+        existing.join("SHA256SUMS"),
+        format!("{}  existing.CR3\n", sha256_hex(b"raw duplicate")),
+    )
+    .unwrap();
+    fs::write(source.join("image.CR3"), b"raw duplicate").unwrap();
+    fs::write(source.join("image.JPG"), b"jpeg unique").unwrap();
+    fs::write(source.join("image.CR3.xmp"), b"raw sidecar").unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    let plan = temporary.path().join("plan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+    json_stdout(&run(&[
+        "import",
+        "plan",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--snapshot",
+        snapshot.to_str().unwrap(),
+        "--output",
+        plan.to_str().unwrap(),
+        "--collection",
+        "Reviewed",
+        "--destination-mode",
+        "create",
+        "--accepted-at",
+        "2026-10-10T12:34:56",
+        "--catalog-duplicates",
+        "skip",
+    ]));
+
+    let stored: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
+    let document = &stored["import_plan"]["document"];
+    let copied_paths = document["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["action"]["kind"] == "copy_file")
+        .map(|step| {
+            let source_id = step["action"]["source_file_id"].as_str().unwrap();
+            document["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|item| item["files"].as_array().unwrap())
+                .find(|file| file["source_file_id"] == source_id)
+                .unwrap()["source_path"][0]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copied_paths, vec!["image.JPG"]);
 }
 
 #[test]

@@ -138,6 +138,8 @@ Each computer keeps its own index and rebuilds it when it is missing or outdated
 A missing, outdated, or corrupt index is deleted and rebuilt.
 Rebuilding reads manifests and filenames.
 It does not rehash media.
+The index records the catalog identity and the complete manifest namespace used by lookup.
+Opening the index rejects a catalog identity mismatch.
 Mutations must update the index after the matching manifest change.
 
 ## Integrity checks
