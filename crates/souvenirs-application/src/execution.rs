@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_storage::{
-    read_operation_records, CatalogLayout, CatalogLock, CopyExpectation,
-    ManifestReplacementRequest, OperationJournal, OperationRecord, RecoveryCopy, RecoveryDirectory,
-    RecoveryManifest, RecoveryMode, RecoveryRequest,
+    read_operation_records, CatalogLayout, CatalogLock, CatalogPathError, CopyExpectation,
+    ManifestReplacementRequest, OperationJournal, OperationRecord, PortableDestinationObserver,
+    RecoveryCopy, RecoveryDirectory, RecoveryManifest, RecoveryMode, RecoveryRequest,
 };
 use time::Date;
 
@@ -106,6 +106,7 @@ impl ImportExecutionService {
         let layout = CatalogLayout::new(&prepared.plan.catalog_path);
         let lock = CatalogLock::acquire(&layout)
             .map_err(|error| ImportExecutionError::Conflict(error.to_string()))?;
+        validate_reviewed_catalog_state(&prepared.plan)?;
         let mut journal =
             OperationJournal::create(&layout, &lock, &prepared.operation_id, &prepared.plan)
                 .map_err(|error| ImportExecutionError::Conflict(error.to_string()))?;
@@ -264,9 +265,19 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
             "The source changed after review. Review the import again.".to_owned(),
         ));
     }
+    validate_reviewed_catalog_state(plan)
+}
+
+fn validate_reviewed_catalog_state(plan: &ExecutionPlan) -> Result<(), ImportExecutionError> {
     let layout = CatalogLayout::new(&plan.catalog_path);
+    let mut observer = PortableDestinationObserver::new(&layout)
+        .map_err(|error| destination_observation_error(&plan.catalog_path, error))?;
     for directory in &plan.directories {
         let path = plan.catalog_path.join(&directory.path);
+        let occupied = directory.create
+            && observer
+                .is_occupied(&directory.path)
+                .map_err(|error| destination_observation_error(&path, error))?;
         let contained = directory.create
             || souvenirs_storage::validate_directory(&layout, &directory.path).is_ok();
         let matches = path.metadata().is_ok_and(|metadata| {
@@ -276,20 +287,22 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
                     .as_ref()
                     .map_or(true, |identity| directory_identity(&metadata) == *identity)
         });
-        if !contained || (directory.create && path.exists()) || (!directory.create && !matches) {
+        if !contained || occupied || (!directory.create && !matches) {
             return Err(ImportExecutionError::Conflict(
                 "The catalog changed after review. Review the import again.".to_owned(),
             ));
         }
     }
-    if plan
-        .copies
-        .iter()
-        .any(|copy| plan.catalog_path.join(&copy.destination).exists())
-    {
-        return Err(ImportExecutionError::Conflict(
-            "A planned destination is no longer free. Review the import again.".to_owned(),
-        ));
+    for copy in &plan.copies {
+        let path = plan.catalog_path.join(&copy.destination);
+        if observer
+            .is_occupied(&copy.destination)
+            .map_err(|error| destination_observation_error(&path, error))?
+        {
+            return Err(ImportExecutionError::Conflict(
+                "A planned destination is no longer free. Review the import again.".to_owned(),
+            ));
+        }
     }
     let manifest_path = plan.catalog_path.join(&plan.manifest.path);
     match &plan.manifest.previous_digest {
@@ -302,13 +315,29 @@ fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionErr
                 return Err(ImportExecutionError::Conflict(MANIFEST_CHANGED.to_owned()));
             }
         }
-        None if manifest_path.exists() => {
+        None if observer
+            .is_occupied(&plan.manifest.path)
+            .map_err(|error| destination_observation_error(&manifest_path, error))? =>
+        {
             return Err(ImportExecutionError::Conflict(MANIFEST_CHANGED.to_owned()));
         }
         None => {}
     }
     Ok(())
 }
+
+fn destination_observation_error(path: &Path, error: CatalogPathError) -> ImportExecutionError {
+    match error {
+        CatalogPathError::Io { source, .. } => ImportExecutionError::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+        other => ImportExecutionError::Conflict(format!(
+            "The planned destination is invalid: {other}. Review the import again."
+        )),
+    }
+}
+
 fn source_snapshot(root: &Path) -> Result<Vec<SourceSnapshotEntry>, ImportExecutionError> {
     if !root.is_dir() {
         return Err(ImportExecutionError::InvalidSource(root.to_path_buf()));
@@ -1079,8 +1108,26 @@ mod tests {
 
         let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
 
-        assert!(error.to_string().contains("occupied destination"));
+        assert!(error.to_string().contains("Review the import again."));
+        assert_eq!(import_journal_count(&fixture), 0);
         assert_eq!(fs::read(sidecar_destination).unwrap(), b"existing sidecar");
+    }
+
+    #[test]
+    fn exclusive_creation_rejects_a_destination_occupied_after_preflight() {
+        let fixture = fixture();
+        let prepared = prep(&fixture, DestinationMode::Create);
+        let destination = fixture.catalog.join(&prepared.plan.copies[1].destination);
+
+        let error = ImportExecutionService::execute(prepared, |progress| {
+            if progress.completed_units == 1 {
+                fs::write(&destination, b"late conflict").unwrap();
+            }
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("occupied destination"));
+        assert_eq!(fs::read(destination).unwrap(), b"late conflict");
     }
 
     #[test]
@@ -1545,6 +1592,25 @@ mod tests {
             assert_eq!(import_journal_count(&fixture), 0);
         }
     }
+
+    #[test]
+    fn execution_rejects_portable_directory_drift_before_journaling() {
+        let fixture = fixture();
+        fs::create_dir(fixture.catalog.join("2026")).unwrap();
+        let prepared = prep(&fixture, DestinationMode::Create);
+        let occupied = fixture
+            .catalog
+            .join("2026")
+            .join("2026-10-10 RECOVERY IMPORT");
+        fs::create_dir(&occupied).unwrap();
+
+        let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
+
+        assert_eq!(error.code(), "operation_conflict");
+        assert_eq!(import_journal_count(&fixture), 0);
+        assert!(occupied.is_dir());
+    }
+
     fn import_journal_count(fixture: &Fixture) -> usize {
         fs::read_dir(CatalogLayout::new(&fixture.catalog).journal_directory())
             .unwrap()
