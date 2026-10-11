@@ -13,8 +13,8 @@ use crate::datetime::{DateTimeCandidate, DateTimeSource, DateTimeValue};
 use crate::names::{PathCollisionKey, PortableRelativePath};
 use crate::source::SourcePath;
 
-/// Versions 1 through 3 hash the normalized `PlanDocument` compact JSON representation.
-pub const IMPORT_PLAN_SCHEMA_VERSION: u32 = 3;
+/// Versions 1 through 4 hash the normalized `PlanDocument` compact JSON representation.
+pub const IMPORT_PLAN_SCHEMA_VERSION: u32 = 4;
 
 #[derive(
     Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema,
@@ -175,6 +175,72 @@ pub struct PlanFile {
     pub digest: ContentDigest,
     pub size_bytes: u64,
     pub role: PlanFileRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_disposition: Option<DuplicateDisposition>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DuplicateDisposition {
+    Transfer,
+    RetainCatalogDuplicate { catalog_path: Vec<String> },
+    RetainSourceDuplicate { selected_source_file_id: String },
+}
+
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogDuplicateChoice {
+    Import,
+    Skip,
+}
+
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDuplicateChoice {
+    ImportAll,
+    OnePerDigest,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateChoices {
+    pub catalog: CatalogDuplicateChoice,
+    pub source: SourceDuplicateChoice,
+}
+
+impl Default for DuplicateChoices {
+    fn default() -> Self {
+        Self {
+            catalog: CatalogDuplicateChoice::Import,
+            source: SourceDuplicateChoice::ImportAll,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogDuplicate {
+    pub source_file_id: String,
+    pub catalog_paths: Vec<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceDuplicateGroup {
+    pub digest: ContentDigest,
+    pub source_file_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateReview {
+    pub choices: DuplicateChoices,
+    pub catalog_duplicates: Vec<CatalogDuplicate>,
+    pub source_duplicate_groups: Vec<SourceDuplicateGroup>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
@@ -518,12 +584,14 @@ pub struct PlanStep {
 #[serde(deny_unknown_fields)]
 /// Field order is part of the version 1 digest contract.
 pub struct PlanDocument {
-    #[schemars(range(min = 1, max = 3))]
+    #[schemars(range(min = 1, max = 4))]
     pub schema_version: u32,
     pub plan_id: PlanId,
     pub created_at: PlanTimestamp,
     pub catalog: CatalogSnapshot,
     pub source: SourceSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicates: Option<DuplicateReview>,
     pub items: Vec<PlanItem>,
     pub unhandled_content: Vec<UnhandledContent>,
     pub steps: Vec<PlanStep>,
@@ -745,6 +813,47 @@ pub fn constrain_import_plan_schema(
             .push(serde_json::json!("datetime_disagreements"));
         plan_item["properties"]["datetime_disagreements"]["type"] = serde_json::json!("array");
     }
+    if version < 4 {
+        value["definitions"]["PlanFile"]["properties"]
+            .as_object_mut()
+            .expect("plan file properties exist")
+            .remove("duplicate_disposition");
+        value["definitions"]["PlanDocument"]["properties"]
+            .as_object_mut()
+            .expect("plan document properties exist")
+            .remove("duplicates");
+        let definitions = value["definitions"]
+            .as_object_mut()
+            .expect("schema definitions exist");
+        for definition in [
+            "CatalogDuplicate",
+            "CatalogDuplicateChoice",
+            "DuplicateChoices",
+            "DuplicateDisposition",
+            "DuplicateReview",
+            "SourceDuplicateChoice",
+            "SourceDuplicateGroup",
+        ] {
+            definitions.remove(definition);
+        }
+    } else {
+        value["definitions"]["PlanFile"]["required"]
+            .as_array_mut()
+            .expect("plan file required fields exist")
+            .push(serde_json::json!("duplicate_disposition"));
+        let duplicate_disposition = value["definitions"]["PlanFile"]["properties"]
+            ["duplicate_disposition"]["anyOf"][0]
+            .clone();
+        value["definitions"]["PlanFile"]["properties"]["duplicate_disposition"] =
+            duplicate_disposition;
+        value["definitions"]["PlanDocument"]["required"]
+            .as_array_mut()
+            .expect("plan document required fields exist")
+            .push(serde_json::json!("duplicates"));
+        let duplicates =
+            value["definitions"]["PlanDocument"]["properties"]["duplicates"]["anyOf"][0].clone();
+        value["definitions"]["PlanDocument"]["properties"]["duplicates"] = duplicates;
+    }
     if version == 1 {
         let values = value["definitions"]["PlanItemFinding"]["enum"]
             .as_array_mut()
@@ -775,6 +884,20 @@ fn normalize_document(document: &mut PlanDocument) {
     document
         .items
         .sort_by(|left, right| left.item_id.cmp(&right.item_id));
+    if let Some(duplicates) = &mut document.duplicates {
+        duplicates
+            .catalog_duplicates
+            .sort_by(|left, right| left.source_file_id.cmp(&right.source_file_id));
+        for duplicate in &mut duplicates.catalog_duplicates {
+            duplicate.catalog_paths.sort();
+        }
+        duplicates
+            .source_duplicate_groups
+            .sort_by(|left, right| left.digest.cmp(&right.digest));
+        for group in &mut duplicates.source_duplicate_groups {
+            group.source_file_ids.sort();
+        }
+    }
     for item in &mut document.items {
         item.files.sort_by(|left, right| {
             (&left.source_path, &left.source_file_id)
@@ -823,6 +946,14 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
     for manifest in &document.catalog.manifests {
         portable_path(&manifest.path)?;
     }
+    match (document.schema_version, &document.duplicates) {
+        (1..=3, None) | (4, Some(_)) => {}
+        (1..=3, Some(_)) => {
+            return Err(PlanError::DuplicateReviewRequiresSchemaVersion);
+        }
+        (4, None) => return Err(PlanError::MissingDuplicateReview),
+        _ => unreachable!("schema version is validated before duplicate review"),
+    }
 
     ensure_strictly_sorted(
         document.items.iter().map(|item| &item.item_id),
@@ -835,6 +966,7 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
         .collect();
     let mut source_ids = BTreeSet::new();
     let mut source_paths = BTreeSet::new();
+    let mut plan_files = BTreeMap::new();
     let mut transferable_files = BTreeMap::new();
     let mut ambiguous_sidecar_items = BTreeSet::new();
     for item in &document.items {
@@ -867,14 +999,14 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
             return Err(PlanError::TransferWithoutDate(item.item_id.clone()));
         }
         match (document.schema_version, &item.datetime_disagreements) {
-            (1 | 2, None) | (3, Some(_)) => {}
+            (1 | 2, None) | (3 | 4, Some(_)) => {}
             (1 | 2, Some(_)) => {
                 return Err(PlanError::DateTimeDisagreementsRequireSchemaVersion {
                     item_id: item.item_id.clone(),
                     minimum_version: 3,
                 });
             }
-            (3, None) => {
+            (3 | 4, None) => {
                 return Err(PlanError::MissingDateTimeDisagreements(
                     item.item_id.clone(),
                 ));
@@ -903,6 +1035,15 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
         ) {
             ambiguous_sidecar_items.insert(item.item_id.as_str());
         }
+        let transfers_item = matches!(item.disposition, PlanItemDisposition::Transfer);
+        let transfers_original = document.schema_version < 4
+            || item.files.iter().any(|file| {
+                file.role != PlanFileRole::Sidecar
+                    && matches!(
+                        file.duplicate_disposition,
+                        Some(DuplicateDisposition::Transfer)
+                    )
+            });
         for file in &item.files {
             if file.source_file_id.is_empty() {
                 return Err(PlanError::EmptyIdentifier("source file"));
@@ -920,7 +1061,48 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
             if !source_paths.insert(&file.source_path) {
                 return Err(PlanError::DuplicateSourcePath(file.source_path.clone()));
             }
-            if matches!(item.disposition, PlanItemDisposition::Transfer) {
+            match (document.schema_version, &file.duplicate_disposition) {
+                (1..=3, None) | (4, Some(_)) => {}
+                (1..=3, Some(_)) => {
+                    return Err(PlanError::DuplicateDispositionRequiresSchemaVersion(
+                        file.source_file_id.clone(),
+                    ));
+                }
+                (4, None) => {
+                    return Err(PlanError::MissingDuplicateDisposition(
+                        file.source_file_id.clone(),
+                    ));
+                }
+                _ => unreachable!("schema version is validated before plan files"),
+            }
+            if document.schema_version == 4
+                && file.role == PlanFileRole::Sidecar
+                && !matches!(
+                    file.duplicate_disposition,
+                    Some(DuplicateDisposition::Transfer)
+                )
+            {
+                return Err(PlanError::InvalidDuplicateReview(format!(
+                    "sidecar '{}' must use the transfer duplicate disposition",
+                    file.source_file_id
+                )));
+            }
+            plan_files.insert(
+                file.source_file_id.clone(),
+                (file, item.accepted_datetime.as_ref(), transfers_item),
+            );
+            let transfers_file = if document.schema_version < 4 {
+                transfers_item
+            } else if file.role == PlanFileRole::Sidecar {
+                transfers_item && transfers_original
+            } else {
+                transfers_item
+                    && matches!(
+                        file.duplicate_disposition,
+                        Some(DuplicateDisposition::Transfer)
+                    )
+            };
+            if transfers_file {
                 transferable_files.insert(
                     file.source_file_id.clone(),
                     (file.digest.clone(), file.size_bytes, file.role),
@@ -940,6 +1122,9 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
                 validate_datetime_candidate(disagreement)?;
             }
         }
+    }
+    if let Some(duplicates) = &document.duplicates {
+        validate_duplicate_review(duplicates, &plan_files)?;
     }
 
     ensure_strictly_sorted(
@@ -1088,6 +1273,168 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
         });
     }
     Ok(())
+}
+
+fn validate_duplicate_review(
+    review: &DuplicateReview,
+    files: &BTreeMap<String, (&PlanFile, Option<&PlanDateTime>, bool)>,
+) -> Result<(), PlanError> {
+    ensure_strictly_sorted(
+        review
+            .catalog_duplicates
+            .iter()
+            .map(|duplicate| &duplicate.source_file_id),
+        "catalog duplicate source file identifiers",
+    )?;
+    let mut catalog_duplicates = BTreeMap::new();
+    for duplicate in &review.catalog_duplicates {
+        let Some((file, _, _)) = files.get(duplicate.source_file_id.as_str()) else {
+            return Err(PlanError::InvalidDuplicateReview(format!(
+                "catalog duplicate references unknown source file '{}'",
+                duplicate.source_file_id
+            )));
+        };
+        if file.role == PlanFileRole::Sidecar || duplicate.catalog_paths.is_empty() {
+            return Err(PlanError::InvalidDuplicateReview(format!(
+                "catalog duplicate '{}' must reference an original and at least one catalog path",
+                duplicate.source_file_id
+            )));
+        }
+        ensure_strictly_sorted(duplicate.catalog_paths.iter(), "catalog duplicate paths")?;
+        for path in &duplicate.catalog_paths {
+            portable_path(path)?;
+        }
+        catalog_duplicates.insert(duplicate.source_file_id.clone(), duplicate);
+    }
+
+    ensure_strictly_sorted(
+        review
+            .source_duplicate_groups
+            .iter()
+            .map(|group| &group.digest),
+        "source duplicate group digests",
+    )?;
+    let mut expected_source_groups = BTreeMap::<ContentDigest, Vec<String>>::new();
+    for (source_file_id, (file, _, _)) in files {
+        if file.role != PlanFileRole::Sidecar {
+            expected_source_groups
+                .entry(file.digest.clone())
+                .or_default()
+                .push(source_file_id.clone());
+        }
+    }
+    expected_source_groups.retain(|_, source_file_ids| source_file_ids.len() > 1);
+    let mut source_groups = BTreeMap::new();
+    let mut declared_source_groups = BTreeMap::new();
+    for group in &review.source_duplicate_groups {
+        ensure_strictly_sorted(
+            group.source_file_ids.iter(),
+            "source duplicate group file identifiers",
+        )?;
+        if group.source_file_ids.len() < 2 {
+            return Err(PlanError::InvalidDuplicateReview(format!(
+                "source duplicate group '{}' must contain at least two files",
+                group.digest.as_str()
+            )));
+        }
+        for source_file_id in &group.source_file_ids {
+            let Some((file, _, _)) = files.get(source_file_id.as_str()) else {
+                return Err(PlanError::InvalidDuplicateReview(format!(
+                    "source duplicate group references unknown source file '{source_file_id}'"
+                )));
+            };
+            if file.role == PlanFileRole::Sidecar || file.digest != group.digest {
+                return Err(PlanError::InvalidDuplicateReview(format!(
+                    "source duplicate group member '{source_file_id}' is not a matching original"
+                )));
+            }
+            if source_groups
+                .insert(source_file_id.clone(), group)
+                .is_some()
+            {
+                return Err(PlanError::InvalidDuplicateReview(format!(
+                    "source file '{source_file_id}' belongs to more than one duplicate group"
+                )));
+            }
+        }
+        declared_source_groups.insert(group.digest.clone(), group.source_file_ids.clone());
+    }
+    if declared_source_groups != expected_source_groups {
+        return Err(PlanError::InvalidDuplicateReview(
+            "source duplicate groups must exactly cover every repeated original digest".into(),
+        ));
+    }
+
+    for (source_file_id, (file, _, transfers_item)) in files {
+        if file.role == PlanFileRole::Sidecar {
+            continue;
+        }
+        let catalog_duplicate = catalog_duplicates.get(source_file_id).copied();
+        let source_group = source_groups.get(source_file_id).copied();
+        let expected = if !*transfers_item {
+            DuplicateDisposition::Transfer
+        } else if let (CatalogDuplicateChoice::Skip, Some(duplicate)) =
+            (review.choices.catalog, catalog_duplicate)
+        {
+            DuplicateDisposition::RetainCatalogDuplicate {
+                catalog_path: duplicate.catalog_paths[0].clone(),
+            }
+        } else if review.choices.source == SourceDuplicateChoice::OnePerDigest
+            && source_group.is_some()
+        {
+            let group = source_group.expect("source duplicate group exists");
+            let selected = group
+                .source_file_ids
+                .iter()
+                .filter(|candidate| {
+                    files[candidate.as_str()].2
+                        && (review.choices.catalog != CatalogDuplicateChoice::Skip
+                            || !catalog_duplicates.contains_key(candidate.as_str()))
+                })
+                .min_by_key(|candidate| duplicate_selection_key(files[candidate.as_str()]))
+                .map(String::as_str);
+            if selected == Some(source_file_id.as_str()) {
+                DuplicateDisposition::Transfer
+            } else if let Some(selected_source_file_id) = selected {
+                DuplicateDisposition::RetainSourceDuplicate {
+                    selected_source_file_id: selected_source_file_id.to_owned(),
+                }
+            } else {
+                return Err(PlanError::InvalidDuplicateReview(format!(
+                    "source duplicate group for '{source_file_id}' has no transferable selection"
+                )));
+            }
+        } else {
+            DuplicateDisposition::Transfer
+        };
+        if file.duplicate_disposition.as_ref() != Some(&expected) {
+            return Err(PlanError::InvalidDuplicateReview(format!(
+                "source file '{source_file_id}' does not match the selected duplicate choices"
+            )));
+        }
+    }
+    Ok(())
+}
+
+type DuplicateSelectionKey<'a> = (bool, (i32, u16, u8, u8, u8), &'a [String], &'a str);
+
+fn duplicate_selection_key<'a>(
+    (file, accepted_datetime, _): (&'a PlanFile, Option<&'a PlanDateTime>, bool),
+) -> DuplicateSelectionKey<'a> {
+    (
+        accepted_datetime.is_none(),
+        accepted_datetime.map_or((0, 0, 0, 0, 0), |value| {
+            (
+                value.year,
+                value.ordinal,
+                value.hour,
+                value.minute,
+                value.second,
+            )
+        }),
+        &file.source_path,
+        &file.source_file_id,
+    )
 }
 
 fn validate_datetime(datetime: &PlanDateTime) -> Result<(), PlanError> {
@@ -1247,6 +1594,11 @@ pub enum PlanError {
         minimum_version: u32,
     },
     MissingDateTimeDisagreements(String),
+    DuplicateReviewRequiresSchemaVersion,
+    MissingDuplicateReview,
+    DuplicateDispositionRequiresSchemaVersion(String),
+    MissingDuplicateDisposition(String),
+    InvalidDuplicateReview(String),
     SourceFileNotTransferable(String),
     DuplicateCopyStep(String),
     MissingCopyStep(String),
@@ -1319,6 +1671,23 @@ impl fmt::Display for PlanError {
                 formatter,
                 "plan item '{item_id}' is missing version 3 datetime disagreements"
             ),
+            Self::DuplicateReviewRequiresSchemaVersion => {
+                formatter.write_str("duplicate review requires import plan schema version 4")
+            }
+            Self::MissingDuplicateReview => {
+                formatter.write_str("version 4 import plan is missing duplicate review")
+            }
+            Self::DuplicateDispositionRequiresSchemaVersion(source_file_id) => write!(
+                formatter,
+                "source file '{source_file_id}' duplicate disposition requires import plan schema version 4"
+            ),
+            Self::MissingDuplicateDisposition(source_file_id) => write!(
+                formatter,
+                "source file '{source_file_id}' is missing version 4 duplicate disposition"
+            ),
+            Self::InvalidDuplicateReview(reason) => {
+                write!(formatter, "invalid duplicate review: {reason}")
+            }
             Self::SourceFileNotTransferable(id) => {
                 write!(formatter, "copy step references non-transferable source file '{id}'")
             }
@@ -1410,7 +1779,7 @@ mod tests {
 
     fn document() -> PlanDocument {
         PlanDocument {
-            schema_version: IMPORT_PLAN_SCHEMA_VERSION,
+            schema_version: 3,
             plan_id: PlanId::new("plan-1").unwrap(),
             created_at: PlanTimestamp::new(1_725_000_000, 123).unwrap(),
             catalog: CatalogSnapshot {
@@ -1430,6 +1799,7 @@ mod tests {
                 source_id: "source-1".into(),
                 fingerprint: digest("source snapshot"),
             },
+            duplicates: None,
             items: vec![
                 PlanItem {
                     item_id: "item-b".into(),
@@ -1439,6 +1809,7 @@ mod tests {
                         digest: digest("b"),
                         size_bytes: 20,
                         role: PlanFileRole::Primary,
+                        duplicate_disposition: None,
                     }],
                     accepted_datetime: None,
                     datetime_disagreements: Some(Vec::new()),
@@ -1455,6 +1826,7 @@ mod tests {
                             digest: digest("sidecar"),
                             size_bytes: 5,
                             role: PlanFileRole::Sidecar,
+                            duplicate_disposition: None,
                         },
                         PlanFile {
                             source_file_id: "file-a".into(),
@@ -1462,6 +1834,7 @@ mod tests {
                             digest: digest("a"),
                             size_bytes: 10,
                             role: PlanFileRole::Primary,
+                            duplicate_disposition: None,
                         },
                     ],
                     accepted_datetime: Some(PlanDateTime {
@@ -1569,6 +1942,48 @@ mod tests {
         }
     }
 
+    fn version_four_document() -> PlanDocument {
+        let mut document = document();
+        document.schema_version = 4;
+        let file_a_digest = document.items[1].files[1].digest.clone();
+        document.items[0].files[0].digest = file_a_digest.clone();
+        document.items[0].files[0].source_path = vec!["card".into(), "b.MOV".into()];
+        document.items[0].files[0].duplicate_disposition =
+            Some(DuplicateDisposition::RetainCatalogDuplicate {
+                catalog_path: vec!["2023".into(), "collection".into(), "existing.JPG".into()],
+            });
+        document.items[0].accepted_datetime = Some(PlanDateTime {
+            year: 2024,
+            ordinal: 220,
+            hour: 12,
+            minute: 34,
+            second: 56,
+            recorded_offset_seconds: None,
+            provenance: PlanDateTimeProvenance::UserAssigned,
+        });
+        document.items[0].disposition = PlanItemDisposition::Transfer;
+        document.items[1].files[0].duplicate_disposition = Some(DuplicateDisposition::Transfer);
+        document.items[1].files[1].duplicate_disposition = Some(DuplicateDisposition::Transfer);
+        document.duplicates = Some(DuplicateReview {
+            choices: DuplicateChoices {
+                catalog: CatalogDuplicateChoice::Skip,
+                source: SourceDuplicateChoice::OnePerDigest,
+            },
+            catalog_duplicates: vec![CatalogDuplicate {
+                source_file_id: "file-b".into(),
+                catalog_paths: vec![
+                    vec!["2023".into(), "collection".into(), "existing.JPG".into()],
+                    vec!["2024".into(), "collection".into(), "other.CR3".into()],
+                ],
+            }],
+            source_duplicate_groups: vec![SourceDuplicateGroup {
+                digest: file_a_digest,
+                source_file_ids: vec!["file-a".into(), "file-b".into()],
+            }],
+        });
+        document
+    }
+
     #[test]
     fn serialization_round_trip_preserves_the_complete_plan() {
         let plan = ImportPlan::new(document()).unwrap();
@@ -1577,6 +1992,182 @@ mod tests {
 
         assert_eq!(restored, plan);
         assert_eq!(restored.to_json().unwrap(), json);
+    }
+
+    #[test]
+    fn duplicate_choice_defaults_import_every_original() {
+        assert_eq!(
+            DuplicateChoices::default(),
+            DuplicateChoices {
+                catalog: CatalogDuplicateChoice::Import,
+                source: SourceDuplicateChoice::ImportAll,
+            }
+        );
+    }
+
+    #[test]
+    fn version_four_records_catalog_and_source_duplicate_evidence() {
+        let plan = ImportPlan::new(version_four_document()).unwrap();
+        let restored = ImportPlan::from_json(&plan.to_json().unwrap()).unwrap();
+        let duplicates = restored.document().duplicates.as_ref().unwrap();
+
+        assert_eq!(duplicates.catalog_duplicates[0].source_file_id, "file-b");
+        assert_eq!(
+            duplicates.source_duplicate_groups[0].source_file_ids,
+            ["file-a", "file-b"]
+        );
+        let dispositions = restored
+            .document()
+            .items
+            .iter()
+            .flat_map(|item| &item.files)
+            .map(|file| (file.source_file_id.as_str(), &file.duplicate_disposition))
+            .collect::<BTreeMap<_, _>>();
+        assert!(matches!(
+            dispositions["file-a"],
+            Some(DuplicateDisposition::Transfer)
+        ));
+        assert!(matches!(
+            dispositions["file-b"],
+            Some(DuplicateDisposition::RetainCatalogDuplicate { .. })
+        ));
+    }
+
+    #[test]
+    fn one_per_digest_keeps_the_earliest_accepted_datetime() {
+        let mut document = version_four_document();
+        document.duplicates.as_mut().unwrap().choices.catalog = CatalogDuplicateChoice::Import;
+        document.items[0].files[0].duplicate_disposition = Some(DuplicateDisposition::Transfer);
+        document.items[1].files[1].duplicate_disposition =
+            Some(DuplicateDisposition::RetainSourceDuplicate {
+                selected_source_file_id: "file-b".into(),
+            });
+        document.steps.retain(|step| step.sequence != 2);
+        let copy_step = document
+            .steps
+            .iter_mut()
+            .find(|step| step.sequence == 1)
+            .unwrap();
+        let PlanStepKind::CopyFile {
+            source_file_id,
+            expected_digest,
+            size_bytes,
+            ..
+        } = &mut copy_step.action
+        else {
+            panic!("step 1 should copy a source original");
+        };
+        *source_file_id = "file-b".into();
+        *expected_digest = document.items[0].files[0].digest.clone();
+        *size_bytes = 20;
+        document.required_space_bytes = 120;
+
+        ImportPlan::new(document).unwrap();
+    }
+
+    #[test]
+    fn one_per_digest_breaks_datetime_ties_by_component_wise_source_path() {
+        let mut document = version_four_document();
+        document.duplicates.as_mut().unwrap().choices.catalog = CatalogDuplicateChoice::Import;
+        document.items[0].accepted_datetime = document.items[1].accepted_datetime.clone();
+        document.items[0].files[0].duplicate_disposition =
+            Some(DuplicateDisposition::RetainSourceDuplicate {
+                selected_source_file_id: "file-a".into(),
+            });
+
+        ImportPlan::new(document).unwrap();
+    }
+
+    #[test]
+    fn one_per_digest_selects_only_from_transfer_ready_items() {
+        let mut document = version_four_document();
+        document.duplicates.as_mut().unwrap().choices.catalog = CatalogDuplicateChoice::Import;
+        document.items[0].disposition = PlanItemDisposition::Excluded {
+            reason: "not ready".into(),
+        };
+        document.items[0].files[0].duplicate_disposition = Some(DuplicateDisposition::Transfer);
+
+        ImportPlan::new(document).unwrap();
+    }
+
+    #[test]
+    fn duplicate_evidence_normalization_is_independent_of_traversal_order() {
+        let expected = ImportPlan::new(version_four_document()).unwrap();
+        let mut reordered = version_four_document();
+        let duplicates = reordered.duplicates.as_mut().unwrap();
+        duplicates.catalog_duplicates[0].catalog_paths.reverse();
+        duplicates.source_duplicate_groups[0]
+            .source_file_ids
+            .reverse();
+        reordered.items.reverse();
+
+        let actual = ImportPlan::new(reordered).unwrap();
+
+        assert_eq!(actual.to_json().unwrap(), expected.to_json().unwrap());
+    }
+
+    #[test]
+    fn source_duplicate_groups_must_cover_every_repeated_digest() {
+        let mut document = version_four_document();
+        document
+            .duplicates
+            .as_mut()
+            .unwrap()
+            .source_duplicate_groups
+            .clear();
+
+        assert!(matches!(
+            ImportPlan::new(document),
+            Err(PlanError::InvalidDuplicateReview(reason))
+                if reason.contains("exactly cover every repeated original digest")
+        ));
+    }
+
+    #[test]
+    fn duplicate_fields_are_gated_by_schema_version() {
+        let mut legacy_review = document();
+        legacy_review.duplicates = Some(DuplicateReview {
+            choices: DuplicateChoices::default(),
+            catalog_duplicates: Vec::new(),
+            source_duplicate_groups: Vec::new(),
+        });
+        assert!(matches!(
+            ImportPlan::new(legacy_review),
+            Err(PlanError::DuplicateReviewRequiresSchemaVersion)
+        ));
+
+        let mut missing_review = version_four_document();
+        missing_review.duplicates = None;
+        assert!(matches!(
+            ImportPlan::new(missing_review),
+            Err(PlanError::MissingDuplicateReview)
+        ));
+
+        let mut legacy_disposition = document();
+        legacy_disposition.items[0].files[0].duplicate_disposition =
+            Some(DuplicateDisposition::Transfer);
+        assert!(matches!(
+            ImportPlan::new(legacy_disposition),
+            Err(PlanError::DuplicateDispositionRequiresSchemaVersion(id)) if id == "file-b"
+        ));
+
+        let mut missing_disposition = version_four_document();
+        missing_disposition.items[1].files[1].duplicate_disposition = None;
+        assert!(matches!(
+            ImportPlan::new(missing_disposition),
+            Err(PlanError::MissingDuplicateDisposition(id)) if id == "file-a"
+        ));
+
+        let mut retained_sidecar = version_four_document();
+        retained_sidecar.items[1].files[0].duplicate_disposition =
+            Some(DuplicateDisposition::RetainSourceDuplicate {
+                selected_source_file_id: "file-a".into(),
+            });
+        assert!(matches!(
+            ImportPlan::new(retained_sidecar),
+            Err(PlanError::InvalidDuplicateReview(reason))
+                if reason.contains("sidecar 'file-sidecar'")
+        ));
     }
 
     #[test]
@@ -1788,6 +2379,7 @@ mod tests {
                 digest: digest("file"),
                 size_bytes: 1,
                 role: PlanFileRole::Primary,
+                duplicate_disposition: None,
             }],
             accepted_datetime: None,
             datetime_disagreements: None,
@@ -2188,6 +2780,18 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("datetime_disagreements")));
+        assert_eq!(
+            schema["definitions"]["PlanDocument"]["properties"]["duplicates"]["$ref"],
+            serde_json::json!("#/definitions/DuplicateReview")
+        );
+        assert!(schema["definitions"]["PlanDocument"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("duplicates")));
+        assert_eq!(
+            schema["definitions"]["PlanFile"]["properties"]["duplicate_disposition"]["$ref"],
+            serde_json::json!("#/definitions/DuplicateDisposition")
+        );
         let candidate_values = schema["definitions"]["PlanDateTimeValue"]["oneOf"]
             .as_array()
             .unwrap();
@@ -2210,6 +2814,17 @@ mod tests {
             .is_none());
         assert!(version_two["definitions"]
             .get("PlanDateTimeCandidate")
+            .is_none());
+        let version_three =
+            serde_json::to_value(import_plan_schema_for_version(3).unwrap()).unwrap();
+        assert!(version_three["definitions"]["PlanDocument"]["properties"]
+            .get("duplicates")
+            .is_none());
+        assert!(version_three["definitions"]["PlanFile"]["properties"]
+            .get("duplicate_disposition")
+            .is_none());
+        assert!(version_three["definitions"]
+            .get("DuplicateReview")
             .is_none());
     }
 }
