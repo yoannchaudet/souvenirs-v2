@@ -115,6 +115,13 @@ If a source is unavailable, the user can cancel the remaining copy steps.
 Cancelling keeps published files, records them in manifests, removes owned staging files, and records `cancelled`.
 A later import of the remaining files needs a new plan.
 
+Active recovery holds the catalog lock until it records an outcome.
+A cancellation request does not start a second catalog mutation.
+Recovery finishes the current durable copy or manifest step before it handles cancellation.
+The cancellation manifest and copied count include each copy that reached durable publication.
+Cancellation records one `cancelled` outcome after it updates the manifest and removes owned staging files.
+If recovery starts terminal completion first, the operation completes and rejects the cancellation request.
+
 Renames cannot be cancelled halfway.
 Recovery must finish them or stop and report the conflict.
 

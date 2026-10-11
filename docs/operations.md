@@ -39,7 +39,7 @@ These are proposed operations, not command names.
 | Operation | Purpose |
 | --- | --- |
 | Recover | Finish an unfinished operation from its [journal](storage.md#interruption-and-recovery). |
-| Cancel a copy | Keep published files and stop unfinished copy steps. |
+| Cancel a copy | Keep durable copies and stop active copy or recovery work at the next durable boundary. |
 | Rebuild index | Recreate `index.sqlite` from manifests and filenames. |
 
 ## Plans
