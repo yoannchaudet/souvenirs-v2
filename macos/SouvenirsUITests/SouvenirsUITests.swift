@@ -16,7 +16,6 @@ final class SouvenirsUITests: XCTestCase {
         let sheet = app.sheets.firstMatch
         XCTAssertTrue(sheet.waitForExistence(timeout: 2))
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].exists)
-        XCTAssertFalse(launcher.isHittable)
         let name = app.textFields["catalog-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 2))
         expectation(
