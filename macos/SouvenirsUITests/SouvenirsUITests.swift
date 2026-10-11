@@ -114,9 +114,10 @@ final class SouvenirsUITests: XCTestCase {
         waitForExpectations(timeout: 3)
         app.typeKey(.return, modifierFlags: [])
 
-        XCTAssertTrue(
-            app.staticTexts["import-source-unavailable"].waitForExistence(timeout: 5)
-        )
+        XCTAssertTrue(app.staticTexts["recovery-title"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["recovery-source-unavailable"].exists)
+        XCTAssertTrue(app.buttons["retry-recovery"].isEnabled)
+        XCTAssertFalse(app.buttons["finish-recovery"].isEnabled)
     }
 
     @MainActor
@@ -127,8 +128,16 @@ final class SouvenirsUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["recovery-title"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["recovery-source-unavailable"].exists)
+        XCTAssertTrue(app.buttons["retry-recovery"].isEnabled)
         XCTAssertFalse(app.buttons["finish-recovery"].isEnabled)
         XCTAssertTrue(app.buttons["cancel-recovery"].isEnabled)
+        app.buttons["defer-recovery"].click()
+        XCTAssertTrue(
+            app.staticTexts["import-recovery-deferred"].waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(app.buttons["retry-deferred-recovery"].exists)
+        XCTAssertTrue(app.buttons["cancel-deferred-recovery"].exists)
+        XCTAssertFalse(app.buttons["choose-import-folder"].isEnabled)
     }
 
     @MainActor

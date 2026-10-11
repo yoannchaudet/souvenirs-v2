@@ -176,18 +176,11 @@ fn staging_relative_path(operation_id: &str, step_id: &str) -> PathBuf {
 }
 
 fn copy_to_stage(source: &Path, staged_path: &Path) -> Result<([u8; 32], u64), VerifiedCopyError> {
-    let mut source_file = File::open(source).map_err(|source_error| VerifiedCopyError::Io {
-        action: "open copy source",
-        path: source.to_path_buf(),
-        source: source_error,
-    })?;
+    let mut source_file =
+        File::open(source).map_err(|error| source_read_error("open copy source", source, error))?;
     let metadata = source_file
         .metadata()
-        .map_err(|source_error| VerifiedCopyError::Io {
-            action: "inspect copy source",
-            path: source.to_path_buf(),
-            source: source_error,
-        })?;
+        .map_err(|error| source_read_error("inspect copy source", source, error))?;
     if !metadata.is_file() {
         return Err(VerifiedCopyError::SourceIsNotFile(source.to_path_buf()));
     }
@@ -225,14 +218,9 @@ fn copy_to_stage(source: &Path, staged_path: &Path) -> Result<([u8; 32], u64), V
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     let mut bytes_copied = 0_u64;
     loop {
-        let count =
-            source_file
-                .read(&mut buffer)
-                .map_err(|source_error| VerifiedCopyError::Io {
-                    action: "read copy source",
-                    path: source.to_path_buf(),
-                    source: source_error,
-                })?;
+        let count = source_file
+            .read(&mut buffer)
+            .map_err(|error| source_read_error("read copy source", source, error))?;
         if count == 0 {
             break;
         }
@@ -253,6 +241,38 @@ fn copy_to_stage(source: &Path, staged_path: &Path) -> Result<([u8; 32], u64), V
     })?;
 
     Ok((hasher.finalize().into(), bytes_copied))
+}
+
+fn source_read_error(action: &'static str, path: &Path, source: io::Error) -> VerifiedCopyError {
+    if is_source_unavailable_error(&source) {
+        VerifiedCopyError::SourceUnavailable {
+            path: path.to_path_buf(),
+            source,
+        }
+    } else {
+        VerifiedCopyError::Io {
+            action,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+#[must_use]
+pub fn is_source_unavailable_error(error: &io::Error) -> bool {
+    // EIO can indicate media corruption while the source is still connected.
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotConnected
+    ) || rustix::io::Errno::from_io_error(error).is_some_and(|errno| {
+        matches!(
+            errno,
+            rustix::io::Errno::NODEV
+                | rustix::io::Errno::NXIO
+                | rustix::io::Errno::STALE
+                | rustix::io::Errno::NOTCONN
+        )
+    })
 }
 
 fn hash_staged_file(staged_path: &Path) -> Result<[u8; 32], VerifiedCopyError> {
@@ -405,6 +425,10 @@ pub enum VerifiedCopyError {
         expected_size_bytes: u64,
         actual_size_bytes: u64,
     },
+    SourceUnavailable {
+        path: PathBuf,
+        source: io::Error,
+    },
     SourceIsNotFile(PathBuf),
     StageOccupied(PathBuf),
 }
@@ -450,6 +474,9 @@ impl fmt::Display for VerifiedCopyError {
                 "staged file {} does not match the confirmed plan: expected SHA-256 {expected_sha256} and {expected_size_bytes} bytes, found SHA-256 {actual_sha256} and {actual_size_bytes} bytes",
                 staged_path.display()
             ),
+            Self::SourceUnavailable { path, source } => {
+                write!(formatter, "copy source is unavailable at {}: {source}", path.display())
+            }
             Self::SourceIsNotFile(path) => {
                 write!(formatter, "copy source is not a regular file: {}", path.display())
             }
@@ -469,11 +496,37 @@ impl Error for VerifiedCopyError {
             Self::Journal(source) => Some(source),
             Self::Lock(source) => Some(source),
             Self::Path(source) => Some(source),
+            Self::SourceUnavailable { source, .. } => Some(source),
             Self::DestinationOccupied { .. }
             | Self::DigestMismatch { .. }
             | Self::PlannedContentMismatch { .. }
             | Self::SourceIsNotFile(_)
             | Self::StageOccupied(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_source_unavailable_error;
+    use std::io;
+
+    fn io_error(errno: rustix::io::Errno) -> io::Error {
+        io::Error::from_raw_os_error(errno.raw_os_error())
+    }
+
+    #[test]
+    fn source_unavailable_errno_classification_excludes_generic_io() {
+        assert!(!is_source_unavailable_error(&io_error(
+            rustix::io::Errno::IO
+        )));
+        for errno in [
+            rustix::io::Errno::NODEV,
+            rustix::io::Errno::NXIO,
+            rustix::io::Errno::STALE,
+            rustix::io::Errno::NOTCONN,
+        ] {
+            assert!(is_source_unavailable_error(&io_error(errno)));
         }
     }
 }

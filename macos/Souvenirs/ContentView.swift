@@ -6,6 +6,7 @@ struct ContentView: View {
     @ObservedObject var model: CatalogWelcomeModel
     @ObservedObject var imports: ImportExecutionCoordinator
     @State private var showsCreatedItems = false
+    @AccessibilityFocusState private var recoveryTitleFocused: Bool
 
     var body: some View {
         Group {
@@ -18,6 +19,7 @@ struct ContentView: View {
                 catalogHome(catalog)
             }
         }
+        .accessibilityHidden(isRecoveryPrompt)
         .frame(minWidth: 586, minHeight: 386)
         .background(.ultraThinMaterial)
         .overlay {
@@ -49,6 +51,11 @@ struct ContentView: View {
         } message: {
             Text(model.presentedError ?? "")
         }
+    }
+
+    private var isRecoveryPrompt: Bool {
+        if case .recoveryPrompt = imports.phase { return true }
+        return false
     }
 
     private var welcome: some View {
@@ -311,9 +318,15 @@ struct ContentView: View {
                 .padding(.horizontal, 18)
                 .frame(height: 44)
                 Divider()
-                if imports.catalog?.path == catalog.path, imports.phase != .idle {
+                if imports.catalog?.path == catalog.path,
+                   imports.phase != .idle,
+                   imports.phase != .recoveryDeferred {
                     importActivity(catalog)
                 } else {
+                    if imports.catalog?.path == catalog.path,
+                       imports.phase == .recoveryDeferred {
+                        deferredRecovery
+                    }
                     Spacer()
                     Image(systemName: "square.and.arrow.down")
                     .font(.system(size: 28))
@@ -335,6 +348,10 @@ struct ContentView: View {
                     }
                 }
                     .buttonStyle(.borderedProminent)
+                    .disabled(
+                        imports.catalog?.path == catalog.path
+                            && imports.phase == .recoveryDeferred
+                    )
                     .accessibilityIdentifier("choose-import-folder")
                     .padding(.top, 10)
                 Text("Memory cards appear in the sidebar when you connect them.")
@@ -371,7 +388,7 @@ struct ContentView: View {
         switch imports.phase {
         case .running, .recovering, .stopping:
             return "Importing · \(imports.percentCompleted)%"
-        case .recoveryPrompt, .sourceUnavailable, .failed:
+        case .recoveryPrompt, .recoveryDeferred, .failed:
             return "Import paused · needs you"
         default:
             return "Everything is safe"
@@ -382,7 +399,7 @@ struct ContentView: View {
         switch imports.phase {
         case .running, .recovering, .stopping:
             return .blue
-        case .recoveryPrompt, .sourceUnavailable:
+        case .recoveryPrompt, .recoveryDeferred:
             return .orange
         case .failed:
             return .red
@@ -407,16 +424,6 @@ struct ContentView: View {
             )
         case .completed(let outcome):
             completedImport(outcome)
-        case .sourceUnavailable:
-            activityMessage(
-                icon: "externaldrive.badge.exclamationmark",
-                title: "Connect \(imports.sourceName) to continue",
-                message: "Everything already copied is safe. The import will resume after you reconnect the source.",
-                tint: .orange,
-                identifier: "import-source-unavailable",
-                actionTitle: "Dismiss",
-                action: imports.dismissOutcome
-            )
         case .cancelled(let copiedCount):
             activityMessage(
                 icon: "stop.circle.fill",
@@ -437,7 +444,7 @@ struct ContentView: View {
                 actionTitle: "Dismiss",
                 action: imports.dismissOutcome
             )
-        case .idle, .recoveryPrompt:
+        case .idle, .recoveryPrompt, .recoveryDeferred:
             Spacer()
         }
     }
@@ -446,7 +453,11 @@ struct ContentView: View {
         VStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 9) {
                 HStack {
-                    Text("Copying \(imports.completedUnits) of \(imports.totalUnits)")
+                    Text(
+                        imports.progressMessage == "Checking the source…"
+                            ? "Checking the source"
+                            : "Copying \(imports.completedUnits) of \(imports.totalUnits)"
+                    )
                         .font(.headline)
                         .accessibilityIdentifier("import-progress-count")
                     Spacer()
@@ -529,6 +540,39 @@ struct ContentView: View {
         .accessibilityHidden(true)
     }
 
+    private var deferredRecovery: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.title2)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Import paused")
+                    .font(.headline)
+                    .accessibilityIdentifier("import-recovery-deferred")
+                Text(
+                    "\(imports.completedUnits) verified items are safe. Choose Try Again when you're ready to finish importing “\(imports.collectionName)”."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack {
+                Button("Stop Here…") { imports.stopRecoveryHere() }
+                    .accessibilityIdentifier("cancel-deferred-recovery")
+                Button("Try Again") { imports.retryRecovery() }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("retry-deferred-recovery")
+            }
+        }
+        .padding(12)
+        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10).stroke(.orange.opacity(0.3))
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 12)
+    }
+
     private func activityMessage(
         icon: String,
         title: String,
@@ -572,6 +616,8 @@ struct ContentView: View {
                     )
                     .font(.title3.bold())
                     .accessibilityIdentifier("recovery-title")
+                    .accessibilityFocused($recoveryTitleFocused)
+                    .onAppear { recoveryTitleFocused = true }
                     Text(
                         sourceAvailable
                             ? "The import stopped before it finished. Nothing was lost."
@@ -586,7 +632,10 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
                     if !sourceAvailable {
-                        Label("Waiting for the source. Recovery starts when it is available.", systemImage: "progress.indicator")
+                        Label(
+                            "Reconnect \(imports.sourceName), then choose Try Again.",
+                            systemImage: "externaldrive.badge.exclamationmark"
+                        )
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("recovery-source-unavailable")
@@ -597,6 +646,10 @@ struct ContentView: View {
                         Spacer()
                         Button("Not Now") { imports.deferRecovery() }
                             .accessibilityIdentifier("defer-recovery")
+                        if !sourceAvailable {
+                            Button("Try Again") { imports.retryRecovery() }
+                                .accessibilityIdentifier("retry-recovery")
+                        }
                         Button("Finish Import") { imports.finishRecovery() }
                             .buttonStyle(.borderedProminent)
                             .disabled(!sourceAvailable)

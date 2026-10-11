@@ -350,13 +350,22 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
             }
         }
         Scenario::ImportExecution | Scenario::ImportSourceUnavailable => {
+            let mut unfinished = false;
             while let Some(request) = next_request(&mut input, &mut output)? {
                 match request.payload {
                     RequestPayload::OpenCatalog(parameters) => {
                         catalog_result(&mut output, request.id, parameters.path)?;
                     }
                     RequestPayload::InspectOperation(_) => {
-                        operation_inspection(&mut output, request.id, None)?;
+                        let operation = unfinished.then(|| UnfinishedOperationResult {
+                            operation_id: "operation-1".to_owned(),
+                            collection_name: "Dolomites".to_owned(),
+                            source_name: "EOS_DIGITAL".to_owned(),
+                            copied_count: 7,
+                            total_count: 12,
+                            source_available: false,
+                        });
+                        operation_inspection(&mut output, request.id, operation)?;
                     }
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
@@ -385,6 +394,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             },
                         )?;
                         let terminal = if matches!(scenario, Scenario::ImportSourceUnavailable) {
+                            unfinished = true;
                             OperationEventPayload::Failed {
                                 error: ProtocolError::new(
                                     "source_unavailable",

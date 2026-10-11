@@ -135,6 +135,98 @@ final class RealEngineSmokeTests: XCTestCase {
         try await supervisor.stop()
     }
 
+    func testRealEngineRecoversAfterSourceDisconnectAndExplicitRetry() async throws {
+        let fixture = try makeFixture(fileCount: 3, bytesPerFile: 32)
+        let detachedSource = fixture.source
+            .deletingLastPathComponent()
+            .appendingPathComponent("detached-source")
+        let supervisor = EngineSupervisor(
+            arguments: ["--test-progress-delay-ms", "2000"]
+        )
+        _ = try await supervisor.start()
+        addTeardownBlock {
+            try? await supervisor.stop()
+        }
+        _ = try await supervisor.handshake()
+        _ = try await supervisor.createCatalog(
+            path: fixture.catalog.path,
+            displayName: "Source Recovery Catalog"
+        )
+        let review = try await plannedImport(
+            supervisor: supervisor,
+            fixture: fixture,
+            collectionName: "Source Recovery Import"
+        )
+        let operationID = try await supervisor.requestOperation(
+            method: "operation.start",
+            parameters: StartImportParameters(
+                reviewedPlan: try XCTUnwrap(review.reviewedPlan)
+            )
+        )
+        let stream = try await supervisor.events(for: operationID)
+        var events: [EngineSupervisor.OperationEvent] = []
+        var sourceDetached = false
+        for try await event in stream {
+            events.append(event)
+            if !sourceDetached,
+               case .progress(completedUnits: 1, totalUnits: _, message: _) = event.payload {
+                try FileManager.default.moveItem(
+                    at: fixture.source,
+                    to: detachedSource
+                )
+                sourceDetached = true
+            }
+        }
+
+        XCTAssertTrue(sourceDetached)
+        XCTAssertEqual(events.map(\.sequence), Array(0..<UInt64(events.count)))
+        guard case .failed(let code, _) = events.last?.payload else {
+            return XCTFail("Expected source-unavailable terminal event")
+        }
+        XCTAssertEqual(code, "source_unavailable")
+
+        let unfinished = try await supervisor.inspectUnfinishedOperation(
+            catalogPath: fixture.catalog.path
+        )
+        XCTAssertEqual(unfinished?.operationID, operationID)
+        XCTAssertEqual(unfinished?.copiedCount, 1)
+        XCTAssertEqual(unfinished?.totalCount, 3)
+        XCTAssertEqual(unfinished?.sourceAvailable, false)
+
+        try FileManager.default.moveItem(at: detachedSource, to: fixture.source)
+        let reconnected = try await supervisor.inspectUnfinishedOperation(
+            catalogPath: fixture.catalog.path
+        )
+        XCTAssertEqual(reconnected?.operationID, operationID)
+        XCTAssertEqual(reconnected?.copiedCount, 1)
+        XCTAssertEqual(reconnected?.sourceAvailable, true)
+
+        let recoveryID = try await supervisor.requestOperation(
+            method: "operation.start",
+            parameters: RecoverOperationParameters(
+                catalogPath: fixture.catalog.path,
+                operationID: operationID
+            )
+        )
+        XCTAssertEqual(recoveryID, operationID)
+        let recoveryEvents = try await collectEvents(
+            try await supervisor.events(for: recoveryID)
+        )
+        guard case .completed = recoveryEvents.last?.payload else {
+            return XCTFail("Expected recovery to complete after explicit retry")
+        }
+        let completedInspection = try await supervisor.inspectUnfinishedOperation(
+            catalogPath: fixture.catalog.path
+        )
+        XCTAssertNil(completedInspection)
+        try verifyCatalog(
+            fixture.catalog,
+            collectionName: "Source Recovery Import",
+            expectedFiles: 3
+        )
+        try await supervisor.stop()
+    }
+
     func testRealEnginePreservesCompoundItemAndVerifiesOriginals() async throws {
         let fixture = try makeCompoundFixture()
         let supervisor = EngineSupervisor()
@@ -174,8 +266,10 @@ final class RealEngineSmokeTests: XCTestCase {
     }
 
     func testRealEngineRoutesAndRecoversInterruptedImport() async throws {
-        let fixture = try makeFixture(fileCount: 32, bytesPerFile: 8 * 1_024 * 1_024)
-        let supervisor = EngineSupervisor()
+        let fixture = try makeFixture(fileCount: 3, bytesPerFile: 32)
+        let supervisor = EngineSupervisor(
+            arguments: ["--test-progress-delay-ms", "2000"]
+        )
         let processIdentifier = try await supervisor.start()
         addTeardownBlock {
             try? await supervisor.stop()
@@ -200,7 +294,11 @@ final class RealEngineSmokeTests: XCTestCase {
         var interrupted = false
         do {
             for try await event in stream {
-                if case .progress = event.payload {
+                if case .progress(
+                    completedUnits: 1,
+                    totalUnits: _,
+                    message: _
+                ) = event.payload {
                     XCTAssertEqual(Darwin.kill(processIdentifier, SIGKILL), 0)
                     interrupted = true
                     break
@@ -226,7 +324,8 @@ final class RealEngineSmokeTests: XCTestCase {
         }
         XCTAssertEqual(unfinished.operationID, operationID)
         XCTAssertEqual(unfinished.collectionName, "Recovery Import")
-        XCTAssertEqual(unfinished.totalCount, 32)
+        XCTAssertEqual(unfinished.copiedCount, 1)
+        XCTAssertEqual(unfinished.totalCount, 3)
         XCTAssertEqual(unfinished.sourceAvailable, true)
 
         let recoveryID = try await recoverySupervisor.requestOperation(
@@ -259,7 +358,7 @@ final class RealEngineSmokeTests: XCTestCase {
         try verifyCatalog(
             fixture.catalog,
             collectionName: "Recovery Import",
-            expectedFiles: 32
+            expectedFiles: 3
         )
         try await recoverySupervisor.stop()
     }
