@@ -316,9 +316,8 @@ final class SouvenirsUITests: XCTestCase {
             )
         }
         XCTAssertEqual(
-            sheet.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS '7 items are safely'")
-            ).count,
+            sheet.descendants(matching: .any)
+                .matching(identifier: "recovery-counts").count,
             1
         )
         XCTAssertLessThan(
