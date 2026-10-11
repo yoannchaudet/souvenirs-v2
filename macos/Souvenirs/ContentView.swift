@@ -1415,8 +1415,23 @@ private struct ImportPlanningSheet: View {
     }
 
     private var details: some View {
-        DisclosureGroup(isExpanded: $model.showsDetails) {
-            if let review = model.review {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                model.showsDetails.toggle()
+            } label: {
+                HStack {
+                    Image(systemName: model.showsDetails ? "chevron.down" : "chevron.right")
+                        .accessibilityHidden(true)
+                    Text("Details: destination and checks")
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("import-details")
+            .accessibilityValue(model.showsDetails ? "Expanded" : "Collapsed")
+
+            if model.showsDetails, let review = model.review {
                 VStack(alignment: .leading, spacing: 12) {
                     detailSection(title: "Where the files go") {
                         Text(review.destinationPath)
@@ -1500,9 +1515,6 @@ private struct ImportPlanningSheet: View {
                 .padding(.top, 8)
                 .textSelection(.enabled)
             }
-        } label: {
-            Text("Details: destination and checks")
-                .accessibilityIdentifier("import-details")
         }
     }
 
