@@ -11,6 +11,10 @@ test-core:
 test-core-performance:
     ./scripts/check-core-runtime.sh
 
+# Measure warmed import scan and planning performance on a deterministic workload.
+measure-import-performance:
+    ./scripts/measure-import-performance.py
+
 # Run every Rust test target.
 test-rust:
     cargo test --workspace --all-targets --all-features
