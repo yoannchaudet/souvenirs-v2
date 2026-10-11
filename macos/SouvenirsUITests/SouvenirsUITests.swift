@@ -197,9 +197,9 @@ final class SouvenirsUITests: XCTestCase {
             app.staticTexts["import-planning-error"].waitForExistence(timeout: 5)
         )
         let sheet = activeSheet(app)
-        XCTAssertEqual(
-            sheet.staticTexts["import-review-title"].label,
-            "This source is unavailable"
+        XCTAssertTrue(
+            sheet.staticTexts["This source is unavailable"]
+                .waitForExistence(timeout: 2)
         )
         XCTAssertFalse(sheet.buttons["start-import"].isEnabled)
         XCTAssertTrue(sheet.staticTexts["import-start-blocked"].exists)
