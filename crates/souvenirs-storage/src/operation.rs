@@ -517,7 +517,13 @@ pub(crate) fn read_parsed_operation_records(
         path: path.to_path_buf(),
         source,
     })?;
-    if let Some((format_version, completed)) = parse_legacy_initialization(path, &bytes) {
+    let complete_length = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    if let Some((format_version, completed)) =
+        parse_legacy_initialization(path, &bytes[..complete_length])
+    {
         let mut records = vec![OperationRecord::Plan {
             operation_id: INITIALIZATION_OPERATION_ID.to_owned(),
             plan: serde_json::json!({"legacy_initialization":true,"format_version":format_version}),
@@ -529,8 +535,8 @@ pub(crate) fn read_parsed_operation_records(
         }
         return Ok(ParsedOperationRecords {
             records,
-            complete_length: bytes.len() as u64,
-            interrupted_tail: false,
+            complete_length: complete_length as u64,
+            interrupted_tail: complete_length < bytes.len(),
             legacy_initialization: Some((format_version, completed)),
         });
     }
@@ -564,7 +570,7 @@ pub(crate) fn read_parsed_operation_records(
 }
 
 fn parse_legacy_initialization(path: &Path, bytes: &[u8]) -> Option<(u32, bool)> {
-    if !is_initialization_journal(path) || !bytes.ends_with(b"\n") {
+    if !is_initialization_journal(path) || bytes.is_empty() {
         return None;
     }
     let mut lines = bytes
@@ -579,12 +585,16 @@ fn parse_legacy_initialization(path: &Path, bytes: &[u8]) -> Option<(u32, bool)>
         return None;
     }
     let format_version = fields.get("format_version")?.as_u64()?.try_into().ok()?;
-    let completed = matches!(
-        lines
-            .next()
-            .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok()),
-        Some(outcome) if outcome == serde_json::json!({"kind":"outcome","outcome":"completed"})
-    ) && lines.next().is_none();
+    let completed = match (lines.next(), lines.next()) {
+        (None, None) => false,
+        (Some(line), None)
+            if serde_json::from_slice::<serde_json::Value>(line).ok()
+                == Some(serde_json::json!({"kind":"outcome","outcome":"completed"})) =>
+        {
+            true
+        }
+        _ => return None,
+    };
     Some((format_version, completed))
 }
 
@@ -763,6 +773,7 @@ pub(crate) fn validate_identifier(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[rustfmt::skip]
 pub enum Failpoint {
     JournalCreated,
     PlanPersisted,
@@ -785,32 +796,16 @@ pub enum Failpoint {
     RecoveryManifestDestinationObservedBeforePersistence,
     RecoveryStageRemovalObservedBeforePersistence,
     OutcomePersisted,
-    InitializationJournalCreated,
-    InitializationPlanPersisted,
-    InitializationStateDirectoryIntentPersisted,
-    InitializationStateDirectoryMutationPersisted,
-    InitializationStateDirectoryCompleted,
-    InitializationJournalDirectoryIntentPersisted,
-    InitializationJournalDirectoryMutationPersisted,
-    InitializationJournalDirectoryCompleted,
-    InitializationJournalRelocationIntentPersisted,
-    InitializationJournalRelocationMutationPersisted,
-    InitializationJournalRelocated,
-    InitializationStagingDirectoryIntentPersisted,
-    InitializationStagingDirectoryMutationPersisted,
-    InitializationStagingDirectoryCompleted,
-    InitializationConfigStageIntentPersisted,
-    InitializationConfigStageMutationPersisted,
-    InitializationConfigStaged,
-    InitializationConfigPublicationIntentPersisted,
-    InitializationConfigPublicationMutationPersisted,
-    InitializationConfigPublished,
-    InitializationRecoveryDirectoryObservedBeforePersistence,
-    InitializationRecoveryRelocationObservedBeforePersistence,
-    InitializationRecoveryConfigStageObservedBeforePersistence,
-    InitializationRecoveryConfigObservedBeforePersistence,
-    InitializationRecoveryCleanupObservedBeforePersistence,
-    InitializationOutcomePersisted,
+    InitializationJournalCreated, InitializationPlanPersisted,
+    InitializationStateDirectoryIntentPersisted, InitializationStateDirectoryMutationPersisted, InitializationStateDirectoryCompleted,
+    InitializationJournalDirectoryIntentPersisted, InitializationJournalDirectoryMutationPersisted, InitializationJournalDirectoryCompleted,
+    InitializationJournalRelocationIntentPersisted, InitializationJournalRelocationMutationPersisted, InitializationJournalRelocated,
+    InitializationStagingDirectoryIntentPersisted, InitializationStagingDirectoryMutationPersisted, InitializationStagingDirectoryCompleted,
+    InitializationConfigStageIntentPersisted, InitializationConfigStageMutationPersisted, InitializationConfigStaged,
+    InitializationConfigPublicationIntentPersisted, InitializationConfigPublicationMutationPersisted, InitializationConfigPublished,
+    InitializationRecoveryDirectoryObservedBeforePersistence, InitializationRecoveryRelocationObservedBeforePersistence,
+    InitializationRecoveryConfigStageObservedBeforePersistence, InitializationRecoveryConfigObservedBeforePersistence,
+    InitializationRecoveryCleanupObservedBeforePersistence, InitializationOutcomePersisted,
 }
 
 #[derive(Debug)]

@@ -466,21 +466,21 @@ fn current_holder(environment: &impl LockEnvironment) -> Result<LockHolder, Lock
 }
 
 fn canonical_sibling_path(path: &Path) -> Result<PathBuf, LockError> {
-    let parent = path.parent().ok_or_else(|| LockError::Io {
-        action: "resolve lock takeover parent",
-        path: path.to_path_buf(),
-        source: io::Error::new(io::ErrorKind::InvalidInput, "lock path has no parent"),
-    })?;
-    let parent = fs::canonicalize(parent).map_err(|source| LockError::Io {
-        action: "canonicalize lock takeover directory",
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    let name = path.file_name().ok_or_else(|| LockError::Io {
-        action: "resolve lock takeover name",
-        path: path.to_path_buf(),
-        source: io::Error::new(io::ErrorKind::InvalidInput, "lock path has no file name"),
-    })?;
+    let invalid = |action, message| {
+        lock_io(
+            action,
+            path,
+            io::Error::new(io::ErrorKind::InvalidInput, message),
+        )
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("resolve lock takeover parent", "lock path has no parent"))?;
+    let parent = fs::canonicalize(parent)
+        .map_err(|source| lock_io("canonicalize lock takeover directory", parent, source))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("resolve lock takeover name", "lock path has no file name"))?;
     Ok(parent.join(name))
 }
 
@@ -512,33 +512,33 @@ fn report_takeover_busy(path: &Path) -> LockError {
 }
 
 fn file_identifies_path(file: &File, path: &Path) -> Result<bool, LockError> {
-    let open = file.metadata().map_err(|source| LockError::Io {
-        action: "inspect open lock takeover guard",
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let open = file
+        .metadata()
+        .map_err(|source| lock_io("inspect open lock takeover guard", path, source))?;
     let current = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
         Ok(_) => {
-            return Err(LockError::Io {
-                action: "inspect current lock takeover guard",
-                path: path.to_path_buf(),
-                source: io::Error::new(
+            return Err(lock_io(
+                "inspect current lock takeover guard",
+                path,
+                io::Error::new(
                     io::ErrorKind::InvalidData,
                     "lock takeover path is not a regular file",
                 ),
-            })
+            ))
         }
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => {
-            return Err(LockError::Io {
-                action: "inspect current lock takeover guard",
-                path: path.to_path_buf(),
-                source,
-            })
-        }
+        Err(source) => return Err(lock_io("inspect current lock takeover guard", path, source)),
     };
     Ok(open.dev() == current.dev() && open.ino() == current.ino())
+}
+
+fn lock_io(action: &'static str, path: &Path, source: io::Error) -> LockError {
+    LockError::Io {
+        action,
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 fn write_holder_exclusively(path: &Path, holder: &LockHolder) -> Result<(), LockError> {

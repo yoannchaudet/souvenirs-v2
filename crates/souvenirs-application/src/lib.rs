@@ -1015,18 +1015,14 @@ mod tests {
             CatalogService::open(file).unwrap_err().code(),
             "not_a_directory"
         );
-    }
-
-    #[test]
-    fn preserves_unsupported_pending_initialization_classification() {
-        let directory = tempdir().unwrap();
+        let future = tempdir().unwrap();
         fs::write(
-            directory.path().join(".souvenirs-initialize.jsonl"),
-            b"{\"kind\":\"plan\",\"operation_id\":\"initialize\",\"plan\":{\"format_version\":3,\"config_yaml\":\"format_version: 3\\n\",\"config_sha256\":\"63cde216c8fae788bcc0892df26627eddc0b9c93bd26d67a9b6460cbf4d7f793\",\"journal_file_name\":\"future-initialize.jsonl\",\"staged_config_path\":\".souvenirs/staging/initialize-config.yml.stage\"}}\n",
+            future.path().join(".souvenirs-initialize.jsonl"),
+            b"{\"kind\":\"plan\",\"operation_id\":\"initialize\",\"plan\":{\"format_version\":3,\"config_yaml\":\"format_version: 3\\n\",\"config_sha256\":\"63cde216c8fae788bcc0892df26627eddc0b9c93bd26d67a9b6460cbf4d7f793\",\"journal_file_name\":\"future-initialize.jsonl\",\"staged_config_path\":\".souvenirs/staging/initialize-config.yml.stage\",\"future_field\":true}}\n",
         )
         .unwrap();
         assert_eq!(
-            CatalogService::open(directory.path()).unwrap_err().code(),
+            CatalogService::open(future.path()).unwrap_err().code(),
             "unsupported_catalog_version"
         );
     }

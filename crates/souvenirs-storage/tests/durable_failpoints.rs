@@ -59,59 +59,35 @@ fn assert_initialization_failpoint(failpoint: Failpoint) {
     assert_completed_initialization(&temporary, &config);
 }
 
+#[rustfmt::skip]
+const INITIALIZATION_FAILPOINTS: &[Failpoint] = &[
+    Failpoint::InitializationJournalCreated, Failpoint::InitializationPlanPersisted, Failpoint::InitializationStateDirectoryIntentPersisted,
+    Failpoint::InitializationStateDirectoryMutationPersisted, Failpoint::InitializationStateDirectoryCompleted, Failpoint::InitializationJournalDirectoryIntentPersisted,
+    Failpoint::InitializationJournalDirectoryMutationPersisted, Failpoint::InitializationJournalDirectoryCompleted, Failpoint::InitializationJournalRelocationIntentPersisted,
+    Failpoint::InitializationJournalRelocationMutationPersisted, Failpoint::InitializationJournalRelocated, Failpoint::InitializationStagingDirectoryIntentPersisted,
+    Failpoint::InitializationStagingDirectoryMutationPersisted, Failpoint::InitializationStagingDirectoryCompleted, Failpoint::InitializationConfigStageIntentPersisted,
+    Failpoint::InitializationConfigStageMutationPersisted, Failpoint::InitializationConfigStaged, Failpoint::InitializationConfigPublicationIntentPersisted,
+    Failpoint::InitializationConfigPublicationMutationPersisted, Failpoint::InitializationConfigPublished, Failpoint::InitializationOutcomePersisted,
+];
+
 #[test]
 fn initialization_resumes_after_every_durable_boundary() {
-    for failpoint in [
-        Failpoint::InitializationJournalCreated,
-        Failpoint::InitializationPlanPersisted,
-        Failpoint::InitializationStateDirectoryIntentPersisted,
-        Failpoint::InitializationStateDirectoryMutationPersisted,
-        Failpoint::InitializationStateDirectoryCompleted,
-        Failpoint::InitializationJournalDirectoryIntentPersisted,
-        Failpoint::InitializationJournalDirectoryMutationPersisted,
-        Failpoint::InitializationJournalDirectoryCompleted,
-        Failpoint::InitializationJournalRelocationIntentPersisted,
-        Failpoint::InitializationJournalRelocationMutationPersisted,
-        Failpoint::InitializationJournalRelocated,
-        Failpoint::InitializationStagingDirectoryIntentPersisted,
-        Failpoint::InitializationStagingDirectoryMutationPersisted,
-        Failpoint::InitializationStagingDirectoryCompleted,
-        Failpoint::InitializationConfigStageIntentPersisted,
-        Failpoint::InitializationConfigStageMutationPersisted,
-        Failpoint::InitializationConfigStaged,
-        Failpoint::InitializationConfigPublicationIntentPersisted,
-        Failpoint::InitializationConfigPublicationMutationPersisted,
-        Failpoint::InitializationConfigPublished,
-        Failpoint::InitializationOutcomePersisted,
-    ] {
+    for &failpoint in INITIALIZATION_FAILPOINTS {
         assert_initialization_failpoint(failpoint);
     }
 }
 
 #[test]
 fn initialization_recovers_observed_partial_mutations() {
-    for (partial, recovery) in [
-        (
-            Failpoint::InitializationStateDirectoryMutationPersisted,
-            Failpoint::InitializationRecoveryDirectoryObservedBeforePersistence,
-        ),
-        (
-            Failpoint::InitializationJournalRelocationMutationPersisted,
-            Failpoint::InitializationRecoveryRelocationObservedBeforePersistence,
-        ),
-        (
-            Failpoint::InitializationConfigStageMutationPersisted,
-            Failpoint::InitializationRecoveryConfigStageObservedBeforePersistence,
-        ),
-        (
-            Failpoint::InitializationConfigPublicationMutationPersisted,
-            Failpoint::InitializationRecoveryConfigObservedBeforePersistence,
-        ),
-        (
-            Failpoint::InitializationJournalCreated,
-            Failpoint::InitializationRecoveryCleanupObservedBeforePersistence,
-        ),
-    ] {
+    #[rustfmt::skip]
+    const CASES: &[(Failpoint, Failpoint)] = &[
+        (Failpoint::InitializationStateDirectoryMutationPersisted, Failpoint::InitializationRecoveryDirectoryObservedBeforePersistence),
+        (Failpoint::InitializationJournalRelocationMutationPersisted, Failpoint::InitializationRecoveryRelocationObservedBeforePersistence),
+        (Failpoint::InitializationConfigStageMutationPersisted, Failpoint::InitializationRecoveryConfigStageObservedBeforePersistence),
+        (Failpoint::InitializationConfigPublicationMutationPersisted, Failpoint::InitializationRecoveryConfigObservedBeforePersistence),
+        (Failpoint::InitializationJournalCreated, Failpoint::InitializationRecoveryCleanupObservedBeforePersistence),
+    ];
+    for &(partial, recovery) in CASES {
         let temporary = TempDir::new().unwrap();
         let config = CatalogConfig::default();
         for failpoint in [partial, recovery] {

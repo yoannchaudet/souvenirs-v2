@@ -806,24 +806,17 @@ fn write_initialization_plan(catalog: &Path) {
 }
 
 #[test]
-fn initialization_resumes_a_recorded_plan() {
+fn help_is_successful_and_human_readable() {
     let temporary = TempDir::new().unwrap();
     write_initialization_plan(temporary.path());
-
     json_stdout(&run(&[
         "catalog",
         "initialize",
         "--catalog",
         temporary.path().to_str().unwrap(),
     ]));
-
     assert!(temporary.path().join(".souvenirs.yml").exists());
-}
-
-#[test]
-fn help_is_successful_and_human_readable() {
     let output = run(&["--help"]);
-
     assert!(output.status.success());
     assert!(!output.stdout.is_empty());
     assert!(output.stderr.is_empty());
