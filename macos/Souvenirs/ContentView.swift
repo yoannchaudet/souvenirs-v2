@@ -1415,7 +1415,7 @@ private struct ImportPlanningSheet: View {
     }
 
     private var details: some View {
-        DisclosureGroup("Details: destination and checks", isExpanded: $model.showsDetails) {
+        DisclosureGroup(isExpanded: $model.showsDetails) {
             if let review = model.review {
                 VStack(alignment: .leading, spacing: 12) {
                     detailSection(title: "Where the files go") {
@@ -1500,8 +1500,10 @@ private struct ImportPlanningSheet: View {
                 .padding(.top, 8)
                 .textSelection(.enabled)
             }
+        } label: {
+            Text("Details: destination and checks")
+                .accessibilityIdentifier("import-details")
         }
-        .accessibilityIdentifier("import-details")
     }
 
     private func detailSection<Content: View>(
