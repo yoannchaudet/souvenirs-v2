@@ -1104,7 +1104,13 @@ private struct ImportPlanningSheet: View {
                 keyboardFocus = .collectionName
             }
         }
-        .sheet(isPresented: $showsExistingCollections) {
+        .sheet(
+            isPresented: $showsExistingCollections,
+            onDismiss: {
+                keyboardFocus = .destination
+                destinationFocused = true
+            }
+        ) {
             ExistingCollectionSelector(
                 collections: model.availableCollections,
                 selectedIdentity: model.selectedExistingCollection?.identity,
@@ -1118,12 +1124,6 @@ private struct ImportPlanningSheet: View {
                     Task { await model.selectExistingCollection(collection) }
                 }
             )
-        }
-        .onChange(of: showsExistingCollections) {
-            if !$1 {
-                keyboardFocus = .destination
-                destinationFocused = true
-            }
         }
     }
 
