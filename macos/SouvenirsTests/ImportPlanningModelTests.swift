@@ -68,8 +68,80 @@ final class ImportPlanningModelTests: XCTestCase {
         await model.load()
 
         XCTAssertEqual(model.errorMessage, "Reconnect the source and try again.")
+        XCTAssertEqual(model.errorCode, "source_unavailable")
+        XCTAssertEqual(model.title, "This source is unavailable")
+        XCTAssertTrue(model.canRetryScan)
         XCTAssertNil(model.scan)
         XCTAssertFalse(model.canStart)
+    }
+
+    func testRetryClearsFailureAndScansTheSameSourceOncePerActivation() async {
+        let engine = FakeImportPlanningEngine()
+        engine.scanErrors = [
+            EngineSupervisor.SupervisorError.protocolError(
+                code: "source_unavailable",
+                message: "Reconnect the source and try again."
+            )
+        ]
+        let model = makeModel(engine: engine)
+
+        await model.load()
+        XCTAssertTrue(model.canRetryScan)
+        XCTAssertEqual(engine.scannedSourcePaths, ["/Volumes/EOS_DIGITAL"])
+
+        engine.pauseNextScan = true
+        let retry = Task { await model.retryScan() }
+        await Task.yield()
+
+        XCTAssertTrue(model.isLoading)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.errorCode)
+        XCTAssertFalse(model.canStart)
+        XCTAssertEqual(
+            engine.scannedSourcePaths,
+            ["/Volumes/EOS_DIGITAL", "/Volumes/EOS_DIGITAL"]
+        )
+
+        engine.resumeScan()
+        await retry.value
+
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.errorCode)
+        XCTAssertEqual(model.sourcePath, "/Volumes/EOS_DIGITAL")
+        XCTAssertEqual(
+            engine.scannedSourcePaths,
+            ["/Volumes/EOS_DIGITAL", "/Volumes/EOS_DIGITAL"]
+        )
+        XCTAssertEqual(model.scan?.sourceName, "EOS_DIGITAL")
+        XCTAssertEqual(model.collectionName, "Dolomites")
+        XCTAssertTrue(model.canStart)
+
+        await model.retryScan()
+        XCTAssertEqual(engine.scannedSourcePaths.count, 2)
+    }
+
+    func testFailedRetryRemainsRetryableAndBlocked() async {
+        let engine = FakeImportPlanningEngine()
+        engine.scanErrors = [
+            EngineSupervisor.SupervisorError.protocolError(
+                code: "source_unavailable",
+                message: "Reconnect the source and try again."
+            ),
+            EngineSupervisor.SupervisorError.protocolError(
+                code: "source_unavailable",
+                message: "The source is still unavailable."
+            )
+        ]
+        let model = makeModel(engine: engine)
+
+        await model.load()
+        await model.retryScan()
+
+        XCTAssertEqual(model.errorMessage, "The source is still unavailable.")
+        XCTAssertEqual(model.title, "This source is unavailable")
+        XCTAssertTrue(model.canRetryScan)
+        XCTAssertFalse(model.canStart)
+        XCTAssertEqual(engine.scannedSourcePaths.count, 2)
     }
 
     func testClocklessItemsRemainDisclosedWithoutInterpretationButtons() async {
@@ -133,9 +205,32 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
     var lastDestinationMode: EngineSupervisor.ImportDestinationMode?
     var includesDeferredDate = false
     var supportsUTCConversion = true
+    var scanErrors: [Error] = []
+    private(set) var scannedSourcePaths: [String] = []
+    var pauseNextScan = false
+    private var scanContinuation: CheckedContinuation<Void, Never>?
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
+        scannedSourcePaths.append(sourcePath)
+        if !scanErrors.isEmpty {
+            throw scanErrors.removeFirst()
+        }
         if let error { throw error }
+        if pauseNextScan {
+            pauseNextScan = false
+            await withCheckedContinuation {
+                scanContinuation = $0
+            }
+        }
+        return scan(sourcePath: sourcePath)
+    }
+
+    func resumeScan() {
+        scanContinuation?.resume()
+        scanContinuation = nil
+    }
+
+    private func scan(sourcePath: String) -> EngineSupervisor.ImportScan {
         return .init(
             sourcePath: sourcePath,
             sourceName: "EOS_DIGITAL",
@@ -188,7 +283,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
         if let error { throw error }
         lastCollectionName = collectionName
         lastDestinationMode = destinationMode
-        let scan = try await scanImport(sourcePath: sourcePath)
+        let scan = scan(sourcePath: sourcePath)
         let deferred = includesDeferredDate ? 1 : 0
         return .init(
             scan: scan,

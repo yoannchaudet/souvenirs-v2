@@ -377,6 +377,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
             }
         }
         Scenario::ImportError => {
+            let mut scan_attempts = 0;
             while let Some(request) = next_request(&mut input, &mut output)? {
                 match request.payload {
                     RequestPayload::OpenCatalog(parameters) => {
@@ -385,12 +386,22 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
                     }
-                    RequestPayload::ScanImport(_) => write_protocol_error(
-                        &mut output,
-                        request.id,
-                        "source_unavailable",
-                        "The source is no longer available. Reconnect it and try again.",
-                    )?,
+                    RequestPayload::ScanImport(parameters) => {
+                        scan_attempts += 1;
+                        if scan_attempts == 1 {
+                            write_protocol_error(
+                                &mut output,
+                                request.id,
+                                "source_unavailable",
+                                "The source is no longer available. Reconnect it and try again.",
+                            )?;
+                        } else {
+                            import_scan_result(&mut output, request.id, parameters.source_path)?;
+                        }
+                    }
+                    RequestPayload::ReviewImport(parameters) => {
+                        import_review(&mut output, request.id, parameters)?;
+                    }
                     _ => reject_request(&mut output, request)?,
                 }
             }
