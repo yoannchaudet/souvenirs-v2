@@ -102,6 +102,9 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-date-decision"].exists
         )
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["import-review-actions"].exists
+        )
         XCTAssertFalse(sheet.buttons["start-import"].isEnabled)
 
         sheet.buttons["date-as-shown"].click()
@@ -205,6 +208,9 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             recoverySheet.staticTexts["recovery-title"].waitForExistence(timeout: 5)
         )
+        XCTAssertTrue(
+            recoverySheet.descendants(matching: .any)["recovery-actions"].exists
+        )
         XCTAssertTrue(recoverySheet.staticTexts["recovery-source-unavailable"].exists)
         XCTAssertTrue(recoverySheet.buttons["retry-recovery"].isEnabled)
         XCTAssertFalse(recoverySheet.buttons["finish-recovery"].isEnabled)
@@ -219,6 +225,7 @@ final class SouvenirsUITests: XCTestCase {
         let sheet = activeSheet(app)
         XCTAssertTrue(sheet.staticTexts["recovery-title"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.sheets.count, 1)
+        XCTAssertTrue(sheet.descendants(matching: .any)["recovery-actions"].exists)
         XCTAssertTrue(sheet.staticTexts["recovery-source-unavailable"].exists)
         XCTAssertTrue(sheet.buttons["retry-recovery"].isEnabled)
         XCTAssertFalse(sheet.buttons["finish-recovery"].isEnabled)
@@ -273,6 +280,7 @@ final class SouvenirsUITests: XCTestCase {
         app.buttons["open-catalog"].click()
         let sheet = activeSheet(app)
         XCTAssertTrue(sheet.staticTexts["recovery-title"].waitForExistence(timeout: 5))
+        XCTAssertTrue(sheet.descendants(matching: .any)["recovery-actions"].exists)
         sheet.buttons["finish-recovery"].click()
 
         XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))

@@ -57,14 +57,7 @@ struct ContentView: View {
                         model.dismissImport()
                     }
                 )
-                .frame(
-                    minWidth: 540,
-                    idealWidth: 620,
-                    maxWidth: 620,
-                    minHeight: 386,
-                    idealHeight: 500,
-                    maxHeight: 500
-                )
+                .frame(width: 540, height: 500)
             }
         }
         .sheet(
@@ -89,14 +82,7 @@ struct ContentView: View {
                         imports.finishRecovery()
                     }
                 )
-                .frame(
-                    minWidth: 420,
-                    idealWidth: 465,
-                    maxWidth: 465,
-                    minHeight: 300,
-                    idealHeight: 320,
-                    maxHeight: 320
-                )
+                .frame(width: 465, height: 320)
             }
         }
         .alert(
@@ -979,6 +965,8 @@ private struct ImportPlanningSheet: View {
             }
             .padding(16)
             .background(.regularMaterial)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("import-review-actions")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("import-review-modal")
@@ -1305,6 +1293,8 @@ private struct RecoverySheet: View {
             }
             .padding(16)
             .background(.regularMaterial)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("recovery-actions")
         }
         .accessibilityIdentifier("recovery-modal")
         .onAppear {
