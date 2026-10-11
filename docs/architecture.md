@@ -320,6 +320,16 @@ Each `ambiguous_sidecar` item finding requires an unhandled sidecar record that 
 Readers validate each document against its declared version.
 Readers continue to verify version 1 digests with the version 1 contract.
 
+Version 3 adds `datetime_disagreements` to each plan item.
+Each entry records the metadata source and one tagged normalized value.
+The value tag records its interpretation state.
+An offset value is valid only for `local_with_offset`.
+Datetime disagreements use source priority, source, then normalized value order.
+Version 3 requires the disagreement array even when it is empty.
+Relationship-resolved items report disagreements from the primary file and its owned sidecars.
+Relationship-unresolved items have no selected datetime candidate and use an empty disagreement array.
+Versions 1 and 2 omit the field and keep their original digest contracts.
+
 The saved-plan `confirmed` field is not part of the digest.
 Execution must reject the plan unless this field is `true`.
 
