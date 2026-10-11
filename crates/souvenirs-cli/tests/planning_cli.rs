@@ -37,27 +37,14 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
     let snapshot = temporary.path().join("scan.json");
     let plan = temporary.path().join("plan.json");
 
-    let initialize_args = [
+    let initialized = json_stdout(&run(&[
         "catalog",
         "initialize",
         "--catalog",
         catalog.to_str().unwrap(),
-    ];
-    let initialized = json_stdout(&run(&initialize_args));
+    ]));
     assert_eq!(initialized["command"], "catalog.initialize");
     assert_eq!(initialized["result"]["format_version"], 2);
-    let journal = fs::read_dir(catalog.join(".souvenirs/journal"))
-        .unwrap()
-        .flatten()
-        .next()
-        .unwrap()
-        .path();
-    fs::write(
-        journal,
-        "{\"kind\":\"plan\",\"operation\":\"initialize\",\"format_version\":2}\n\
-         {\"kind\":\"outcome\",\"outcome\":\"completed\"}\n",
-    )
-    .unwrap();
 
     let inspected = json_stdout(&run(&[
         "catalog",
@@ -67,7 +54,6 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
     ]));
     assert_eq!(inspected["command"], "catalog.inspect");
     assert_eq!(inspected["result"]["managed_file_count"], 0);
-    json_stdout(&run(&initialize_args));
 
     let scanned = json_stdout(&run(&[
         "import",
@@ -792,6 +778,34 @@ fn sha256_hex(contents: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
 
     format!("{:x}", Sha256::digest(contents))
+}
+
+fn write_initialization_plan(catalog: &Path) {
+    let config = "format_version: 2\nmedia_extensions: [jpg]\nsidecar_extensions: [xmp]\n";
+    fs::write(
+        catalog.join(".souvenirs-initialize.jsonl"),
+        format!(
+            "{{\"kind\":\"plan\",\"operation_id\":\"initialize\",\"plan\":{{\"format_version\":2,\"config_yaml\":{},\"config_sha256\":\"{}\",\"journal_file_name\":\"recovery-initialize.jsonl\",\"staged_config_path\":\".souvenirs/staging/initialize-config.yml.stage\"}}}}\n",
+            serde_json::to_string(config).unwrap(),
+            sha256_hex(config.as_bytes())
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn initialization_resumes_a_recorded_plan() {
+    let temporary = TempDir::new().unwrap();
+    write_initialization_plan(temporary.path());
+
+    json_stdout(&run(&[
+        "catalog",
+        "initialize",
+        "--catalog",
+        temporary.path().to_str().unwrap(),
+    ]));
+
+    assert!(temporary.path().join(".souvenirs.yml").exists());
 }
 
 #[test]

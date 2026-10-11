@@ -14,8 +14,8 @@ use crate::copy::{publish_path_exclusively, remove_apple_double_sidecar, Publish
 use crate::durability::{sync_directory, sync_file};
 use crate::lock::SystemLockEnvironment;
 use crate::operation::{
-    append_operation_record, read_parsed_operation_records, DurableTransition, OperationOutcome,
-    OperationRecord,
+    append_operation_record, read_parsed_operation_records, DurableTransition, Failpoint,
+    OperationOutcome, OperationRecord,
 };
 use crate::{CatalogLock, LockError, OperationJournalError};
 
@@ -26,6 +26,12 @@ const BOOTSTRAP_TAKEOVER_NAME: &str = ".souvenirs-initialize.lock.takeover";
 const BOOTSTRAP_JOURNAL_NAME: &str = ".souvenirs-initialize.jsonl";
 const CONFIG_STAGE_RELATIVE_PATH: &str = ".souvenirs/staging/initialize-config.yml.stage";
 const INITIALIZE_OPERATION_ID: &str = "initialize";
+
+macro_rules! stop_at {
+    ($selected:expr, $current:ident) => {
+        fail($selected, Failpoint::$current)
+    };
+}
 
 const DEFAULT_MEDIA_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "heic", "cr3", "nef", "arw", "dng", "mp4", "mov",
@@ -126,11 +132,12 @@ impl CatalogLayout {
             verify_legacy_completed_initialization(self, &path, format_version)?;
             return Ok(false);
         }
+        reject_unfinished_legacy_initialization(&path, &parsed)?;
         if parsed.records.is_empty() {
             return Ok(false);
         }
         let plan = initialization_plan(&path, &parsed.records)?;
-        plan.validate()?;
+        plan.validate(&path)?;
         if validate_initialization_outcome(&path, &parsed.records)? {
             return Ok(false);
         }
@@ -152,7 +159,7 @@ impl CatalogLayout {
     fn initialize_with_failpoint(
         root: PathBuf,
         config: &CatalogConfig,
-        failpoint: Option<crate::operation::Failpoint>,
+        failpoint: Option<Failpoint>,
     ) -> Result<Self, CatalogInitializationError> {
         let layout = Self::new(root);
         layout.initialize_inner(config, failpoint)?;
@@ -206,13 +213,14 @@ impl CatalogLayout {
     fn initialize_inner(
         &self,
         config: &CatalogConfig,
-        failpoint: Option<crate::operation::Failpoint>,
+        failpoint: Option<Failpoint>,
     ) -> Result<(), CatalogInitializationError> {
         let config_yaml = config.to_yaml()?;
         self.validate_root()?;
         let capabilities = self.capabilities()?;
         capabilities.ensure_writable(&self.root)?;
         validate_bootstrap_preparation(self)?;
+        self.has_pending_initialization()?;
         self.with_bootstrap_lock(failpoint, || {
             self.initialize_locked(config, config_yaml.as_bytes(), failpoint)
         })
@@ -220,7 +228,7 @@ impl CatalogLayout {
 
     fn with_bootstrap_lock<T>(
         &self,
-        failpoint: Option<crate::operation::Failpoint>,
+        failpoint: Option<Failpoint>,
         operation: impl FnOnce() -> Result<T, CatalogInitializationError>,
     ) -> Result<T, CatalogInitializationError> {
         let _ = failpoint;
@@ -245,14 +253,19 @@ impl CatalogLayout {
         match result {
             Ok(value) => {
                 let release = lock.release().map_err(CatalogInitializationError::Lock);
-                let cleanup = takeover.remove().map_err(CatalogInitializationError::Lock);
+                let cleanup = takeover
+                    .map(|guard| guard.remove())
+                    .transpose()
+                    .map_err(CatalogInitializationError::Lock);
                 release?;
                 cleanup?;
                 Ok(value)
             }
             Err(error) => {
                 drop(lock);
-                let _ = takeover.remove();
+                if let Some(takeover) = takeover {
+                    let _ = takeover.remove();
+                }
                 Err(error)
             }
         }
@@ -277,7 +290,7 @@ impl CatalogLayout {
         &self,
         config: &CatalogConfig,
         config_bytes: &[u8],
-        failpoint: Option<crate::operation::Failpoint>,
+        failpoint: Option<Failpoint>,
     ) -> Result<(), CatalogInitializationError> {
         let discovered = discover_initialization_journal(self)?;
         let (journal, plan) = match discovered {
@@ -286,9 +299,9 @@ impl CatalogLayout {
                 return Ok(());
             }
             Some(DiscoveredJournal::Preparation(path)) => {
-                check_failpoint(
+                stop_at!(
                     failpoint,
-                    crate::operation::Failpoint::InitializationRecoveryCleanupObservedBeforePersistence,
+                    InitializationRecoveryCleanupObservedBeforePersistence
                 )?;
                 fs::remove_file(&path).map_err(|source| CatalogInitializationError::Io {
                     action: "remove interrupted bootstrap journal preparation",
@@ -341,34 +354,41 @@ impl CatalogLayout {
         &self,
         mut journal: InitializationJournal,
         plan: InitializationPlan,
-        failpoint: Option<crate::operation::Failpoint>,
+        failpoint: Option<Failpoint>,
     ) -> Result<(), CatalogInitializationError> {
-        plan.validate()?;
+        plan.validate(&journal.path)?;
         if validate_initialization_outcome(&journal.path, &journal.records)? {
             verify_completed_initialization(self, &journal, &plan)?;
             return Ok(());
         }
 
-        ensure_initialization_directory(
-            self,
-            &mut journal,
-            ".souvenirs",
-            "initialize-state",
-            failpoint,
-            crate::operation::Failpoint::InitializationStateDirectoryIntentPersisted,
-            crate::operation::Failpoint::InitializationStateDirectoryMutationPersisted,
-            crate::operation::Failpoint::InitializationStateDirectoryCompleted,
-        )?;
-        ensure_initialization_directory(
-            self,
-            &mut journal,
-            ".souvenirs/journal",
-            "initialize-journal",
-            failpoint,
-            crate::operation::Failpoint::InitializationJournalDirectoryIntentPersisted,
-            crate::operation::Failpoint::InitializationJournalDirectoryMutationPersisted,
-            crate::operation::Failpoint::InitializationJournalDirectoryCompleted,
-        )?;
+        for (path, step, intent, mutation, completed) in [
+            (
+                ".souvenirs",
+                "initialize-state",
+                Failpoint::InitializationStateDirectoryIntentPersisted,
+                Failpoint::InitializationStateDirectoryMutationPersisted,
+                Failpoint::InitializationStateDirectoryCompleted,
+            ),
+            (
+                ".souvenirs/journal",
+                "initialize-journal",
+                Failpoint::InitializationJournalDirectoryIntentPersisted,
+                Failpoint::InitializationJournalDirectoryMutationPersisted,
+                Failpoint::InitializationJournalDirectoryCompleted,
+            ),
+        ] {
+            ensure_initialization_directory(
+                self,
+                &mut journal,
+                path,
+                step,
+                failpoint,
+                intent,
+                mutation,
+                completed,
+            )?;
+        }
         relocate_initialization_journal(self, &mut journal, &plan, failpoint)?;
         ensure_initialization_directory(
             self,
@@ -376,9 +396,9 @@ impl CatalogLayout {
             ".souvenirs/staging",
             "initialize-staging",
             failpoint,
-            crate::operation::Failpoint::InitializationStagingDirectoryIntentPersisted,
-            crate::operation::Failpoint::InitializationStagingDirectoryMutationPersisted,
-            crate::operation::Failpoint::InitializationStagingDirectoryCompleted,
+            Failpoint::InitializationStagingDirectoryIntentPersisted,
+            Failpoint::InitializationStagingDirectoryMutationPersisted,
+            Failpoint::InitializationStagingDirectoryCompleted,
         )?;
         stage_configuration(self, &mut journal, &plan, failpoint)?;
         publish_configuration(self, &mut journal, &plan, failpoint)?;
@@ -386,10 +406,7 @@ impl CatalogLayout {
         journal.append(OperationRecord::Outcome {
             outcome: OperationOutcome::Completed,
         })?;
-        check_failpoint(
-            failpoint,
-            crate::operation::Failpoint::InitializationOutcomePersisted,
-        )?;
+        stop_at!(failpoint, InitializationOutcomePersisted)?;
         verify_completed_initialization(self, &journal, &plan)?;
         Ok(())
     }
@@ -398,7 +415,7 @@ impl CatalogLayout {
         &self,
         config: &CatalogConfig,
         config_bytes: &[u8],
-        failpoint: Option<crate::operation::Failpoint>,
+        failpoint: Option<Failpoint>,
     ) -> Result<(InitializationJournal, InitializationPlan), CatalogInitializationError> {
         let plan = InitializationPlan {
             format_version: config.format_version,
@@ -419,10 +436,7 @@ impl CatalogLayout {
                 source,
             })?;
         persist(&self.root, "persist bootstrap journal entry")?;
-        check_failpoint(
-            failpoint,
-            crate::operation::Failpoint::InitializationJournalCreated,
-        )?;
+        stop_at!(failpoint, InitializationJournalCreated)?;
         let mut journal = InitializationJournal {
             path,
             file,
@@ -432,10 +446,7 @@ impl CatalogLayout {
             operation_id: INITIALIZE_OPERATION_ID.to_owned(),
             plan: serde_json::to_value(&plan).map_err(CatalogInitializationError::SerializePlan)?,
         })?;
-        check_failpoint(
-            failpoint,
-            crate::operation::Failpoint::InitializationPlanPersisted,
-        )?;
+        stop_at!(failpoint, InitializationPlanPersisted)?;
         Ok((journal, plan))
     }
 }
@@ -451,13 +462,32 @@ struct InitializationPlan {
 }
 
 impl InitializationPlan {
-    fn validate(&self) -> Result<(), CatalogInitializationError> {
+    fn validate(&self, path: &Path) -> Result<(), CatalogInitializationError> {
         if self.staged_config_path != Path::new(CONFIG_STAGE_RELATIVE_PATH)
             || !self.journal_file_name.ends_with("-initialize.jsonl")
             || self.journal_file_name.contains('/')
             || self.journal_file_name.contains('\\')
-            || self.config_sha256 != digest_bytes(self.config_yaml.as_bytes())
         {
+            return Err(CatalogInitializationError::InvalidPlan);
+        }
+        if self.format_version != FORMAT_VERSION {
+            return Err(CatalogInitializationError::UnsupportedFormatVersion(
+                self.format_version,
+            ));
+        }
+        let config_version = parse_config_format_version(&self.config_yaml).ok_or_else(|| {
+            CatalogInitializationError::InvalidBootstrapJournal {
+                path: path.to_path_buf(),
+                details: "initialization plan contains an invalid catalog configuration",
+            }
+        })?;
+        if config_version != self.format_version {
+            return Err(CatalogInitializationError::InvalidBootstrapJournal {
+                path: path.to_path_buf(),
+                details: "initialization plan and catalog configuration versions differ",
+            });
+        }
+        if self.config_sha256 != digest_bytes(self.config_yaml.as_bytes()) {
             return Err(CatalogInitializationError::InvalidPlan);
         }
         Ok(())
@@ -549,18 +579,33 @@ fn discover_initialization_journal(
             format_version,
         )));
     }
-    let journal = InitializationJournal::open(path.clone(), parsed)?;
-    if journal.records.is_empty() && path == layout.bootstrap_journal_path() {
+    reject_unfinished_legacy_initialization(&path, &parsed)?;
+    if parsed.records.is_empty() && path == layout.bootstrap_journal_path() {
         return Ok(Some(DiscoveredJournal::Preparation(path)));
     }
-    if journal.records.is_empty() {
+    if parsed.records.is_empty() {
         return Err(CatalogInitializationError::InvalidBootstrapJournal {
             path,
             details: "relocated initialization journal is empty",
         });
     }
-    let plan = initialization_plan(&path, &journal.records)?;
+    let plan = initialization_plan(&path, &parsed.records)?;
+    plan.validate(&path)?;
+    let journal = InitializationJournal::open(path, parsed)?;
     Ok(Some(DiscoveredJournal::Valid(journal, plan)))
+}
+
+fn reject_unfinished_legacy_initialization(
+    path: &Path,
+    parsed: &crate::operation::ParsedOperationRecords,
+) -> Result<(), CatalogInitializationError> {
+    if parsed.legacy_initialization_unfinished {
+        return Err(CatalogInitializationError::InvalidBootstrapJournal {
+            path: path.to_path_buf(),
+            details: "unfinished legacy initialization cannot be resumed safely",
+        });
+    }
+    Ok(())
 }
 
 fn verify_legacy_completed_initialization(
@@ -570,7 +615,6 @@ fn verify_legacy_completed_initialization(
 ) -> Result<(), CatalogInitializationError> {
     ensure_directory(&layout.state_directory())?;
     ensure_directory(&layout.journal_directory())?;
-    ensure_directory(&layout.staging_directory())?;
     if path.parent() != Some(layout.journal_directory().as_path()) {
         return Err(CatalogInitializationError::InvalidBootstrapJournal {
             path: path.to_path_buf(),
@@ -584,17 +628,22 @@ fn verify_legacy_completed_initialization(
             source,
         }
     })?;
-    let config_version = config
-        .lines()
-        .find_map(|line| line.strip_prefix("format_version: "))
-        .and_then(|value| value.parse::<u32>().ok());
+    let config_version = parse_config_format_version(&config);
     if format_version != FORMAT_VERSION || config_version != Some(format_version) {
         return Err(CatalogInitializationError::InvalidBootstrapJournal {
             path: path.to_path_buf(),
             details: "legacy initialization journal does not match the catalog configuration",
         });
     }
+
     Ok(())
+}
+
+fn parse_config_format_version(config: &str) -> Option<u32> {
+    config
+        .lines()
+        .find_map(|line| line.strip_prefix("format_version: "))
+        .and_then(|value| value.parse().ok())
 }
 
 fn initialization_journal_path(
@@ -699,10 +748,10 @@ fn ensure_initialization_directory(
     journal: &mut InitializationJournal,
     relative_path: &str,
     step_id: &str,
-    failpoint: Option<crate::operation::Failpoint>,
-    intent_failpoint: crate::operation::Failpoint,
-    mutation_failpoint: crate::operation::Failpoint,
-    completed_failpoint: crate::operation::Failpoint,
+    failpoint: Option<Failpoint>,
+    intent_failpoint: Failpoint,
+    mutation_failpoint: Failpoint,
+    completed_failpoint: Failpoint,
 ) -> Result<(), CatalogInitializationError> {
     let relative_path = PathBuf::from(relative_path);
     let path = layout.root.join(&relative_path);
@@ -723,13 +772,13 @@ fn ensure_initialization_directory(
             return Err(CatalogInitializationError::PathConflict(path));
         }
         journal.append(OperationRecord::Transition { transition: intent })?;
-        check_failpoint(failpoint, intent_failpoint)?;
+        fail(failpoint, intent_failpoint)?;
     }
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_dir() => {
-            check_failpoint(
+            stop_at!(
                 failpoint,
-                crate::operation::Failpoint::InitializationRecoveryDirectoryObservedBeforePersistence,
+                InitializationRecoveryDirectoryObservedBeforePersistence
             )?;
             persist(
                 path.parent()
@@ -749,7 +798,7 @@ fn ensure_initialization_directory(
                     .expect("initialization directory has a parent"),
                 "persist initialization directory",
             )?;
-            check_failpoint(failpoint, mutation_failpoint)?;
+            fail(failpoint, mutation_failpoint)?;
         }
         Err(source) => {
             return Err(CatalogInitializationError::Io {
@@ -762,14 +811,14 @@ fn ensure_initialization_directory(
     journal.append(OperationRecord::Transition {
         transition: completed,
     })?;
-    check_failpoint(failpoint, completed_failpoint)
+    fail(failpoint, completed_failpoint)
 }
 
 fn relocate_initialization_journal(
     layout: &CatalogLayout,
     journal: &mut InitializationJournal,
     plan: &InitializationPlan,
-    failpoint: Option<crate::operation::Failpoint>,
+    failpoint: Option<Failpoint>,
 ) -> Result<(), CatalogInitializationError> {
     let relative_destination = plan.journal_relative_path();
     let destination = layout.root.join(&relative_destination);
@@ -791,10 +840,7 @@ fn relocate_initialization_journal(
             return Err(CatalogInitializationError::PathConflict(destination));
         }
         journal.append(OperationRecord::Transition { transition: intent })?;
-        check_failpoint(
-            failpoint,
-            crate::operation::Failpoint::InitializationJournalRelocationIntentPersisted,
-        )?;
+        stop_at!(failpoint, InitializationJournalRelocationIntentPersisted)?;
     }
     let root_exists = regular_file_if_exists(&layout.bootstrap_journal_path())?;
     let final_exists = regular_file_if_exists(&destination)?;
@@ -815,10 +861,7 @@ fn relocate_initialization_journal(
                 "persist relocated initialization journal",
             )?;
             journal.path = destination.clone();
-            check_failpoint(
-                failpoint,
-                crate::operation::Failpoint::InitializationJournalRelocationMutationPersisted,
-            )?;
+            stop_at!(failpoint, InitializationJournalRelocationMutationPersisted)?;
         }
         (false, true) => {
             if journal.path != destination {
@@ -831,9 +874,9 @@ fn relocate_initialization_journal(
                     source,
                 }
             })?;
-            check_failpoint(
+            stop_at!(
                 failpoint,
-                crate::operation::Failpoint::InitializationRecoveryRelocationObservedBeforePersistence,
+                InitializationRecoveryRelocationObservedBeforePersistence
             )?;
             persist(&layout.root, "persist observed bootstrap journal removal")?;
             persist(
@@ -846,17 +889,14 @@ fn relocate_initialization_journal(
     journal.append(OperationRecord::Transition {
         transition: completed,
     })?;
-    check_failpoint(
-        failpoint,
-        crate::operation::Failpoint::InitializationJournalRelocated,
-    )
+    stop_at!(failpoint, InitializationJournalRelocated)
 }
 
 fn stage_configuration(
     layout: &CatalogLayout,
     journal: &mut InitializationJournal,
     plan: &InitializationPlan,
-    failpoint: Option<crate::operation::Failpoint>,
+    failpoint: Option<Failpoint>,
 ) -> Result<(), CatalogInitializationError> {
     let staged_path = layout.root.join(&plan.staged_config_path);
     let intent = DurableTransition::InitializationConfigStageStarted {
@@ -878,17 +918,14 @@ fn stage_configuration(
             return Err(CatalogInitializationError::PathConflict(staged_path));
         }
         journal.append(OperationRecord::Transition { transition: intent })?;
-        check_failpoint(
-            failpoint,
-            crate::operation::Failpoint::InitializationConfigStageIntentPersisted,
-        )?;
+        stop_at!(failpoint, InitializationConfigStageIntentPersisted)?;
     }
     if path_exists(&staged_path)? {
         match file_digest(&staged_path) {
             Ok(actual) if actual == plan.config_sha256 => {
-                check_failpoint(
+                stop_at!(
                     failpoint,
-                    crate::operation::Failpoint::InitializationRecoveryConfigStageObservedBeforePersistence,
+                    InitializationRecoveryConfigStageObservedBeforePersistence
                 )?;
                 let file =
                     File::open(&staged_path).map_err(|source| CatalogInitializationError::Io {
@@ -917,25 +954,19 @@ fn stage_configuration(
         }
     } else {
         write_stage(layout, &staged_path, plan.config_yaml.as_bytes())?;
-        check_failpoint(
-            failpoint,
-            crate::operation::Failpoint::InitializationConfigStageMutationPersisted,
-        )?;
+        stop_at!(failpoint, InitializationConfigStageMutationPersisted)?;
     }
     journal.append(OperationRecord::Transition {
         transition: completed,
     })?;
-    check_failpoint(
-        failpoint,
-        crate::operation::Failpoint::InitializationConfigStaged,
-    )
+    stop_at!(failpoint, InitializationConfigStaged)
 }
 
 fn publish_configuration(
     layout: &CatalogLayout,
     journal: &mut InitializationJournal,
     plan: &InitializationPlan,
-    failpoint: Option<crate::operation::Failpoint>,
+    failpoint: Option<Failpoint>,
 ) -> Result<(), CatalogInitializationError> {
     let staged_path = layout.root.join(&plan.staged_config_path);
     let destination = layout.config_path();
@@ -959,10 +990,7 @@ fn publish_configuration(
             return Err(CatalogInitializationError::PathConflict(destination));
         }
         journal.append(OperationRecord::Transition { transition: intent })?;
-        check_failpoint(
-            failpoint,
-            crate::operation::Failpoint::InitializationConfigPublicationIntentPersisted,
-        )?;
+        stop_at!(failpoint, InitializationConfigPublicationIntentPersisted)?;
     }
     match (path_exists(&staged_path)?, path_exists(&destination)?) {
         (true, false) => {
@@ -981,10 +1009,7 @@ fn publish_configuration(
                 "persist configuration stage publication",
             )?;
             persist(&layout.root, "persist catalog configuration publication")?;
-            check_failpoint(
-                failpoint,
-                crate::operation::Failpoint::InitializationConfigPublicationMutationPersisted,
-            )?;
+            stop_at!(failpoint, InitializationConfigPublicationMutationPersisted)?;
         }
         (false, true) => {
             verify_file_digest(&destination, &plan.config_sha256)?;
@@ -995,9 +1020,9 @@ fn publish_configuration(
                     source,
                 }
             })?;
-            check_failpoint(
+            stop_at!(
                 failpoint,
-                crate::operation::Failpoint::InitializationRecoveryConfigObservedBeforePersistence,
+                InitializationRecoveryConfigObservedBeforePersistence
             )?;
             persist(
                 &layout.staging_directory(),
@@ -1013,10 +1038,7 @@ fn publish_configuration(
     journal.append(OperationRecord::Transition {
         transition: completed,
     })?;
-    check_failpoint(
-        failpoint,
-        crate::operation::Failpoint::InitializationConfigPublished,
-    )
+    stop_at!(failpoint, InitializationConfigPublished)
 }
 
 fn write_stage(
@@ -1103,10 +1125,7 @@ fn operation_identifier() -> Result<String, CatalogInitializationError> {
         })
 }
 
-fn check_failpoint(
-    selected: Option<crate::operation::Failpoint>,
-    current: crate::operation::Failpoint,
-) -> Result<(), CatalogInitializationError> {
+fn fail(selected: Option<Failpoint>, current: Failpoint) -> Result<(), CatalogInitializationError> {
     #[cfg(feature = "test-failpoints")]
     if selected == Some(current) {
         return Err(CatalogInitializationError::Failpoint(current));
@@ -1162,12 +1181,16 @@ fn ensure_directory(path: &Path) -> Result<(), CatalogInitializationError> {
 }
 
 fn ensure_absent(path: &Path) -> Result<(), CatalogInitializationError> {
-    if path_exists(path)? {
-        Err(CatalogInitializationError::AlreadyExists(
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(CatalogInitializationError::AlreadyExists(
             path.to_path_buf(),
-        ))
-    } else {
-        Ok(())
+        )),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CatalogInitializationError::Io {
+            action: "inspect initialization destination",
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -1407,7 +1430,10 @@ impl From<StorageCapabilityError> for CatalogInitializationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogConfig, CatalogInitializationError, CatalogLayout, FORMAT_VERSION};
+    use super::{
+        digest_bytes, CatalogConfig, CatalogInitializationError, CatalogLayout, InitializationPlan,
+        CONFIG_STAGE_RELATIVE_PATH, FORMAT_VERSION,
+    };
     use std::fs;
 
     use crate::test_support::TempDirectory;
@@ -1440,9 +1466,16 @@ mod tests {
             format!("{plan}{{\"kind\":\"outcome\",\"outcome\":\"completed\"}}\n"),
         )
         .unwrap();
+        fs::remove_dir(layout.staging_directory()).unwrap();
         CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap();
         fs::write(journals[0].path(), plan).unwrap();
-        assert!(CatalogLayout::resume_initialization(temporary.path()).is_err());
+        let error = CatalogLayout::resume_initialization(temporary.path()).unwrap_err();
+        assert!(matches!(
+            error,
+            CatalogInitializationError::InvalidBootstrapJournal { details, .. }
+                if details.contains("legacy")
+        ));
+        assert!(journals[0].path().exists());
     }
 
     #[test]
@@ -1501,5 +1534,20 @@ mod tests {
                 if version == FORMAT_VERSION + 1
         ));
         assert!(!temporary.path().join(".souvenirs").exists());
+    }
+
+    #[test]
+    fn rejects_invalid_recorded_versions() {
+        for (plan_version, config_version) in [(3, 3), (2, 3)] {
+            let config_yaml = format!("format_version: {config_version}\n");
+            let plan = InitializationPlan {
+                format_version: plan_version,
+                config_sha256: digest_bytes(config_yaml.as_bytes()),
+                config_yaml,
+                journal_file_name: "recovery-initialize.jsonl".to_owned(),
+                staged_config_path: CONFIG_STAGE_RELATIVE_PATH.into(),
+            };
+            assert!(plan.validate("journal".as_ref()).is_err());
+        }
     }
 }

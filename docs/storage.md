@@ -33,18 +33,9 @@ A persistence failure stops the operation with a contextual error.
 
 ## Catalog initialization
 
-Catalog initialization uses a bootstrap protocol before `.souvenirs.yml` or `.souvenirs/` becomes authoritative.
-The protocol reserves one bootstrap lock and one bootstrap journal in the catalog root.
-These artifacts are transient tool state.
-They are not part of the catalog format.
-
-The bootstrap lock uses the same holder identity and stale-holder rules as the catalog lock.
-It coordinates initialization before `.souvenirs/lock` can exist.
-
-The bootstrap journal uses the normal JSON Lines record envelope.
-Its first durable record contains the complete configuration bytes and their SHA-256 digest.
-The plan also names the final initialization journal and the owned configuration stage.
-The plan establishes ownership only for those paths and bytes.
+Catalog initialization reserves a transient bootstrap lock and JSON Lines journal in the catalog root before catalog state becomes authoritative.
+The lock uses the catalog lock's holder and stale-holder rules.
+The journal plan contains the format version, complete configuration bytes and digest, final journal name, and owned configuration stage.
 
 Initialization performs these durable transitions:
 
@@ -58,30 +49,14 @@ Initialization performs these durable transitions:
 8. Record publication intent, publish `.souvenirs.yml`, persist both directories, and record completion.
 9. Append the `completed` outcome, remove the bootstrap lock, and persist the catalog root.
 
-Initialization is complete only when both conditions are true:
+Initialization is complete only when `.souvenirs.yml` contains the planned bytes and the journal has a `completed` outcome.
+A retry with the same configuration verifies completion; a different configuration conflicts.
+A valid partial initialization resumes forward and persists observed mutations before recording progress.
+Observed directories must have the expected type, relocation must leave exactly one journal, and configuration bytes must match the plan digest.
 
-- `.souvenirs.yml` contains the planned bytes.
-- The initialization journal has a `completed` outcome.
-
-A retry with the same configuration verifies completed initialization and succeeds.
-A retry with a different configuration stops with a conflict.
-
-A valid partial initialization always resumes forward.
-Recovery persists each observed filesystem mutation before it records journal progress.
-An intended directory with the expected type is accepted after its parent is persisted.
-An observed journal relocation is accepted only when exactly one journal copy exists.
-An observed stage or published configuration is accepted only when its digest matches the plan.
-
-Recovery removes only these owned artifacts:
-
-- A reserved bootstrap journal that contains no valid plan.
-- An incomplete regular configuration stage named by a valid plan.
-- An AppleDouble sidecar for the bootstrap journal after relocation.
-- An AppleDouble sidecar for the owned configuration stage after publication.
-
-Recovery must not remove `.souvenirs/`, `journal/`, `staging/`, a published configuration, or unknown content.
-Recovery must not overwrite an occupied path.
-Unexpected types, digests, journals, or preexisting catalog content stop initialization without changing that content.
+Recovery removes only a pre-plan bootstrap journal, an incomplete plan-owned configuration stage, and AppleDouble sidecars for relocated or published plan-owned artifacts.
+It never removes catalog directories, published configuration, or unknown content, and never overwrites an occupied path.
+Unexpected types, digests, journals, or preexisting content stop initialization unchanged.
 
 ## Lock
 

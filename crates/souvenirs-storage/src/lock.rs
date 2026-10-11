@@ -146,14 +146,27 @@ impl CatalogLock {
         takeover_path: PathBuf,
         environment: &impl LockEnvironment,
     ) -> Result<Self, LockError> {
+        let (lock, _takeover) =
+            Self::acquire_paths_with_takeover(path, takeover_path, environment)?;
+        Ok(lock)
+    }
+
+    pub(crate) fn acquire_paths_with_takeover(
+        path: PathBuf,
+        takeover_path: PathBuf,
+        environment: &impl LockEnvironment,
+    ) -> Result<(Self, Option<TakeoverGuard>), LockError> {
         let holder = current_holder(environment)?;
         match write_holder_exclusively(&path, &holder) {
             Ok(()) => {
-                return Ok(Self {
-                    path,
-                    holder,
-                    released: false,
-                })
+                return Ok((
+                    Self {
+                        path,
+                        holder,
+                        released: false,
+                    },
+                    None,
+                ))
             }
             Err(LockError::Io { source, .. }) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -163,24 +176,8 @@ impl CatalogLock {
                 LockError::TakeoverBusy => report_takeover_busy(&path),
                 error => error,
             })?;
-        let lock = Self::acquire_under_takeover(path, holder, environment);
-        drop(takeover);
-        lock
-    }
-
-    pub(crate) fn acquire_paths_with_takeover(
-        path: PathBuf,
-        takeover_path: PathBuf,
-        environment: &impl LockEnvironment,
-    ) -> Result<(Self, TakeoverGuard), LockError> {
-        let takeover =
-            TakeoverGuard::acquire(&takeover_path, environment).map_err(|error| match error {
-                LockError::TakeoverBusy => report_takeover_busy(&path),
-                error => error,
-            })?;
-        let holder = current_holder(environment)?;
         let lock = Self::acquire_under_takeover(path, holder, environment)?;
-        Ok((lock, takeover))
+        Ok((lock, Some(takeover)))
     }
 
     fn acquire_under_takeover(

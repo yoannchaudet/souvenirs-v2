@@ -506,6 +506,7 @@ pub(crate) struct ParsedOperationRecords {
     pub complete_length: u64,
     pub interrupted_tail: bool,
     pub legacy_initialization_format: Option<u32>,
+    pub legacy_initialization_unfinished: bool,
 }
 
 pub(crate) fn read_parsed_operation_records(
@@ -517,12 +518,19 @@ pub(crate) fn read_parsed_operation_records(
         path: path.to_path_buf(),
         source,
     })?;
-    if let Some((records, format_version)) = parse_completed_legacy_initialization(path, &bytes) {
+    if let Some(legacy) = parse_legacy_initialization(path, &bytes) {
+        let (records, format_version, unfinished) = match legacy {
+            LegacyInitialization::Completed(records, format_version) => {
+                (records, Some(format_version), false)
+            }
+            LegacyInitialization::Unfinished => (Vec::new(), None, true),
+        };
         return Ok(ParsedOperationRecords {
             records,
             complete_length: bytes.len() as u64,
             interrupted_tail: false,
-            legacy_initialization_format: Some(format_version),
+            legacy_initialization_format: format_version,
+            legacy_initialization_unfinished: unfinished,
         });
     }
     let mut records = Vec::new();
@@ -551,13 +559,16 @@ pub(crate) fn read_parsed_operation_records(
         complete_length: start as u64,
         interrupted_tail: start < bytes.len(),
         legacy_initialization_format: None,
+        legacy_initialization_unfinished: false,
     })
 }
 
-fn parse_completed_legacy_initialization(
-    path: &Path,
-    bytes: &[u8],
-) -> Option<(Vec<OperationRecord>, u32)> {
+enum LegacyInitialization {
+    Completed(Vec<OperationRecord>, u32),
+    Unfinished,
+}
+
+fn parse_legacy_initialization(path: &Path, bytes: &[u8]) -> Option<LegacyInitialization> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct LegacyPlan {
@@ -579,16 +590,19 @@ fn parse_completed_legacy_initialization(
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty());
     let plan: LegacyPlan = serde_json::from_slice(lines.next()?).ok()?;
-    let outcome: LegacyOutcome = serde_json::from_slice(lines.next()?).ok()?;
-    if lines.next().is_some()
-        || plan.kind != "plan"
-        || plan.operation != INITIALIZATION_OPERATION_ID
-        || outcome.kind != "outcome"
-        || outcome.outcome != "completed"
-    {
+    if plan.kind != "plan" || plan.operation != INITIALIZATION_OPERATION_ID {
         return None;
     }
-    Some((
+    let Some(outcome) = lines
+        .next()
+        .and_then(|line| serde_json::from_slice::<LegacyOutcome>(line).ok())
+    else {
+        return Some(LegacyInitialization::Unfinished);
+    };
+    if lines.next().is_some() || outcome.kind != "outcome" || outcome.outcome != "completed" {
+        return Some(LegacyInitialization::Unfinished);
+    }
+    Some(LegacyInitialization::Completed(
         vec![
             OperationRecord::Plan {
                 operation_id: INITIALIZATION_OPERATION_ID.to_owned(),

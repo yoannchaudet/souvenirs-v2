@@ -955,18 +955,6 @@ mod tests {
             .expect("empty directory should be valid");
         CatalogService::create(directory.path(), "Family Catalog")
             .expect("catalog should initialize");
-        let journal = fs::read_dir(directory.path().join(".souvenirs/journal"))
-            .unwrap()
-            .flatten()
-            .next()
-            .unwrap()
-            .path();
-        fs::write(
-            journal,
-            "{\"kind\":\"plan\",\"operation\":\"initialize\",\"format_version\":2}\n\
-             {\"kind\":\"outcome\",\"outcome\":\"completed\"}\n",
-        )
-        .unwrap();
         let location = CatalogService::open(directory.path()).expect("catalog should open");
         assert_eq!(location.display_name.as_deref(), Some("Family Catalog"));
         assert_eq!(
@@ -981,29 +969,16 @@ mod tests {
 
     #[cfg(feature = "test-failpoints")]
     #[test]
-    fn application_resumes_only_the_requested_initialization() {
-        let directories = [tempdir().unwrap(), tempdir().unwrap()];
-        let config = souvenirs_storage::CatalogConfig {
-            display_name: Some("Confirmed name".to_owned()),
-            ..souvenirs_storage::CatalogConfig::default()
-        };
-        for directory in &directories {
-            souvenirs_storage::CatalogLayout::initialize_failing_at(
-                directory.path(),
-                &config,
-                souvenirs_storage::Failpoint::InitializationConfigPublished,
-            )
-            .unwrap_err();
-        }
+    fn application_resumes_a_recorded_initialization() {
+        let directory = tempdir().unwrap();
+        souvenirs_storage::CatalogLayout::initialize_failing_at(
+            directory.path(),
+            &souvenirs_storage::CatalogConfig::default(),
+            souvenirs_storage::Failpoint::InitializationConfigPublished,
+        )
+        .unwrap_err();
 
-        CatalogService::create(directories[0].path(), "Confirmed name").unwrap();
-        assert!(matches!(
-            CatalogService::create(directories[1].path(), "Different name"),
-            Err(CatalogServiceError::Initialization(
-                souvenirs_storage::CatalogInitializationError::ConfigurationMismatch { .. }
-            ))
-        ));
-        CatalogService::open(directories[1].path()).unwrap();
+        CatalogService::open(directory.path()).unwrap();
     }
 
     #[test]

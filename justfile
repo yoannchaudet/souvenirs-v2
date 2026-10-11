@@ -13,7 +13,7 @@ test-core-performance:
 
 # Run every Rust test target.
 test-rust:
-    cargo test --workspace --all-targets
+    cargo test --workspace --all-targets --all-features
 
 # Run macOS state and unit tests without launching UI automation.
 test-swift:

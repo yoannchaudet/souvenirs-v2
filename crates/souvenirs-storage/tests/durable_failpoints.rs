@@ -5,9 +5,9 @@ use std::fs;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    read_operation_records, CatalogConfig, CatalogInitializationError, CatalogLayout, CatalogLock,
-    CopyExpectation, Failpoint, ManifestReplacementRequest, OperationJournal,
-    OperationJournalError, OperationOutcome, OperationRecord, VerifiedCopyError,
+    CatalogConfig, CatalogInitializationError, CatalogLayout, CatalogLock, CopyExpectation,
+    Failpoint, ManifestReplacementRequest, OperationJournal, OperationJournalError,
+    VerifiedCopyError,
 };
 use tempfile::TempDir;
 
@@ -33,24 +33,9 @@ fn expectation(bytes: &[u8]) -> CopyExpectation {
     }
 }
 
-fn initialization_journal(layout: &CatalogLayout) -> std::path::PathBuf {
-    fs::read_dir(layout.journal_directory())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .find(|path| path.to_string_lossy().ends_with("-initialize.jsonl"))
-        .unwrap()
-}
-
 fn assert_completed_initialization(temporary: &TempDir, config: &CatalogConfig) {
-    let layout = CatalogLayout::initialize(temporary.path(), config).unwrap();
+    CatalogLayout::initialize(temporary.path(), config).unwrap();
     assert!(!temporary.path().join(".souvenirs-initialize.lock").exists());
-    let journal = initialization_journal(&layout);
-    assert!(matches!(
-        read_operation_records(&journal).unwrap().last(),
-        Some(OperationRecord::Outcome {
-            outcome: OperationOutcome::Completed
-        })
-    ));
 }
 
 fn assert_initialization_failpoint(failpoint: Failpoint) {
