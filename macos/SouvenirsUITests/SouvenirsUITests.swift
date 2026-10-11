@@ -140,8 +140,11 @@ final class SouvenirsUITests: XCTestCase {
                 .value as? String,
             "As shown"
         )
-        sheet.buttons["change-date-selection"].click()
-        XCTAssertTrue(sheet.buttons["date-convert-utc"].waitForExistence(timeout: 3))
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: sheet.buttons["start-import"]
+        )
+        waitForExpectations(timeout: 5)
         sheet.buttons["import-details"].click()
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-operation-summary"].exists
@@ -173,6 +176,8 @@ final class SouvenirsUITests: XCTestCase {
                 NSPredicate(format: "label CONTAINS %@", "resume or cancel safely")
             ).firstMatch.exists
         )
+        sheet.buttons["change-date-selection"].click()
+        XCTAssertTrue(sheet.buttons["date-convert-utc"].waitForExistence(timeout: 3))
     }
 
     @MainActor
