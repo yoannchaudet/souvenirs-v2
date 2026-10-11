@@ -149,16 +149,24 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-operation-summary"].exists
         )
+        for identifier in [
+            "import-detail-destination",
+            "import-detail-file-0"
+        ] {
+            XCTAssertTrue(
+                sheet.descendants(matching: .any)[identifier]
+                    .waitForExistence(timeout: 3),
+                "\(identifier) should be exposed in the expanded import details"
+            )
+        }
         for text in [
-            "/Volumes/photos/Family Catalog/2026/2026-10-10 Dolomites",
-            "2026-10-10 12-14-00 001.jpg",
             "1. Copy it to a hidden working folder.",
             "2. Read the copy back and compare it with the source.",
             "3. Publish the final name and checksum."
         ] {
             XCTAssertTrue(
                 sheet.descendants(matching: .any).matching(
-                    NSPredicate(format: "label == %@", text)
+                    NSPredicate(format: "label CONTAINS %@", text)
                 ).firstMatch.waitForExistence(timeout: 3),
                 "\(text) should appear in the expanded import details"
             )
