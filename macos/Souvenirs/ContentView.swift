@@ -1034,7 +1034,11 @@ private struct ImportPlanningSheet: View {
                                 .accessibilityIdentifier("retry-import-scan")
                                 .focused($keyboardFocus, equals: .retry)
                                 .onAppear {
-                                    keyboardFocus = .retry
+                                    Task { @MainActor in
+                                        try? await Task.sleep(for: .milliseconds(150))
+                                        guard model.canRetryScan else { return }
+                                        keyboardFocus = .retry
+                                    }
                                 }
                             }
                         }
