@@ -1659,6 +1659,13 @@ private struct ExistingCollectionSelector: View {
                             alignment: .topLeading
                         )
                         .accessibilityIdentifier("existing-collections-error")
+                } else if collections.isEmpty {
+                    ContentUnavailableView(
+                        "No Collections",
+                        systemImage: "photo.on.rectangle.angled",
+                        description: Text("Create a collection before adding to an existing one.")
+                    )
+                    .accessibilityIdentifier("existing-collections-empty")
                 } else {
                     List(
                         Array(collections.enumerated()),
@@ -1684,7 +1691,10 @@ private struct ExistingCollectionSelector: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(selection == nil || isLoading || errorMessage != nil)
+                .disabled(
+                    !collections.contains(where: { $0.identity == selection })
+                        || isLoading || errorMessage != nil
+                )
                 .accessibilityIdentifier("confirm-existing-collection")
             }
             .padding(16)
@@ -1694,7 +1704,8 @@ private struct ExistingCollectionSelector: View {
             focus(selectedIdentity ?? collections.first?.identity)
         }
         .onChange(of: collections) {
-            guard selection == nil else { return }
+            guard selection == nil || !$1.contains(where: { $0.identity == selection })
+            else { return }
             focus($1.first?.identity)
         }
     }
