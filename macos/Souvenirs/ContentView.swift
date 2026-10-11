@@ -899,75 +899,47 @@ private struct ImportPlanningSheet: View {
     @AccessibilityFocusState private var titleFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("Import from \(model.scan?.sourceName ?? "source")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("import-review-sheet")
-                    Text(model.title)
-                        .font(.system(size: 22, weight: .bold))
-                        .accessibilityIdentifier("import-review-title")
-                        .accessibilityFocused($titleFocused)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Import from \(model.scan?.sourceName ?? "source")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("import-review-sheet")
+                Text(model.title)
+                    .font(.system(size: 22, weight: .bold))
+                    .accessibilityIdentifier("import-review-title")
+                    .accessibilityFocused($titleFocused)
 
-                    if let scan = model.scan {
-                        destinationCard
-                        if (model.review?.requiredDecisionCount ?? scan.pendingItemCount) > 0 {
-                            dateDecision(scan)
-                        }
-                        summary(scan)
-                        details
-                    } else if model.isLoading {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                            Text("Scanning without changing the source…")
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 160)
-                        .accessibilityIdentifier("import-scan-progress")
+                if let scan = model.scan {
+                    destinationCard
+                    if (model.review?.requiredDecisionCount ?? scan.pendingItemCount) > 0 {
+                        dateDecision(scan)
                     }
-
-                    if let message = model.errorMessage {
-                        Label(message, systemImage: "exclamationmark.triangle.fill")
-                            .font(.callout)
-                            .foregroundStyle(.red)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
-                            .accessibilityIdentifier("import-planning-error")
+                    summary(scan)
+                    details
+                } else if model.isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Scanning without changing the source…")
+                            .foregroundStyle(.secondary)
                     }
+                    .frame(maxWidth: .infinity, minHeight: 160)
+                    .accessibilityIdentifier("import-scan-progress")
                 }
-                .padding(24)
-            }
 
-            Divider()
-            HStack {
-                Label(
-                    "Nothing in the source will be changed or deleted.",
-                    systemImage: "checkmark.shield"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                Spacer()
-                Button("Cancel", action: onCancel)
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityIdentifier("cancel-import-review")
-                    .focused($keyboardFocus, equals: .cancel)
-                Button(model.isPrepared ? "Plan Ready" : "Start Import") {
-                    model.prepareExecution()
-                    if model.isPrepared { onStart() }
+                if let message = model.errorMessage {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+                        .accessibilityIdentifier("import-planning-error")
                 }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(!model.canStart || model.isPrepared)
-                .accessibilityIdentifier("start-import")
             }
-            .padding(16)
-            .background(.regularMaterial)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier("import-review-actions")
+            .padding(24)
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) { importActions }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("import-review-modal")
         .onAppear {
@@ -978,6 +950,40 @@ private struct ImportPlanningSheet: View {
             if $1 {
                 keyboardFocus = .collectionName
             }
+        }
+    }
+
+    private var importActions: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 8) {
+                Label(
+                    "Nothing in the source will be changed or deleted.",
+                    systemImage: "checkmark.shield"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .layoutPriority(-1)
+                Spacer(minLength: 0)
+                HStack(spacing: 8) {
+                    Button("Cancel", action: onCancel)
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityIdentifier("cancel-import-review")
+                        .focused($keyboardFocus, equals: .cancel)
+                    Button(model.isPrepared ? "Plan Ready" : "Start Import") {
+                        model.prepareExecution()
+                        if model.isPrepared { onStart() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.canStart || model.isPrepared)
+                    .accessibilityIdentifier("start-import")
+                }
+                .fixedSize()
+            }
+            .padding(16)
+            .background(.regularMaterial)
         }
     }
 
@@ -1221,46 +1227,55 @@ private struct RecoverySheet: View {
     @AccessibilityFocusState private var titleFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Label(
+                    sourceAvailable
+                        ? "Finish importing “\(imports.collectionName)”?"
+                        : "Connect \(imports.sourceName) to finish the import",
+                    systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
+                )
+                .font(.title3.bold())
+                .accessibilityIdentifier("recovery-title")
+                .accessibilityFocused($titleFocused)
+                Text(
+                    sourceAvailable
+                        ? "The import stopped before it finished. Nothing was lost."
+                        : "\(imports.completedUnits) items are safely in your catalog. The rest are still on the source."
+                )
+                .foregroundStyle(.secondary)
+                Label(
+                    "\(imports.completedUnits) items are safely in your catalog.",
+                    systemImage: "checkmark"
+                )
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    .background.opacity(0.7),
+                    in: RoundedRectangle(cornerRadius: 10)
+                )
+                if !sourceAvailable {
                     Label(
-                        sourceAvailable
-                            ? "Finish importing “\(imports.collectionName)”?"
-                            : "Connect \(imports.sourceName) to finish the import",
-                        systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
+                        "Reconnect \(imports.sourceName), then choose Try Again.",
+                        systemImage: "externaldrive.badge.exclamationmark"
                     )
-                    .font(.title3.bold())
-                    .accessibilityIdentifier("recovery-title")
-                    .accessibilityFocused($titleFocused)
-                    Text(
-                        sourceAvailable
-                            ? "The import stopped before it finished. Nothing was lost."
-                            : "\(imports.completedUnits) items are safely in your catalog. The rest are still on the source."
-                    )
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    Label(
-                        "\(imports.completedUnits) items are safely in your catalog.",
-                        systemImage: "checkmark"
-                    )
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        .background.opacity(0.7),
-                        in: RoundedRectangle(cornerRadius: 10)
-                    )
-                    if !sourceAvailable {
-                        Label(
-                            "Reconnect \(imports.sourceName), then choose Try Again.",
-                            systemImage: "externaldrive.badge.exclamationmark"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("recovery-source-unavailable")
-                    }
+                    .accessibilityIdentifier("recovery-source-unavailable")
                 }
-                .padding(24)
             }
+            .padding(24)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) { recoveryActions }
+        .accessibilityIdentifier("recovery-modal")
+        .onAppear {
+            keyboardFocus = sourceAvailable ? .finish : .retry
+            titleFocused = true
+        }
+    }
+
+    private var recoveryActions: some View {
+        VStack(spacing: 0) {
             Divider()
             HStack {
                 Button("Stop Here…", action: onStop)
@@ -1293,13 +1308,6 @@ private struct RecoverySheet: View {
             }
             .padding(16)
             .background(.regularMaterial)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier("recovery-actions")
-        }
-        .accessibilityIdentifier("recovery-modal")
-        .onAppear {
-            keyboardFocus = sourceAvailable ? .finish : .retry
-            titleFocused = true
         }
     }
 }
