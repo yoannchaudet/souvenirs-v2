@@ -14,6 +14,23 @@ fn startup_failure_returns_structured_handshake_error() {
 }
 
 #[test]
+fn startup_failure_once_succeeds_on_retry() {
+    let marker = std::env::temp_dir().join(format!(
+        "souvenirs-fake-engine-retry-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker);
+
+    let first = run_with_retry_marker("startup-failure-once", &[handshake()], &marker);
+    assert_eq!(messages(&first)[0]["error"]["code"], "startup_failed");
+
+    let second = run_with_retry_marker("startup-failure-once", &[handshake()], &marker);
+    assert_eq!(messages(&second)[0]["result"]["type"], "handshake");
+
+    std::fs::remove_file(marker).expect("retry marker should be removed");
+}
+
+#[test]
 fn ready_scenario_rejects_requests_and_exits_cleanly_on_eof() {
     let output = run("ready", &[handshake(), start_request()]);
 
@@ -150,8 +167,24 @@ fn run(scenario: &str, requests: &[Value]) -> Output {
 }
 
 fn run_input(scenario: &str, input: &[u8]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_souvenirs-fake-engine"))
-        .args(["--scenario", scenario])
+    run_input_with_marker(scenario, input, None)
+}
+
+fn run_with_retry_marker(scenario: &str, requests: &[Value], marker: &std::path::Path) -> Output {
+    let mut input = Vec::new();
+    for request in requests {
+        writeln!(&mut input, "{request}").expect("request should be written");
+    }
+    run_input_with_marker(scenario, &input, Some(marker))
+}
+
+fn run_input_with_marker(scenario: &str, input: &[u8], marker: Option<&std::path::Path>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_souvenirs-fake-engine"));
+    command.args(["--scenario", scenario]);
+    if let Some(marker) = marker {
+        command.env("SOUVENIRS_FAKE_ENGINE_RETRY_MARKER", marker);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

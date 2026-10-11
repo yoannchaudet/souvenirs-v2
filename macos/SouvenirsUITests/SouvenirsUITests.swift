@@ -32,7 +32,7 @@ final class SouvenirsUITests: XCTestCase {
 
     @MainActor
     func testStartupFailureDisablesCatalogActionsAndSupportsRetry() throws {
-        let app = launch(scenario: "startup-failure")
+        let app = launch(scenario: "startup-failure-once")
 
         XCTAssertTrue(
             app.descendants(matching: .any)["catalog-actions-unavailable"]
@@ -47,11 +47,14 @@ final class SouvenirsUITests: XCTestCase {
 
         app.buttons["retry-engine"].click()
         XCTAssertTrue(app.buttons["retry-engine"].waitForNonExistence(timeout: 2))
-        XCTAssertTrue(
-            app.descendants(matching: .any)["catalog-actions-unavailable"]
-                .waitForExistence(timeout: 5)
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: app.buttons["create-catalog"]
         )
-        XCTAssertFalse(app.buttons["create-catalog"].isEnabled)
+        waitForExpectations(timeout: 5)
+        XCTAssertFalse(
+            app.descendants(matching: .any)["catalog-actions-unavailable"].exists
+        )
     }
 
     @MainActor
@@ -212,6 +215,14 @@ final class SouvenirsUITests: XCTestCase {
                 "target/debug/souvenirs-fake-engine"
             ).path
         app.launchEnvironment["SOUVENIRS_FAKE_ENGINE_SCENARIO"] = scenario
+        if scenario == "startup-failure-once" {
+            let marker = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("SouvenirsUITests-\(UUID().uuidString)")
+            app.launchEnvironment["SOUVENIRS_FAKE_ENGINE_RETRY_MARKER"] = marker.path
+            addTeardownBlock {
+                try? FileManager.default.removeItem(at: marker)
+            }
+        }
         app.launchEnvironment["SOUVENIRS_UI_TEST_DIRECTORY"] =
             "/Volumes/photos/Family Catalog"
         app.launch()
