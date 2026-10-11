@@ -86,14 +86,14 @@ final class CatalogWelcomeModel: ObservableObject {
     }
 
     @Published private(set) var route: Route = .welcome
-    @Published var catalogName = "Family Catalog"
+    @Published var catalogName = "Family Archive"
     @Published private(set) var selectedPath: String?
     @Published private(set) var validation: Validation = .none
     @Published private(set) var isWorking = false
     @Published private(set) var recents: [RecentCatalog]
     @Published private(set) var importPlanning: ImportPlanningModel?
     @Published var presentedError: String?
-    @Published private(set) var presentedErrorTitle = "Souvenirs couldn’t open this catalog"
+    @Published private(set) var presentedErrorTitle = "Souvenirs couldn’t open this archive"
 
     private let engine: CatalogEngineClient
     private let defaults: UserDefaults
@@ -164,7 +164,7 @@ final class CatalogWelcomeModel: ObservableObject {
             )
             showCatalog(location, name: catalogName)
         } catch {
-            presentedErrorTitle = "Souvenirs couldn’t create this catalog"
+            presentedErrorTitle = "Souvenirs couldn’t create this archive"
             presentedError = userMessage(for: error)
         }
     }
@@ -181,7 +181,7 @@ final class CatalogWelcomeModel: ObservableObject {
                     ?? URL(fileURLWithPath: path).lastPathComponent
             )
         } catch {
-            presentedErrorTitle = "Souvenirs couldn’t open this catalog"
+            presentedErrorTitle = "Souvenirs couldn’t open this archive"
             presentedError = userMessage(for: error)
         }
     }
@@ -228,8 +228,8 @@ final class CatalogWelcomeModel: ObservableObject {
     }
 
     private func userMessage(for error: Error) -> String {
-        if case EngineSupervisor.SupervisorError.protocolError(_, let message) = error {
-            return message
+        if case EngineSupervisor.SupervisorError.protocolError(let code, let message) = error {
+            return archiveUserMessage(code: code, message: message)
         }
         return error.localizedDescription
     }
@@ -448,8 +448,8 @@ final class ImportPlanningModel: ObservableObject {
     }
 
     private func userMessage(for error: Error) -> String {
-        if case EngineSupervisor.SupervisorError.protocolError(_, let message) = error {
-            return message
+        if case EngineSupervisor.SupervisorError.protocolError(let code, let message) = error {
+            return archiveUserMessage(code: code, message: message)
         }
         return error.localizedDescription
     }
@@ -459,5 +459,45 @@ final class ImportPlanningModel: ObservableObject {
             return nil
         }
         return code
+    }
+}
+
+func archiveUserMessage(code: String, message: String) -> String {
+    switch code {
+    case "catalog_already_exists":
+        return "This folder is already a Souvenirs archive."
+    case "catalog_configuration_mismatch":
+        return "This archive was created with different settings."
+    case "unsupported_catalog_version":
+        return "This archive uses a format that this version of Souvenirs cannot open."
+    case "catalog_io":
+        return """
+            Souvenirs couldn’t access this folder. Check that it’s available and allows changes, \
+            then try again.
+            """
+    case "invalid_catalog":
+        return "This archive is damaged or unreadable."
+    case "invalid_operation_journal":
+        return "Souvenirs couldn’t read this archive’s recovery information."
+    case "not_a_catalog":
+        return "This folder is not a Souvenirs archive. Choose a folder containing .souvenirs.yml."
+    case "synchronized_folder":
+        return """
+            This synchronized folder cannot hold an archive because it may rename files on its own.
+            """
+    case "catalog_error":
+        return "Souvenirs couldn’t access this archive. Check its folder or volume, then try again."
+    case "operation_conflict" where message.contains("catalog"):
+        return "The archive changed after review. Review the import again."
+    case "operation_failed" where message.contains("catalog"):
+        return "The import couldn’t update this archive. Check its folder or volume, then try again."
+    default:
+        if message.contains("catalog") {
+            return """
+                Souvenirs couldn’t complete this archive operation. Check the selected folders and \
+                volumes, then try again.
+                """
+        }
+        return message
     }
 }

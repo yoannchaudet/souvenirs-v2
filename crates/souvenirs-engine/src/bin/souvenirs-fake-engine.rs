@@ -794,7 +794,7 @@ fn catalog_result(output: &mut impl Write, request_id: String, path: String) -> 
             ResponseResult::Catalog(CatalogResult {
                 path,
                 volume_name: "photos-nas.local".to_owned(),
-                display_name: Some("Family Catalog".to_owned()),
+                display_name: Some("Family Archive".to_owned()),
                 detail: "Catalog format 2".to_owned(),
             }),
         ),

@@ -280,7 +280,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                 if code == "source_unavailable" {
                     await routeSourceUnavailable(operationID: operationID)
                 } else {
-                    phase = .failed(message)
+                    phase = .failed(archiveUserMessage(code: code, message: message))
                 }
             case .cancelled(let copiedCount):
                 completedUnits = UInt64(copiedCount)
@@ -320,7 +320,7 @@ final class ImportExecutionCoordinator: ObservableObject {
 
     private func routeSourceUnavailable(operationID: String) async {
         guard let catalog else {
-            phase = .failed("The source became unavailable, but the catalog is no longer open.")
+            phase = .failed("The source became unavailable, but the archive is no longer open.")
             return
         }
         do {
@@ -382,8 +382,8 @@ final class ImportExecutionCoordinator: ObservableObject {
     }
 
     private func userMessage(for error: Error) -> String {
-        if case EngineSupervisor.SupervisorError.protocolError(_, let message) = error {
-            return message
+        if case EngineSupervisor.SupervisorError.protocolError(let code, let message) = error {
+            return archiveUserMessage(code: code, message: message)
         }
         return error.localizedDescription
     }

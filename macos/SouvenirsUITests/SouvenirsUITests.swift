@@ -12,10 +12,16 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["engine-status"].waitForExistence(timeout: 5))
         let launcher = app.buttons["create-catalog"]
+        XCTAssertTrue(launcher.label.contains("Create a New Archive…"))
+        XCTAssertTrue(
+            app.buttons["open-catalog"].label.contains("Open an Existing Archive…")
+        )
         launcher.click()
         let sheet = app.sheets.firstMatch
         XCTAssertTrue(sheet.waitForExistence(timeout: 2))
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].exists)
+        XCTAssertTrue(sheet.staticTexts["New Archive"].exists)
+        XCTAssertTrue(sheet.buttons["Create Archive"].exists)
         let name = app.textFields["catalog-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 2))
         expectation(
@@ -49,6 +55,7 @@ final class SouvenirsUITests: XCTestCase {
         app.buttons["confirm-create-catalog"].click()
 
         XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Your archive is ready"].exists)
         XCTAssertTrue(app.staticTexts["catalog-health"].exists)
     }
 
@@ -60,6 +67,7 @@ final class SouvenirsUITests: XCTestCase {
             app.descendants(matching: .any)["catalog-actions-unavailable"]
                 .waitForExistence(timeout: 5)
         )
+        XCTAssertTrue(app.staticTexts["Archive actions unavailable"].exists)
         XCTAssertFalse(app.buttons["create-catalog"].isEnabled)
         XCTAssertFalse(app.buttons["open-catalog"].isEnabled)
         XCTAssertTrue(app.buttons["retry-engine"].isEnabled)
@@ -90,6 +98,11 @@ final class SouvenirsUITests: XCTestCase {
 
         XCTAssertTrue(
             app.staticTexts["catalog-location-error"].waitForExistence(timeout: 3)
+        )
+        XCTAssertTrue(
+            app.staticTexts[
+                "This synchronized folder cannot hold an archive because it may rename files on its own."
+            ].exists
         )
         XCTAssertFalse(app.buttons["confirm-create-catalog"].isEnabled)
 
@@ -268,6 +281,11 @@ final class SouvenirsUITests: XCTestCase {
         start.click()
 
         XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts[
+                "3 already in your archive were skipped · 2 remain on the source"
+            ].exists
+        )
         XCTAssertTrue(app.buttons["dismiss-import-completed"].exists)
     }
 
@@ -319,6 +337,11 @@ final class SouvenirsUITests: XCTestCase {
             sheet.descendants(matching: .any)
                 .matching(identifier: "recovery-counts").count,
             1
+        )
+        XCTAssertTrue(
+            sheet.staticTexts[
+                "7 items are safely in your archive. 5 items remain on EOS_DIGITAL."
+            ].exists
         )
         XCTAssertLessThan(
             sheet.descendants(matching: .any)["recovery-counts"].frame.minY,
