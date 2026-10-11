@@ -35,6 +35,9 @@ jobs:
         env:
           SWIFT_DERIVED_DATA_PATH: ${{ runner.temp }}/SouvenirsUIDerivedData
 
+      - name: Test release signing policy
+        run: just test-release-signing
+
       - name: Build and verify Release app
         run: |
           xcodebuild build \
