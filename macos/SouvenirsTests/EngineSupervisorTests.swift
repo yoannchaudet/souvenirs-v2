@@ -38,7 +38,7 @@ final class EngineSupervisorTests: XCTestCase {
             handshake,
             .init(
                 engineVersion: "0.2.0",
-                protocolVersion: 3,
+                protocolVersion: 4,
                 compatibleClientVersion: "0.2.0",
                 capabilities: ["operation.cancel"]
             )
