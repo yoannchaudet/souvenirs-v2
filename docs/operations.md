@@ -193,6 +193,7 @@ The build signs both executables with the same identity.
 Run `just build-release` to create and verify a Developer ID signed archive.
 The command requires one local Developer ID Application identity.
 The verification checks both signatures, Hardened Runtime flags, and signing teams.
+The verification also confirms that the app does not contain development engine overrides.
 The command requests a secure timestamp by default.
 Set `SOUVENIRS_TIMESTAMP=none` only for an offline local test build.
 An artifact without a secure timestamp must not be notarized or released.

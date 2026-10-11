@@ -30,6 +30,20 @@ jobs:
         env:
           SWIFT_DERIVED_DATA_PATH: ${{ runner.temp }}/SouvenirsStateDerivedData
 
+      - name: Verify Debug engine overrides
+        run: |
+          app="$RUNNER_TEMP/SouvenirsStateDerivedData/Build/Products/Debug/Souvenirs.app"
+          [[ -d "$app" ]] || {
+            echo "Debug app not found: $app" >&2
+            exit 1
+          }
+          for override in SOUVENIRS_ENGINE_EXECUTABLE SOUVENIRS_FAKE_ENGINE_SCENARIO; do
+            grep -aFrq -- "$override" "$app/Contents/MacOS" || {
+              echo "Debug app does not contain development engine override: $override" >&2
+              exit 1
+            }
+          done
+
       - name: Run Swift UI tests
         run: just test-ui
         env:
