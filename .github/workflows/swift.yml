@@ -25,6 +25,9 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Validate shared protocol contract
+        run: just test-protocol
+
       - name: Build and test Swift state
         run: just test-swift
         env:

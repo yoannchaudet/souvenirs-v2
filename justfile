@@ -15,6 +15,10 @@ test-core-performance:
 test-rust:
     cargo test --workspace --all-targets --all-features
 
+# Validate the shared protocol fixture and committed schema.
+test-protocol:
+    cargo test -p souvenirs-protocol --lib
+
 # Run macOS state and unit tests without launching UI automation.
 test-swift:
     xcodebuild test \

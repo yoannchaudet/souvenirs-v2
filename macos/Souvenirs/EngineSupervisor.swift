@@ -986,7 +986,7 @@ public actor EngineSupervisor {
 
     private func receiveEvent(_ line: Data) {
         do {
-            let event = try decodeOperationEvent(line)
+            let event = try Self.decodeOperationEvent(line)
             route(event)
         } catch let error as SupervisorError {
             failOperationMessage(line, error: error)
@@ -998,7 +998,7 @@ public actor EngineSupervisor {
         }
     }
 
-    private func decodeOperationEvent(_ line: Data) throws -> OperationEvent {
+    static func decodeOperationEvent(_ line: Data) throws -> OperationEvent {
         let envelope = try JSONDecoder().decode(OperationEventEnvelope.self, from: line)
         guard envelope.kind == "event" else {
             throw SupervisorError.malformedResponse(
@@ -1056,7 +1056,7 @@ public actor EngineSupervisor {
         )
     }
 
-    private func completedResult(from line: Data) throws -> Data {
+    private static func completedResult(from line: Data) throws -> Data {
         guard let object = try JSONSerialization.jsonObject(with: line)
             as? [String: Any],
             let result = object["result"] else {
@@ -1604,7 +1604,7 @@ private final class ProtocolLineReader: @unchecked Sendable {
     }
 }
 
-private struct RequestEnvelope<Parameters: Encodable>: Encodable {
+struct RequestEnvelope<Parameters: Encodable>: Encodable {
     let id: String
     let protocolVersion: UInt32
     let method: String
@@ -1618,7 +1618,7 @@ private struct RequestEnvelope<Parameters: Encodable>: Encodable {
     }
 }
 
-private struct HandshakeParameters: Encodable, Sendable {
+struct HandshakeParameters: Encodable, Sendable {
     let clientVersion: String
 
     enum CodingKeys: String, CodingKey {
@@ -1669,7 +1669,7 @@ struct ClientVersion: Comparable {
     }
 }
 
-private struct CancelOperationParameters: Encodable, Sendable {
+struct CancelOperationParameters: Encodable, Sendable {
     let operationID: String
 
     enum CodingKeys: String, CodingKey {
@@ -1682,7 +1682,7 @@ private struct CatalogValidationParameters: Encodable, Sendable {
     let intent: String
 }
 
-private struct CatalogPathParameters: Encodable, Sendable {
+struct CatalogPathParameters: Encodable, Sendable {
     let path: String
 }
 
@@ -1722,7 +1722,7 @@ private struct ImportReviewParameters: Encodable, Sendable {
     }
 }
 
-private struct SuccessResponse<Result: Decodable>: Decodable {
+struct SuccessResponse<Result: Decodable>: Decodable {
     let kind: String
     let id: String?
     let protocolVersion: UInt32
@@ -1738,11 +1738,11 @@ private struct SuccessResponse<Result: Decodable>: Decodable {
     }
 }
 
-private struct ErrorResponse: Decodable {
+struct ErrorResponse: Decodable {
     let error: ProtocolErrorResponse
 }
 
-private struct HandshakeResult: Decodable, Sendable {
+struct HandshakeResult: Decodable, Sendable {
     let type: String
     let engineVersion: String
     let protocolVersion: UInt32
@@ -1758,7 +1758,7 @@ private struct HandshakeResult: Decodable, Sendable {
     }
 }
 
-private struct OperationAcceptedResult: Decodable, Sendable {
+struct OperationAcceptedResult: Decodable, Sendable {
     let type: String
     let operationID: String
 
@@ -1768,7 +1768,7 @@ private struct OperationAcceptedResult: Decodable, Sendable {
     }
 }
 
-private struct CancellationAcceptedResult: Decodable, Sendable {
+struct CancellationAcceptedResult: Decodable, Sendable {
     let type: String
     let operationID: String
 
@@ -1907,7 +1907,7 @@ private struct ImportReviewResult: Decodable, Sendable {
     }
 }
 
-private struct OperationInspectionResult: Decodable, Sendable {
+struct OperationInspectionResult: Decodable, Sendable {
     let type: String
     let operation: EngineSupervisor.UnfinishedOperation?
 }
@@ -1938,7 +1938,7 @@ private struct OperationEventEnvelope: Decodable {
     }
 }
 
-private struct ProtocolErrorResponse: Decodable {
+struct ProtocolErrorResponse: Decodable {
     let code: String
     let message: String
 }
