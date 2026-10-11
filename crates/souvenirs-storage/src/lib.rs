@@ -25,9 +25,10 @@ pub use manifest::{ManifestReplacement, ManifestReplacementError, ManifestReplac
 #[cfg(feature = "test-failpoints")]
 pub use operation::Failpoint;
 pub use operation::{
-    is_operation_journal_file_name, read_operation_records, DurableTransition,
-    OperationInterruptionCause, OperationJournal, OperationJournalError, OperationOutcome,
-    OperationRecord, OperationTimestamp, RetainedDuplicate, RetainedDuplicateDisposition,
+    is_operation_journal_file_name, read_operation_records, read_timestamped_operation_records,
+    DurableTransition, OperationInterruptionCause, OperationJournal, OperationJournalError,
+    OperationOutcome, OperationRecord, OperationTimestamp, RetainedDuplicate,
+    RetainedDuplicateDisposition, TimestampedOperationRecord,
 };
 pub use recovery::{
     CancellableRecoveryOutcome, RecoveryCheckpoint, RecoveryCopy, RecoveryDirectory, RecoveryError,

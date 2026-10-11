@@ -1595,7 +1595,9 @@ private struct RecoverySheet: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Label(
                         sourceAvailable
-                            ? "Resume importing “\(imports.collectionName)”?"
+                            ? imports.remainingUnits == 0
+                                ? "Finish recovery for “\(imports.collectionName)”?"
+                                : "Resume importing “\(imports.collectionName)”?"
                             : "Connect \(imports.sourceName) to finish the import",
                         systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
                     )
@@ -1622,13 +1624,7 @@ private struct RecoverySheet: View {
                     value: "\(imports.sourceName) · \(sourceAvailable ? "Connected" : "Not connected")"
                     )
                     .accessibilityIdentifier("recovery-source-status")
-                    Text(
-                    "\(itemCount(imports.completedUnits)) "
-                        + "\(imports.completedUnits == 1 ? "is" : "are") safely in your catalog. "
-                        + "\(itemCount(imports.remainingUnits)) "
-                        + "\(imports.remainingUnits == 1 ? "remains" : "remain") "
-                        + "on \(imports.sourceName)."
-                    )
+                    Text(recoveryCountSummary)
                     .accessibilityIdentifier("recovery-counts")
                     Text(
                     "Stop Here… keeps the copied items and records the remaining items as not imported."
@@ -1718,6 +1714,18 @@ private struct RecoverySheet: View {
 
     private func itemCount(_ count: UInt64) -> String {
         "\(count) \(count == 1 ? "item" : "items")"
+    }
+
+    private var recoveryCountSummary: String {
+        let safe = "\(itemCount(imports.completedUnits)) "
+            + "\(imports.completedUnits == 1 ? "is" : "are") safely in your catalog."
+        if imports.remainingUnits == 0 {
+            return "\(safe) 0 items remain to copy from \(imports.sourceName). "
+                + "Recovery still needs to finish the catalog record."
+        }
+        return "\(safe) \(itemCount(imports.remainingUnits)) "
+            + "\(imports.remainingUnits == 1 ? "remains" : "remain") "
+            + "on \(imports.sourceName)."
     }
 }
 

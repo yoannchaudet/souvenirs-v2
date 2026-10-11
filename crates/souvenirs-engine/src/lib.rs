@@ -1615,10 +1615,9 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            last_record,
-            json!({"kind": "outcome", "outcome": "cancelled"})
-        );
+        assert_eq!(last_record["kind"], "outcome");
+        assert_eq!(last_record["outcome"], "cancelled");
+        assert!(last_record["recorded_at"].is_object());
 
         client.shutdown(Shutdown::Write).unwrap();
         engine_thread.join().unwrap();

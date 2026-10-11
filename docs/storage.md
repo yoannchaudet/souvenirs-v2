@@ -108,6 +108,8 @@ Inspection reports an explicit interruption cause only when the journal records 
 Otherwise, inspection reports `incomplete_without_terminal_record`.
 Inspection reports the last durable activity time when no interruption record supplies an exact time.
 Current source connection state does not define the historical interruption cause.
+A legacy unfinished journal without a durable time fails inspection.
+Recovery tools can still read its semantic records, but the macOS application does not invent time evidence.
 Completed journals are optional history and can be archived or deleted.
 
 ## Interruption and recovery

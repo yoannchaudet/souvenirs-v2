@@ -33,7 +33,7 @@ use souvenirs_domain::relationships::{
 };
 use souvenirs_domain::source::{SourceFile, SourceFileId, SourcePath};
 use souvenirs_storage::{
-    is_operation_journal_file_name, read_operation_records, CatalogConfig,
+    is_operation_journal_file_name, read_timestamped_operation_records, CatalogConfig,
     CatalogInitializationError, CatalogLayout, DurableTransition, OperationRecord,
     StorageCapabilities, StorageCapabilityError, WriteSuitability, FORMAT_VERSION,
 };
@@ -492,12 +492,17 @@ impl OperationInspectionService {
             {
                 continue;
             }
-            let records = read_operation_records(&path).map_err(|error| {
-                CatalogServiceError::InvalidOperationJournal {
-                    path: path.clone(),
-                    message: error.to_string(),
-                }
-            })?;
+            let timestamped_records =
+                read_timestamped_operation_records(&path).map_err(|error| {
+                    CatalogServiceError::InvalidOperationJournal {
+                        path: path.clone(),
+                        message: error.to_string(),
+                    }
+                })?;
+            let records = timestamped_records
+                .iter()
+                .map(|record| record.record.clone())
+                .collect::<Vec<_>>();
             if matches!(records.last(), Some(OperationRecord::Outcome { .. })) {
                 continue;
             }
@@ -535,35 +540,38 @@ impl OperationInspectionService {
                     ),
                 }
             })?;
-            let (interruption, activity_time) = records
-                .iter()
-                .rev()
-                .find_map(|record| match record {
-                    OperationRecord::Interruption {
-                        cause: souvenirs_storage::OperationInterruptionCause::SourceUnavailable,
-                        recorded_at,
-                    } => Some((
-                        UnfinishedOperationInterruption::SourceUnavailable,
-                        UnfinishedOperationActivityTime {
-                            kind: UnfinishedOperationActivityTimeKind::InterruptedAt,
-                            unix_seconds: recorded_at.unix_seconds,
-                            nanosecond: recorded_at.nanosecond,
-                        },
-                    )),
-                    OperationRecord::Activity { recorded_at } => Some((
-                        UnfinishedOperationInterruption::IncompleteWithoutTerminalRecord,
-                        UnfinishedOperationActivityTime {
-                            kind: UnfinishedOperationActivityTimeKind::LastRecordedActivity,
-                            unix_seconds: recorded_at.unix_seconds,
-                            nanosecond: recorded_at.nanosecond,
-                        },
-                    )),
-                    _ => None,
-                })
-                .ok_or_else(|| CatalogServiceError::InvalidOperationJournal {
+            let timestamped = timestamped_records.last().ok_or_else(|| {
+                CatalogServiceError::InvalidOperationJournal {
+                    path: path.clone(),
+                    message: "unfinished journal has no durable records".to_owned(),
+                }
+            })?;
+            let recorded_at = timestamped.recorded_at.ok_or_else(|| {
+                CatalogServiceError::InvalidOperationJournal {
                     path: path.clone(),
                     message: "unfinished journal has no durable activity timestamp".to_owned(),
-                })?;
+                }
+            })?;
+            let (interruption, activity_time) = match &timestamped.record {
+                OperationRecord::Interruption {
+                    cause: souvenirs_storage::OperationInterruptionCause::SourceUnavailable,
+                } => (
+                    UnfinishedOperationInterruption::SourceUnavailable,
+                    UnfinishedOperationActivityTime {
+                        kind: UnfinishedOperationActivityTimeKind::InterruptedAt,
+                        unix_seconds: recorded_at.unix_seconds,
+                        nanosecond: recorded_at.nanosecond,
+                    },
+                ),
+                _ => (
+                    UnfinishedOperationInterruption::IncompleteWithoutTerminalRecord,
+                    UnfinishedOperationActivityTime {
+                        kind: UnfinishedOperationActivityTimeKind::LastRecordedActivity,
+                        unix_seconds: recorded_at.unix_seconds,
+                        nanosecond: recorded_at.nanosecond,
+                    },
+                ),
+            };
             return Ok(Some(UnfinishedOperation {
                 operation_id: operation_id.clone(),
                 collection_name: collection_name.clone(),

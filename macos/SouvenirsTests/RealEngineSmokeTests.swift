@@ -570,9 +570,10 @@ final class RealEngineSmokeTests: XCTestCase {
         let lastLine = try XCTUnwrap(lines.last)
         let outcome = try JSONSerialization.jsonObject(
             with: Data(lastLine.utf8)
-        ) as? [String: String]
-        XCTAssertEqual(outcome?["kind"], "outcome")
-        XCTAssertEqual(outcome?["outcome"], "cancelled")
+        ) as? [String: Any]
+        XCTAssertEqual(outcome?["kind"] as? String, "outcome")
+        XCTAssertEqual(outcome?["outcome"] as? String, "cancelled")
+        XCTAssertNotNil(outcome?["recorded_at"] as? [String: Any])
     }
 }
 
