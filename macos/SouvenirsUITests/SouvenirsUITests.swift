@@ -179,7 +179,7 @@ final class SouvenirsUITests: XCTestCase {
             evaluatedWith: start
         )
         waitForExpectations(timeout: 3)
-        app.typeKey(.return, modifierFlags: [])
+        start.click()
 
         XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["dismiss-import-completed"].exists)
@@ -196,7 +196,7 @@ final class SouvenirsUITests: XCTestCase {
             evaluatedWith: start
         )
         waitForExpectations(timeout: 3)
-        app.typeKey(.return, modifierFlags: [])
+        start.click()
 
         let recoverySheet = activeSheet(app)
         XCTAssertTrue(
