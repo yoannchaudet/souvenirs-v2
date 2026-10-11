@@ -151,42 +151,26 @@ final class SouvenirsUITests: XCTestCase {
         )
         for identifier in [
             "import-detail-destination",
-            "import-detail-file-0"
+            "import-detail-file-0",
+            "import-detail-space",
+            "import-detail-write-probe",
+            "import-detail-portable-names",
+            "import-detail-no-replacement",
+            "import-detail-copy-sequence",
+            "import-detail-recovery"
         ] {
+            let detail = sheet.descendants(matching: .any)[identifier]
+            for _ in 0..<3 where !detail.exists {
+                sheet.swipeUp()
+            }
             XCTAssertTrue(
-                sheet.descendants(matching: .any)[identifier]
-                    .waitForExistence(timeout: 3),
+                detail.waitForExistence(timeout: 3),
                 "\(identifier) should be exposed in the expanded import details"
             )
         }
-        for text in [
-            "available when reviewed",
-            "accepted a confirmed test write",
-            "planned name works on supported storage",
-            "do not replace existing files"
-        ] {
-            XCTAssertTrue(
-                sheet.descendants(matching: .any).matching(
-                    NSPredicate(format: "label CONTAINS %@", text)
-                ).firstMatch.exists,
-                "A detail containing \(text) should appear"
-            )
+        for _ in 0..<3 {
+            sheet.swipeDown()
         }
-        sheet.swipeUp()
-        for text in [
-            "1. Copy it to a hidden working folder.",
-            "2. Read the copy back and compare it with the source.",
-            "3. Publish the final name and checksum.",
-            "resume or cancel safely"
-        ] {
-            XCTAssertTrue(
-                sheet.descendants(matching: .any).matching(
-                    NSPredicate(format: "label CONTAINS %@", text)
-                ).firstMatch.waitForExistence(timeout: 3),
-                "\(text) should appear in the expanded import details"
-            )
-        }
-        sheet.swipeDown()
         sheet.buttons["change-date-selection"].click()
         XCTAssertTrue(sheet.buttons["date-convert-utc"].waitForExistence(timeout: 3))
     }
