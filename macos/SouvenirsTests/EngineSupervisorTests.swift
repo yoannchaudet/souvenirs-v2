@@ -91,7 +91,7 @@ final class EngineSupervisorTests: XCTestCase {
             _ = try await supervisor.handshake()
             XCTFail("Expected the incompatible protocol to be reported")
         } catch let error as EngineSupervisor.SupervisorError {
-            XCTAssertEqual(error, .incompatibleProtocol(expected: 2, actual: 1))
+            XCTAssertEqual(error, .incompatibleProtocol(expected: 3, actual: 1))
         }
 
         try await supervisor.stop()
@@ -111,7 +111,7 @@ final class EngineSupervisorTests: XCTestCase {
             _ = try await supervisor.handshake()
             XCTFail("Expected the incompatible protocol to be reported")
         } catch let error as EngineSupervisor.SupervisorError {
-            XCTAssertEqual(error, .incompatibleProtocol(expected: 2, actual: 1))
+            XCTAssertEqual(error, .incompatibleProtocol(expected: 3, actual: 1))
         }
 
         try await supervisor.stop()
@@ -121,7 +121,7 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeHandshakeFixture(
             response:
                 """
-                {"id":"macos-handshake-1","protocol_version":3,"future_result":{}}
+                {"id":"macos-handshake-1","protocol_version":4,"future_result":{}}
                 """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
@@ -131,7 +131,7 @@ final class EngineSupervisorTests: XCTestCase {
             _ = try await supervisor.handshake()
             XCTFail("Expected the incompatible protocol to be reported")
         } catch let error as EngineSupervisor.SupervisorError {
-            XCTAssertEqual(error, .incompatibleProtocol(expected: 2, actual: 3))
+            XCTAssertEqual(error, .incompatibleProtocol(expected: 3, actual: 4))
         }
 
         try await supervisor.stop()

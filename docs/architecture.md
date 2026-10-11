@@ -225,6 +225,9 @@ The `catalog.collections` query returns engine-owned collection identities.
 A dated identity contains the exact year directory and collection directory.
 An ongoing identity contains the portable label collision key.
 Each ongoing result also contains the exact annual part directories.
+The earliest annual part supplies the ongoing display label.
+Dated collections sort by date range, label, and exact identity.
+Ongoing collections follow dated collections and sort by collision key.
 
 ### Engine
 

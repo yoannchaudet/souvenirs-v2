@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public actor EngineSupervisor {
-    public static let protocolVersion: UInt32 = 2
+    public static let protocolVersion: UInt32 = 3
     public static let protocolClientVersion = "0.2.0"
 
     public struct Handshake: Equatable, Sendable {

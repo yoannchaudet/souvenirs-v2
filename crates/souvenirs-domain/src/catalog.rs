@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 
 use time::macros::format_description;
 use time::{Date, Duration, PrimitiveDateTime};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::names::{CatalogLabel, NameError, PortableComponent};
 
@@ -92,7 +93,10 @@ pub fn parse_collection_directory(
 
     if let Some(label) = directory.strip_prefix("z ") {
         let label = CatalogLabel::new(label).ok()?;
-        if ongoing_collection_directory(&label).ok()?.as_str() != directory {
+        if !is_canonical_directory_name(
+            directory,
+            ongoing_collection_directory(&label).ok()?.as_str(),
+        ) {
             return None;
         }
         return Some(ParsedCollectionDirectory::OngoingPart {
@@ -122,7 +126,7 @@ pub fn parse_collection_directory(
     let end = start.checked_add(Duration::days(span_days))?;
     let label = CatalogLabel::new(label).ok()?;
     let range = DatedCollectionRange::new(start, end).ok()?;
-    if range.folder_name(&label).ok()?.as_str() != directory {
+    if !is_canonical_directory_name(directory, range.folder_name(&label).ok()?.as_str()) {
         return None;
     }
     Some(ParsedCollectionDirectory::Dated {
@@ -133,6 +137,10 @@ pub fn parse_collection_directory(
         label,
         range,
     })
+}
+
+fn is_canonical_directory_name(actual: &str, canonical: &str) -> bool {
+    actual.nfc().eq(canonical.chars())
 }
 
 pub fn parse_year_directory(value: &str) -> Option<i32> {
@@ -520,6 +528,37 @@ mod tests {
                 label: CatalogLabel::new("Kids").unwrap(),
                 year: 2024,
                 directory: PortableComponent::new("z Kids").unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn preserves_exact_decomposed_collection_directories() {
+        let decomposed_label = "Cafe\u{301}";
+        let dated_directory = format!("2024-01-01 {decomposed_label}");
+        assert_eq!(
+            parse_collection_directory("2024", &dated_directory),
+            Some(ParsedCollectionDirectory::Dated {
+                identity: CollectionIdentity::Dated {
+                    year: PortableComponent::new("2024").unwrap(),
+                    directory: PortableComponent::new(&dated_directory).unwrap(),
+                },
+                label: CatalogLabel::new(decomposed_label).unwrap(),
+                range: DatedCollectionRange::new(
+                    date(2024, Month::January, 1),
+                    date(2024, Month::January, 1),
+                )
+                .unwrap(),
+            })
+        );
+
+        let ongoing_directory = format!("z {decomposed_label}");
+        assert_eq!(
+            parse_collection_directory("2024", &ongoing_directory),
+            Some(ParsedCollectionDirectory::OngoingPart {
+                label: CatalogLabel::new(decomposed_label).unwrap(),
+                year: 2024,
+                directory: PortableComponent::new(ongoing_directory).unwrap(),
             })
         );
     }
