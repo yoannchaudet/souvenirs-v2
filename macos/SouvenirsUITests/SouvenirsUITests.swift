@@ -157,17 +157,19 @@ final class SouvenirsUITests: XCTestCase {
             "3. Publish the final name and checksum."
         ] {
             XCTAssertTrue(
-                sheet.staticTexts[text].waitForExistence(timeout: 3),
+                sheet.descendants(matching: .any).matching(
+                    NSPredicate(format: "label == %@", text)
+                ).firstMatch.waitForExistence(timeout: 3),
                 "\(text) should appear in the expanded import details"
             )
         }
         XCTAssertTrue(
-            sheet.staticTexts.matching(
+            sheet.descendants(matching: .any).matching(
                 NSPredicate(format: "label CONTAINS %@", "available when reviewed")
             ).firstMatch.exists
         )
         XCTAssertTrue(
-            sheet.staticTexts.matching(
+            sheet.descendants(matching: .any).matching(
                 NSPredicate(format: "label CONTAINS %@", "resume or cancel safely")
             ).firstMatch.exists
         )
