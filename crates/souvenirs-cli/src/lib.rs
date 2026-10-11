@@ -15,12 +15,14 @@ use souvenirs_domain::catalog::{
     allocate_collection_counters, year_directory, CanonicalFilename, CanonicalStem,
     DatedCollectionRange, NewItemCounterRequest,
 };
+use souvenirs_domain::datetime::{resolve_datetime, DateTimeResolution};
 use souvenirs_domain::names::CatalogLabel;
 use souvenirs_domain::plan::{
     constrain_import_plan_schema, CatalogSnapshot, ContentDigest, ImportPlan, ManifestFingerprint,
-    PlanDateTime, PlanDateTimeProvenance, PlanDocument, PlanFile, PlanFileRole, PlanId, PlanItem,
-    PlanItemDisposition, PlanItemFinding, PlanStep, PlanStepKind, PlanTimestamp, SourceSnapshot,
-    UnhandledContent, UnhandledContentFinding, IMPORT_PLAN_SCHEMA_VERSION,
+    PlanDateTime, PlanDateTimeCandidate, PlanDateTimeProvenance, PlanDocument, PlanFile,
+    PlanFileRole, PlanId, PlanItem, PlanItemDisposition, PlanItemFinding, PlanStep, PlanStepKind,
+    PlanTimestamp, SourceSnapshot, UnhandledContent, UnhandledContentFinding,
+    IMPORT_PLAN_SCHEMA_VERSION,
 };
 use souvenirs_domain::relationships::{
     resolve_directory_relationships, sidecar_suffix_for_item, RelationshipFinding,
@@ -31,14 +33,14 @@ use souvenirs_domain::source::{
     SourcePath,
 };
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError, ManifestReplacementRequest,
-    OperationJournal, OperationOutcome, OperationRecord, PortableDestinationObserver, RecoveryCopy,
-    RecoveryDirectory, RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest,
-    FORMAT_VERSION,
+    is_operation_journal_file_name, CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError,
+    ManifestReplacementRequest, OperationJournal, OperationOutcome, OperationRecord,
+    PortableDestinationObserver, RecoveryCopy, RecoveryDirectory, RecoveryManifest, RecoveryMode,
+    RecoveryOutcome, RecoveryRequest, FORMAT_VERSION,
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
-const SOURCE_SCAN_SCHEMA_VERSION: u32 = 2;
+const SOURCE_SCAN_SCHEMA_VERSION: u32 = 3;
 
 pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
@@ -234,11 +236,13 @@ pub struct ScannedFile {
 pub struct ScannedMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apple_content_identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub datetime_candidates: Vec<PlanDateTimeCandidate>,
 }
 
 impl ScannedMetadata {
     fn is_empty(&self) -> bool {
-        self.apple_content_identifier.is_none()
+        self.apple_content_identifier.is_none() && self.datetime_candidates.is_empty()
     }
 }
 
@@ -253,7 +257,7 @@ pub enum ScannedFileKind {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredPlan {
-    #[schemars(range(min = 1, max = 2))]
+    #[schemars(range(min = 1, max = 3))]
     pub schema_version: u32,
     pub confirmed: bool,
     #[schemars(with = "String")]
@@ -349,6 +353,7 @@ struct RecoveryResult {
 struct IntegrityResult {
     catalog: PathBuf,
     valid: bool,
+    coverage_complete: bool,
     checked_files: usize,
     checked_manifests: usize,
     findings: Vec<IntegrityFinding>,
@@ -370,6 +375,14 @@ enum IntegrityFinding {
         path: PathBuf,
         expected: String,
         actual: String,
+    },
+    UnreadableFile {
+        path: PathBuf,
+        error: String,
+    },
+    UnreadableCollection {
+        collection: PathBuf,
+        error: String,
     },
 }
 
@@ -653,6 +666,12 @@ fn import_plan(
         .map_err(|error| CliError::invalid_data(format!("invalid collection: {error}")))?;
     let scan: SourceScan = read_json(snapshot)?;
     validate_scan(&scan)?;
+    if scan.schema_version < SOURCE_SCAN_SCHEMA_VERSION {
+        return Err(CliError::invalid_data(format!(
+            "source scan schema version {} does not retain datetime candidates; run import scan again",
+            scan.schema_version
+        )));
+    }
     let current_scan = scan_source(&scan.source_root, scan.schema_version)?;
     if current_scan.fingerprint != scan.fingerprint {
         return Err(CliError::conflict(
@@ -716,6 +735,38 @@ fn import_plan(
     }
     let mut unresolved_items = BTreeMap::new();
     let mut unhandled_content = Vec::new();
+    let mut datetime_disagreements = relationships
+        .items
+        .iter()
+        .map(|item| {
+            let disagreements = if item.status == RelationshipStatus::Resolved {
+                match resolve_datetime(
+                    std::iter::once(&item.primary)
+                        .chain(item.sidecars.iter())
+                        .flat_map(|id| {
+                            source_by_id[id]
+                                .metadata
+                                .datetime_candidates
+                                .iter()
+                                .cloned()
+                        }),
+                ) {
+                    DateTimeResolution::Accepted { disagreements, .. } => disagreements,
+                    DateTimeResolution::NeedsConfirmation(pending) => pending.disagreements,
+                    DateTimeResolution::Missing => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            (
+                item.primary.as_str().to_owned(),
+                disagreements
+                    .into_iter()
+                    .map(PlanDateTimeCandidate::from)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     for finding in &relationships.findings {
         match finding {
             RelationshipFinding::AmbiguousRawJpeg(files) => {
@@ -913,6 +964,16 @@ fn import_plan(
             item_id: item.primary.as_str().to_owned(),
             files,
             accepted_datetime: Some(plan_datetime(accepted_at)),
+            datetime_disagreements: Some(
+                datetime_disagreements
+                    .remove(item.primary.as_str())
+                    .ok_or_else(|| {
+                        CliError::invalid_data(format!(
+                            "logical item '{}' has no datetime disagreement evidence",
+                            item.primary.as_str()
+                        ))
+                    })?,
+            ),
             disposition,
         });
     }
@@ -1231,27 +1292,78 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
     let layout = require_catalog(catalog)?;
     let mut checked_files = 0_usize;
     let mut checked_manifests = 0_usize;
+    let mut coverage_complete = true;
     let mut findings = Vec::new();
     for collection in collection_directories(layout.root())? {
         let manifest_path = collection.join("SHA256SUMS");
-        if !manifest_path.is_file() {
+        let manifest_is_file = match fs::metadata(&manifest_path) {
+            Ok(metadata) => metadata.is_file(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                coverage_complete = false;
+                findings.push(IntegrityFinding::UnreadableFile {
+                    path: relative_to(layout.root(), &manifest_path)?,
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if !manifest_is_file {
             findings.push(IntegrityFinding::MissingManifest {
                 collection: relative_to(layout.root(), &collection)?,
             });
             continue;
         }
-        checked_manifests += 1;
-        let manifest = existing_manifest_lines(&manifest_path)?;
-        let files = inspect_collection_files(&collection)?;
-        for (filename, expected) in &manifest {
-            let path = collection.join(filename);
-            if !path.is_file() {
-                findings.push(IntegrityFinding::MissingFile {
-                    path: relative_to(layout.root(), &path)?,
+        let manifest = match existing_manifest_lines(&manifest_path) {
+            Ok(manifest) => manifest,
+            Err(error) if error.code == "io" => {
+                coverage_complete = false;
+                findings.push(IntegrityFinding::UnreadableFile {
+                    path: relative_to(layout.root(), &manifest_path)?,
+                    error: error.message,
                 });
                 continue;
             }
-            let (actual, _) = digest_file(&path)?;
+            Err(error) => return Err(error),
+        };
+        checked_manifests += 1;
+        for (filename, expected) in &manifest {
+            let path = collection.join(filename);
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => {
+                    findings.push(IntegrityFinding::MissingFile {
+                        path: relative_to(layout.root(), &path)?,
+                    });
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    findings.push(IntegrityFinding::MissingFile {
+                        path: relative_to(layout.root(), &path)?,
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    coverage_complete = false;
+                    findings.push(IntegrityFinding::UnreadableFile {
+                        path: relative_to(layout.root(), &path)?,
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+            }
+            let (actual, _) = match digest_file(&path) {
+                Ok(digest) => digest,
+                Err(error) if error.code == "io" => {
+                    coverage_complete = false;
+                    findings.push(IntegrityFinding::UnreadableFile {
+                        path: relative_to(layout.root(), &path)?,
+                        error: error.message,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             checked_files += 1;
             if actual.as_str() != expected {
                 findings.push(IntegrityFinding::DigestMismatch {
@@ -1261,6 +1373,18 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
                 });
             }
         }
+        let files = match inspect_collection_files(&collection) {
+            Ok(files) => files,
+            Err(error) if error.code == "io" => {
+                coverage_complete = false;
+                findings.push(IntegrityFinding::UnreadableCollection {
+                    collection: relative_to(layout.root(), &collection)?,
+                    error: error.message,
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let mut unexpected = files
             .originals
             .difference(&manifest.keys().cloned().collect())
@@ -1277,7 +1401,8 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
         "integrity.check",
         IntegrityResult {
             catalog: canonical_path(layout.root())?,
-            valid: findings.is_empty(),
+            valid: coverage_complete && findings.is_empty(),
+            coverage_complete,
             checked_files,
             checked_manifests,
             findings,
@@ -2054,11 +2179,23 @@ fn scan_file(
     schema_version: u32,
 ) -> Result<ScannedFile, CliError> {
     let (digest, size_bytes) = digest_file(absolute)?;
-    let metadata = if schema_version >= 2 {
+    let metadata = if schema_version >= 3 {
+        let metadata = souvenirs_metadata::normalized_metadata(absolute)
+            .map_err(|error| CliError::invalid_data(error.to_string()))?;
+        ScannedMetadata {
+            apple_content_identifier: metadata.apple_content_identifier,
+            datetime_candidates: metadata
+                .datetime_candidates
+                .into_iter()
+                .map(PlanDateTimeCandidate::from)
+                .collect(),
+        }
+    } else if schema_version >= 2 {
         let metadata = souvenirs_metadata::relationship_metadata(absolute)
             .map_err(|error| CliError::invalid_data(error.to_string()))?;
         ScannedMetadata {
             apple_content_identifier: metadata.apple_content_identifier,
+            datetime_candidates: Vec::new(),
         }
     } else {
         ScannedMetadata::default()
@@ -2161,7 +2298,14 @@ fn source_file(
         extension,
         kind,
         metadata: SourceMetadata {
-            datetime_candidates: Vec::new(),
+            datetime_candidates: metadata
+                .datetime_candidates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()
+                .map_err(|error: souvenirs_domain::plan::PlanError| {
+                    CliError::invalid_data(error.to_string())
+                })?,
             camera: CameraIdentity {
                 make: None,
                 model: None,
@@ -2558,7 +2702,7 @@ fn jsonl_files(path: &Path) -> Result<Vec<PathBuf>, CliError> {
     let mut files = fs::read_dir(path)
         .map_err(|error| CliError::io(format!("read journal directory: {error}")))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("jsonl"))
+        .filter(|path| path.file_name().is_some_and(is_operation_journal_file_name))
         .collect::<Vec<_>>();
     files.sort();
     Ok(files)

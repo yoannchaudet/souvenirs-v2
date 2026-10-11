@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, CopyExpectation, DurableTransition, Failpoint,
-    ManifestReplacementRequest, OperationJournal, OperationJournalError, OperationRecord,
-    RecoveryCopy, RecoveryDirectory, RecoveryError, RecoveryManifest, RecoveryMode,
-    RecoveryOutcome, RecoveryRequest,
+    CancellableRecoveryOutcome, CatalogConfig, CatalogLayout, CatalogLock, CopyExpectation,
+    DurableTransition, Failpoint, ManifestReplacementRequest, OperationJournal,
+    OperationJournalError, OperationRecord, RecoveryCheckpoint, RecoveryCopy, RecoveryDirectory,
+    RecoveryError, RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest,
 };
 use tempfile::TempDir;
 
@@ -323,6 +323,66 @@ fn resumes_forward_from_every_durable_failpoint() {
             RecoveryOutcome::Completed
         );
     }
+}
+
+#[test]
+fn interruption_after_manifest_recovery_leaves_a_durable_nonterminal_boundary() {
+    let scenario = Scenario::new(Failpoint::ManifestIntentPersisted);
+    let manifest_path = scenario.layout.root().join("2026/SHA256SUMS");
+
+    let outcome = scenario
+        .layout
+        .recover_operation_cancellable(
+            &scenario.lock,
+            &scenario.journal_path,
+            scenario.request(),
+            |checkpoint| {
+                checkpoint == RecoveryCheckpoint::DurableBoundary && manifest_path.is_file()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(outcome, CancellableRecoveryOutcome::Interrupted);
+    assert_eq!(fs::read(&manifest_path).unwrap(), scenario.manifest);
+    assert_no_outcome(&operation_records(&scenario.journal_path));
+
+    let mut cancellation = scenario.request();
+    cancellation.mode = RecoveryMode::CancelRemainingCopies;
+    assert_eq!(
+        scenario
+            .layout
+            .recover_operation(&scenario.lock, &scenario.journal_path, cancellation)
+            .unwrap(),
+        RecoveryOutcome::Cancelled
+    );
+}
+
+#[test]
+fn interruption_wins_before_the_terminal_recovery_boundary() {
+    let scenario = Scenario::new(Failpoint::ManifestPublished);
+
+    let outcome = scenario
+        .layout
+        .recover_operation_cancellable(
+            &scenario.lock,
+            &scenario.journal_path,
+            scenario.request(),
+            |checkpoint| checkpoint == RecoveryCheckpoint::CompletionBoundary,
+        )
+        .unwrap();
+
+    assert_eq!(outcome, CancellableRecoveryOutcome::Interrupted);
+    assert_no_outcome(&operation_records(&scenario.journal_path));
+
+    let mut cancellation = scenario.request();
+    cancellation.mode = RecoveryMode::CancelRemainingCopies;
+    assert_eq!(
+        scenario
+            .layout
+            .recover_operation(&scenario.lock, &scenario.journal_path, cancellation)
+            .unwrap(),
+        RecoveryOutcome::Cancelled
+    );
 }
 
 #[test]

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -13,10 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_storage::{
-    is_source_unavailable_error, read_operation_records, CatalogLayout, CatalogLock,
-    CatalogPathError, CopyExpectation, ManifestReplacementRequest, OperationJournal,
-    OperationRecord, PortableDestinationObserver, RecoveryCopy, RecoveryDirectory, RecoveryError,
-    RecoveryManifest, RecoveryMode, RecoveryRequest, VerifiedCopyError,
+    is_operation_journal_file_name, is_source_unavailable_error, read_operation_records,
+    CancellableRecoveryOutcome, CatalogLayout, CatalogLock, CatalogPathError, CopyExpectation,
+    ManifestReplacementRequest, OperationJournal, OperationRecord, PortableDestinationObserver,
+    RecoveryCheckpoint, RecoveryCopy, RecoveryDirectory, RecoveryError, RecoveryManifest,
+    RecoveryMode, RecoveryRequest, VerifiedCopyError,
 };
 use time::Date;
 
@@ -567,6 +568,22 @@ impl ImportRecoveryService {
         catalog_path: impl AsRef<Path>,
         operation_id: &str,
         mode: ImportRecoveryMode,
+        progress: impl FnMut(OperationProgress),
+    ) -> Result<(RecoveryOutcome, ImportExecutionOutcome), ImportExecutionError> {
+        Self::recover_cancellable(
+            catalog_path,
+            operation_id,
+            mode,
+            &ImportCancellation::default(),
+            progress,
+        )
+    }
+
+    pub fn recover_cancellable(
+        catalog_path: impl AsRef<Path>,
+        operation_id: &str,
+        mode: ImportRecoveryMode,
+        cancellation: &ImportCancellation,
         mut progress: impl FnMut(OperationProgress),
     ) -> Result<(RecoveryOutcome, ImportExecutionOutcome), ImportExecutionError> {
         let catalog_path = catalog_path.as_ref();
@@ -579,63 +596,127 @@ impl ImportRecoveryService {
         if mode == ImportRecoveryMode::Resume {
             validate_recovery_sources(&layout, &plan, &published)?;
         }
-        let (manifest_contents, cancelled_copy_count) = match mode {
-            ImportRecoveryMode::Resume => (plan.manifest.contents.clone(), 0),
-            ImportRecoveryMode::Cancel => cancellation_manifest(&layout, &plan, &published)?,
+        let total_count = plan.copies.len();
+        let (mut outcome, mut cancelled_copy_count) = match mode {
+            ImportRecoveryMode::Resume => {
+                let request =
+                    recovery_request(&plan, RecoveryMode::Resume, plan.manifest.contents.clone());
+                let mut reported_count = published.values().filter(|state| state.published).count();
+                let mut progress_reader =
+                    RecoveryProgressReader::new(&journal_path, reported_count)?;
+                let mut checkpoint_error = None;
+                let outcome = layout
+                    .recover_operation_cancellable(&lock, &journal_path, request, |checkpoint| {
+                        match checkpoint {
+                            RecoveryCheckpoint::DurableBoundary => {
+                                match progress_reader.refresh() {
+                                    Ok(copied_count) if copied_count != reported_count => {
+                                        reported_count = copied_count;
+                                        progress(OperationProgress {
+                                            completed_units: copied_count as u64,
+                                            total_units: total_count as u64,
+                                            message: format!(
+                                                "Recovered {copied_count} of {total_count}"
+                                            ),
+                                        });
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        checkpoint_error = Some(error);
+                                        return true;
+                                    }
+                                }
+                                cancellation.is_requested()
+                            }
+                            RecoveryCheckpoint::CompletionBoundary => {
+                                !cancellation.begin_completion()
+                            }
+                        }
+                    })
+                    .map_err(import_recovery_error)?;
+                if let Some(error) = checkpoint_error {
+                    return Err(error);
+                }
+                (outcome, 0)
+            }
+            ImportRecoveryMode::Cancel => {
+                let (manifest_contents, copied_count) =
+                    cancellation_manifest(&layout, &plan, &published)?;
+                let request = recovery_request(
+                    &plan,
+                    RecoveryMode::CancelRemainingCopies,
+                    manifest_contents,
+                );
+                (
+                    CancellableRecoveryOutcome::Finished(
+                        layout
+                            .recover_operation(&lock, journal_path.clone(), request)
+                            .map_err(import_recovery_error)?,
+                    ),
+                    copied_count,
+                )
+            }
         };
-        let request = RecoveryRequest {
-            mode: match mode {
-                ImportRecoveryMode::Resume => RecoveryMode::Resume,
-                ImportRecoveryMode::Cancel => RecoveryMode::CancelRemainingCopies,
-            },
-            directories: plan
-                .directories
-                .iter()
-                .filter(|directory| directory.create)
-                .map(|directory| RecoveryDirectory {
-                    step_id: directory.step_id.clone(),
-                    path: directory.path.clone(),
-                })
-                .collect(),
-            copies: plan
-                .copies
-                .iter()
-                .map(|copy| RecoveryCopy {
-                    step_id: copy.step_id.clone(),
-                    source: copy.source.clone(),
-                    destination: copy.destination.clone(),
-                    expected_sha256: copy.digest.clone(),
-                    expected_size_bytes: copy.size_bytes,
-                })
-                .collect(),
-            manifests: vec![RecoveryManifest {
-                step_id: plan.manifest.step_id.clone(),
-                path: plan.manifest.path.clone(),
-                previous_sha256: plan.manifest.previous_digest.clone(),
-                contents: manifest_contents,
-            }],
-        };
-        let outcome = layout
-            .recover_operation(&lock, journal_path, request)
-            .map_err(import_recovery_error)?;
+        if outcome == CancellableRecoveryOutcome::Interrupted {
+            let (current_journal_path, current_plan, current_published) =
+                unfinished_plan(&layout, operation_id)?;
+            let (manifest_contents, copied_count) =
+                cancellation_manifest(&layout, &current_plan, &current_published)?;
+            let request = recovery_request(
+                &current_plan,
+                RecoveryMode::CancelRemainingCopies,
+                manifest_contents,
+            );
+            outcome = CancellableRecoveryOutcome::Finished(
+                layout
+                    .recover_operation(&lock, current_journal_path, request)
+                    .map_err(import_recovery_error)?,
+            );
+            cancelled_copy_count = copied_count;
+        }
         lock.release()
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
         let copied_count = match outcome {
-            souvenirs_storage::RecoveryOutcome::Completed => plan.copies.len(),
-            souvenirs_storage::RecoveryOutcome::Cancelled => cancelled_copy_count,
+            CancellableRecoveryOutcome::Finished(souvenirs_storage::RecoveryOutcome::Completed) => {
+                plan.copies.len()
+            }
+            CancellableRecoveryOutcome::Finished(souvenirs_storage::RecoveryOutcome::Cancelled) => {
+                cancelled_copy_count
+            }
+            CancellableRecoveryOutcome::Interrupted => {
+                unreachable!("interrupted recovery is finalized before releasing the catalog lock")
+            }
         };
         progress(OperationProgress {
             completed_units: copied_count as u64,
             total_units: plan.copies.len() as u64,
             message: match outcome {
-                souvenirs_storage::RecoveryOutcome::Completed => "Recovery completed".to_owned(),
-                souvenirs_storage::RecoveryOutcome::Cancelled => "Recovery cancelled".to_owned(),
+                CancellableRecoveryOutcome::Finished(
+                    souvenirs_storage::RecoveryOutcome::Completed,
+                ) => "Recovery completed".to_owned(),
+                CancellableRecoveryOutcome::Finished(
+                    souvenirs_storage::RecoveryOutcome::Cancelled,
+                ) => "Recovery cancelled".to_owned(),
+                CancellableRecoveryOutcome::Interrupted => {
+                    unreachable!(
+                        "interrupted recovery is finalized before emitting terminal progress"
+                    )
+                }
             },
         });
         Ok((
             match outcome {
-                souvenirs_storage::RecoveryOutcome::Completed => RecoveryOutcome::Completed,
-                souvenirs_storage::RecoveryOutcome::Cancelled => RecoveryOutcome::Cancelled,
+                CancellableRecoveryOutcome::Finished(
+                    souvenirs_storage::RecoveryOutcome::Completed,
+                ) => RecoveryOutcome::Completed,
+                CancellableRecoveryOutcome::Finished(
+                    souvenirs_storage::RecoveryOutcome::Cancelled,
+                ) => RecoveryOutcome::Cancelled,
+                CancellableRecoveryOutcome::Interrupted => {
+                    unreachable!(
+                        "interrupted recovery is finalized before emitting a terminal outcome"
+                    )
+                }
             },
             ImportExecutionOutcome {
                 copied_count,
@@ -643,6 +724,90 @@ impl ImportRecoveryService {
                 left_on_source_count: plan.left_on_source_count,
             },
         ))
+    }
+}
+
+fn recovery_request(
+    plan: &ExecutionPlan,
+    mode: RecoveryMode,
+    manifest_contents: Vec<u8>,
+) -> RecoveryRequest {
+    RecoveryRequest {
+        mode,
+        directories: plan
+            .directories
+            .iter()
+            .filter(|directory| directory.create)
+            .map(|directory| RecoveryDirectory {
+                step_id: directory.step_id.clone(),
+                path: directory.path.clone(),
+            })
+            .collect(),
+        copies: plan
+            .copies
+            .iter()
+            .map(|copy| RecoveryCopy {
+                step_id: copy.step_id.clone(),
+                source: copy.source.clone(),
+                destination: copy.destination.clone(),
+                expected_sha256: copy.digest.clone(),
+                expected_size_bytes: copy.size_bytes,
+            })
+            .collect(),
+        manifests: vec![RecoveryManifest {
+            step_id: plan.manifest.step_id.clone(),
+            path: plan.manifest.path.clone(),
+            previous_sha256: plan.manifest.previous_digest.clone(),
+            contents: manifest_contents,
+        }],
+    }
+}
+
+struct RecoveryProgressReader {
+    reader: BufReader<File>,
+    copied_count: usize,
+}
+
+impl RecoveryProgressReader {
+    fn new(journal_path: &Path, copied_count: usize) -> Result<Self, ImportExecutionError> {
+        let mut file = File::open(journal_path).map_err(|source| ImportExecutionError::Io {
+            path: journal_path.to_path_buf(),
+            source,
+        })?;
+        file.seek(SeekFrom::End(0))
+            .map_err(|source| ImportExecutionError::Io {
+                path: journal_path.to_path_buf(),
+                source,
+            })?;
+        Ok(Self {
+            reader: BufReader::new(file),
+            copied_count,
+        })
+    }
+
+    fn refresh(&mut self) -> Result<usize, ImportExecutionError> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if self
+                .reader
+                .read_line(&mut line)
+                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?
+                == 0
+            {
+                return Ok(self.copied_count);
+            }
+            let record = serde_json::from_str::<OperationRecord>(&line)
+                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+            if matches!(
+                record,
+                OperationRecord::Transition {
+                    transition: souvenirs_storage::DurableTransition::CopyPublished { .. }
+                }
+            ) {
+                self.copied_count += 1;
+            }
+        }
     }
 }
 
@@ -795,7 +960,7 @@ fn unfinished_plan(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+        if !is_operation_journal_file_name(&entry.file_name()) {
             continue;
         }
         if path
@@ -1557,6 +1722,13 @@ mod tests {
         lock.release().unwrap();
         fs::write(
             layout.journal_directory().join(".DS_Store"),
+            b"not a journal",
+        )
+        .unwrap();
+        fs::write(
+            layout
+                .journal_directory()
+                .join("._20260101-000000-import.jsonl"),
             b"not a journal",
         )
         .unwrap();

@@ -1,11 +1,16 @@
 use std::error::Error;
 use std::fmt;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+
+use crate::durability::{sync_directory, sync_file};
+
+static WRITE_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct VolumeIdentity(u64);
@@ -67,12 +72,111 @@ impl StorageCapabilities {
     }
 
     pub fn ensure_writable(&self, path: impl AsRef<Path>) -> Result<(), StorageCapabilityError> {
+        let path = path.as_ref();
         if self.write_suitability == WriteSuitability::SynchronizedFolder {
             return Err(StorageCapabilityError::SynchronizedFolder {
-                path: path.as_ref().to_path_buf(),
+                path: path.to_path_buf(),
             });
         }
-        Ok(())
+        probe_write_capability(path)
+    }
+}
+
+fn probe_write_capability(path: &Path) -> Result<(), StorageCapabilityError> {
+    let probe_directory = create_probe_directory(path)?;
+    let pending_file = probe_directory.join("pending");
+    let published_file = probe_directory.join("published");
+
+    let probe_result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending_file)
+            .map_err(|source| write_probe_error(path, "create a probe file", source))?;
+        file.write_all(b"souvenirs write capability probe\n")
+            .and_then(|()| sync_file(&file))
+            .map_err(|source| write_probe_error(path, "write and persist a probe file", source))?;
+        sync_directory(&probe_directory)
+            .map_err(|source| write_probe_error(path, "persist the probe file entry", source))?;
+        fs::rename(&pending_file, &published_file)
+            .map_err(|source| write_probe_error(path, "rename a probe file", source))?;
+        sync_directory(&probe_directory)
+            .map_err(|source| write_probe_error(path, "persist the probe rename", source))
+    })();
+
+    let cleanup_result = cleanup_probe(path, &probe_directory, &pending_file, &published_file);
+    cleanup_result.and(probe_result)
+}
+
+fn create_probe_directory(path: &Path) -> Result<PathBuf, StorageCapabilityError> {
+    for _ in 0..16 {
+        let sequence = WRITE_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let probe_directory = path.join(format!(
+            ".souvenirs-write-probe-{}-{sequence}",
+            std::process::id()
+        ));
+        match fs::create_dir(&probe_directory) {
+            Ok(()) => {
+                if let Err(source) = sync_directory(path) {
+                    let probe_error =
+                        write_probe_error(path, "persist the probe directory", source);
+                    let cleanup_result = cleanup_probe(
+                        path,
+                        &probe_directory,
+                        &probe_directory.join("pending"),
+                        &probe_directory.join("published"),
+                    );
+                    return cleanup_result.and(Err(probe_error));
+                }
+                return Ok(probe_directory);
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(write_probe_error(path, "create a probe directory", source));
+            }
+        }
+    }
+
+    Err(write_probe_error(
+        path,
+        "create a uniquely named probe directory",
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "write probe names repeatedly collided",
+        ),
+    ))
+}
+
+fn cleanup_probe(
+    root: &Path,
+    probe_directory: &Path,
+    pending_file: &Path,
+    published_file: &Path,
+) -> Result<(), StorageCapabilityError> {
+    remove_probe_file(root, pending_file)?;
+    remove_probe_file(root, published_file)?;
+    fs::remove_dir(probe_directory)
+        .map_err(|source| write_probe_error(root, "remove the probe directory", source))?;
+    sync_directory(root).map_err(|source| write_probe_error(root, "persist probe cleanup", source))
+}
+
+fn remove_probe_file(root: &Path, path: &Path) -> Result<(), StorageCapabilityError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(write_probe_error(root, "remove a probe file", source)),
+    }
+}
+
+fn write_probe_error(
+    path: &Path,
+    action: &'static str,
+    source: io::Error,
+) -> StorageCapabilityError {
+    StorageCapabilityError::WriteProbe {
+        path: path.to_path_buf(),
+        action,
+        source,
     }
 }
 
@@ -98,8 +202,18 @@ fn is_synchronized_folder(path: &Path) -> bool {
 
 #[derive(Debug)]
 pub enum StorageCapabilityError {
-    Inspect { path: PathBuf, source: io::Error },
-    SynchronizedFolder { path: PathBuf },
+    Inspect {
+        path: PathBuf,
+        source: io::Error,
+    },
+    SynchronizedFolder {
+        path: PathBuf,
+    },
+    WriteProbe {
+        path: PathBuf,
+        action: &'static str,
+        source: io::Error,
+    },
     UnsupportedPlatform,
 }
 
@@ -118,6 +232,11 @@ impl fmt::Display for StorageCapabilityError {
                 "catalog mutations are not supported in synchronized folder {}",
                 path.display()
             ),
+            Self::WriteProbe { path, .. } => write!(
+                formatter,
+                "Souvenirs cannot write to {}. Check that the folder or volume allows changes.",
+                path.display()
+            ),
             Self::UnsupportedPlatform => {
                 formatter.write_str("volume identity is unsupported on this platform")
             }
@@ -128,7 +247,7 @@ impl fmt::Display for StorageCapabilityError {
 impl Error for StorageCapabilityError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Inspect { source, .. } => Some(source),
+            Self::Inspect { source, .. } | Self::WriteProbe { source, .. } => Some(source),
             Self::SynchronizedFolder { .. } | Self::UnsupportedPlatform => None,
         }
     }
@@ -136,9 +255,13 @@ impl Error for StorageCapabilityError {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_synchronized_folder, WriteSuitability};
+    use super::{is_synchronized_folder, StorageCapabilityError, WriteSuitability};
     use crate::StorageCapabilities;
+    use std::fs;
     use std::path::Path;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn identifies_known_synchronized_folder_locations() {
@@ -163,5 +286,52 @@ mod tests {
 
         assert_eq!(capabilities.write_suitability, WriteSuitability::Writable);
         assert!(capabilities.volume.same_volume(capabilities.volume));
+    }
+
+    #[test]
+    fn write_probe_cleans_up_after_success() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let capabilities =
+            StorageCapabilities::detect(directory.path()).expect("detect capabilities");
+
+        capabilities
+            .ensure_writable(directory.path())
+            .expect("temporary directory should be writable");
+
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .expect("read temporary directory")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_probe_rejects_directory_without_write_access() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let original_permissions = fs::metadata(directory.path())
+            .expect("read temporary directory metadata")
+            .permissions();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o555))
+            .expect("make temporary directory read-only");
+
+        let capabilities =
+            StorageCapabilities::detect(directory.path()).expect("detect capabilities");
+        let result = capabilities.ensure_writable(directory.path());
+
+        fs::set_permissions(directory.path(), original_permissions)
+            .expect("restore temporary directory permissions");
+
+        assert!(matches!(
+            result,
+            Err(StorageCapabilityError::WriteProbe { .. })
+        ));
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .expect("read temporary directory")
+                .count(),
+            0
+        );
     }
 }

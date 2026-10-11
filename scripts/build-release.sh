@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
+. "$repo_root/scripts/release-signing.sh"
 output_root=${1:-"$repo_root/target/release-validation"}
 archive_path="$output_root/Souvenirs.xcarchive"
 derived_data="$output_root/DerivedData"
@@ -19,6 +20,11 @@ if [[ -z "$identity" ]]; then
     fi
     identity=$identities
 fi
+
+is_developer_id_application_identity "$identity" || {
+    echo "SOUVENIRS_SIGNING_IDENTITY must name a Developer ID Application identity" >&2
+    exit 1
+}
 
 if [[ "$identity" =~ \(([A-Z0-9]{10})\)$ ]]; then
     team_id=${BASH_REMATCH[1]}

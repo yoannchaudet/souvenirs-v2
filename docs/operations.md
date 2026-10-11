@@ -39,7 +39,7 @@ These are proposed operations, not command names.
 | Operation | Purpose |
 | --- | --- |
 | Recover | Finish an unfinished operation from its [journal](storage.md#interruption-and-recovery). |
-| Cancel a copy | Keep published files and stop unfinished copy steps. |
+| Cancel a copy | Keep durable copies and stop active copy or recovery work at the next durable boundary. |
 | Rebuild index | Recreate `index.sqlite` from manifests and filenames. |
 
 ## Plans
@@ -61,15 +61,19 @@ Naming and folder operations must not hash the media collection.
 A saved source scan uses a versioned snapshot.
 Version 1 records file identity, classification, size, and digest.
 Version 2 also records normalized relationship metadata.
+Version 3 also records normalized datetime candidates.
 Planning rescans the source with the saved snapshot version.
-This rule preserves version 1 fingerprint semantics.
+This rule preserves each snapshot fingerprint contract.
+Current planning requires a version 3 snapshot.
+Planning rejects older snapshots because they do not retain datetime disagreement evidence.
 
 A saved import plan uses one versioned envelope.
 The envelope contains its version, confirmation state, source location metadata, and the digested import plan.
 The import plan digest protects every field in the normalized plan document.
 The digest does not protect confirmation state or source location metadata.
 Version 2 records `ambiguous_sidecar` when sidecar ownership blocks a candidate item.
-Readers continue to accept valid version 1 plans.
+Version 3 records every datetime candidate that disagrees with the selected candidate.
+Readers continue to accept valid version 1 and version 2 plans.
 
 Initial import execution validates confirmation state before it mutates the catalog.
 Initial import execution uses source location metadata to find each planned item file.
@@ -192,7 +196,9 @@ The build signs both executables with the same identity.
 
 Run `just build-release` to create and verify a Developer ID signed archive.
 The command requires one local Developer ID Application identity.
-The verification checks both signatures, Hardened Runtime flags, and signing teams.
+`SOUVENIRS_SIGNING_IDENTITY` must contain the full Developer ID Application common name, including the team identifier.
+The verification checks both leaf authorities, signatures, Hardened Runtime flags, and signing teams.
+The verification also confirms that the app does not contain development engine overrides.
 The command requests a secure timestamp by default.
 Set `SOUVENIRS_TIMESTAMP=none` only for an offline local test build.
 An artifact without a secure timestamp must not be notarized or released.

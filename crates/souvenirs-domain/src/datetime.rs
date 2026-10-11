@@ -16,7 +16,7 @@ pub enum DateTimeSource {
 }
 
 impl DateTimeSource {
-    fn rank(self) -> u8 {
+    pub(crate) fn rank(self) -> u8 {
         match self {
             Self::ExifDateTimeOriginal => 1,
             Self::ExifDateTimeDigitized => 2,

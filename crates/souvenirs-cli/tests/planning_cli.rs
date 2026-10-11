@@ -61,6 +61,13 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
         "--catalog",
         catalog.to_str().unwrap(),
     ]));
+    fs::write(
+        catalog
+            .join(".souvenirs/journal")
+            .join("._20260101-000000-import.jsonl"),
+        b"not a journal",
+    )
+    .unwrap();
 
     let inspected = json_stdout(&run(&[
         "catalog",
@@ -69,6 +76,7 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
         catalog.to_str().unwrap(),
     ]));
     assert_eq!(inspected["command"], "catalog.inspect");
+    assert_eq!(inspected["result"]["journal_count"], 1);
     assert_eq!(inspected["result"]["unfinished_operation_count"], 0);
     assert_eq!(inspected["result"]["managed_file_count"], 0);
 
@@ -108,7 +116,7 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
 
     let plan_value: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
     let schema: Value = serde_json::from_slice(
-        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v2.json"))
+        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v3.json"))
             .unwrap(),
     )
     .unwrap();
@@ -125,7 +133,7 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
 }
 
 #[test]
-fn plans_a_version_one_scan_without_reinterpreting_metadata() {
+fn rejects_a_version_one_scan_that_cannot_report_datetime_disagreements() {
     const IDENTIFIER: &str = "11111111-2222-3333-4444-555555555555";
     let temporary = TempDir::new().unwrap();
     let source = temporary.path().join("source");
@@ -149,15 +157,38 @@ fn plans_a_version_one_scan_without_reinterpreting_metadata() {
     scan.fingerprint = ContentDigest::from_bytes(&serde_json::to_vec(&scan.files).unwrap());
     fs::write(&snapshot, serde_json::to_vec_pretty(&scan).unwrap()).unwrap();
 
-    let plan = create_plan(&temporary, "legacy-scan", &snapshot);
-
-    assert_eq!(
-        plan["import_plan"]["document"]["items"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    let catalog = temporary.path().join("catalog-legacy-scan");
+    fs::create_dir(&catalog).unwrap();
+    json_stdout(&run(&[
+        "catalog",
+        "initialize",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    let plan = temporary.path().join("legacy-plan.json");
+    let output = run(&[
+        "import",
+        "plan",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--snapshot",
+        snapshot.to_str().unwrap(),
+        "--output",
+        plan.to_str().unwrap(),
+        "--collection",
+        "Corpus",
+        "--destination-mode",
+        "create",
+        "--accepted-at",
+        "2026-10-10T12:34:56",
+        "--confirm",
+    ]);
+    assert_eq!(output.status.code(), Some(5));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("run import scan again"));
 }
 
 #[test]
@@ -389,7 +420,7 @@ fn plans_differing_basename_live_photo_from_scanned_metadata() {
     ]));
 
     let snapshot_value: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
-    assert_eq!(snapshot_value["schema_version"], 2);
+    assert_eq!(snapshot_value["schema_version"], 3);
     assert!(snapshot_value["files"]
         .as_array()
         .unwrap()
@@ -531,6 +562,47 @@ fn valid_unsupported_bigtiff_dng_plans_without_an_identifier() {
             .len(),
         2
     );
+}
+
+#[test]
+fn preserves_owned_datetime_disagreements_in_the_saved_plan() {
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("IMG_20240203_040506.JPG"),
+        b"jpeg without embedded metadata",
+    )
+    .unwrap();
+    fs::write(
+        source.join("IMG_20240203_040506.JPG.xmp"),
+        br#"<rdf:Description photoshop:DateCreated="2024-07-09T10:11:12+02:00" exif:DateTimeOriginal="2024-07-10T11:12:13-03:00"/>"#,
+    )
+    .unwrap();
+    let snapshot = temporary.path().join("scan.json");
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+
+    let plan = create_plan(&temporary, "datetime-disagreements", &snapshot);
+    let disagreements = plan["import_plan"]["document"]["items"][0]["datetime_disagreements"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(disagreements.len(), 2);
+    assert_eq!(disagreements[0]["source"], "xmp_exif_date_time_original");
+    assert_eq!(disagreements[0]["value"]["kind"], "local_with_offset");
+    assert_eq!(
+        disagreements[0]["value"]["recorded_offset_seconds"],
+        -10_800
+    );
+    assert_eq!(disagreements[1]["source"], "filename_pattern");
+    assert_eq!(disagreements[1]["value"]["kind"], "local");
 }
 
 #[test]
