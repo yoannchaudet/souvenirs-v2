@@ -15,9 +15,9 @@ use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_storage::{
     is_operation_journal_file_name, is_source_unavailable_error, read_operation_records,
     CancellableRecoveryOutcome, CatalogLayout, CatalogLock, CatalogPathError, CopyExpectation,
-    ManifestReplacementRequest, OperationJournal, OperationRecord, PortableDestinationObserver,
-    RecoveryCheckpoint, RecoveryCopy, RecoveryDirectory, RecoveryError, RecoveryManifest,
-    RecoveryMode, RecoveryRequest, VerifiedCopyError,
+    ManifestReplacementRequest, OperationInterruptionCause, OperationJournal, OperationRecord,
+    PortableDestinationObserver, RecoveryCheckpoint, RecoveryCopy, RecoveryDirectory,
+    RecoveryError, RecoveryManifest, RecoveryMode, RecoveryRequest, VerifiedCopyError,
 };
 use time::Date;
 
@@ -181,6 +181,13 @@ impl ImportExecutionService {
             }
             Err(error) => {
                 if matches!(error, ImportExecutionError::SourceUnavailable(_)) {
+                    journal
+                        .interrupt(
+                            &layout,
+                            &lock,
+                            OperationInterruptionCause::SourceUnavailable,
+                        )
+                        .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
                     return Err(error);
                 }
                 journal
@@ -227,19 +234,29 @@ impl ImportExecutionService {
             if cancellation.is_requested() {
                 return cancel_execution(&prepared, &layout, lock, &mut journal, copied_count);
             }
-            layout
-                .copy_verified(
-                    &lock,
-                    &mut journal,
-                    &copy.source,
-                    &copy.destination,
-                    &copy.step_id,
-                    CopyExpectation {
-                        sha256: copy.digest.clone(),
-                        size_bytes: copy.size_bytes,
-                    },
-                )
-                .map_err(import_verified_copy_error)?;
+            if let Err(error) = layout.copy_verified(
+                &lock,
+                &mut journal,
+                &copy.source,
+                &copy.destination,
+                &copy.step_id,
+                CopyExpectation {
+                    sha256: copy.digest.clone(),
+                    size_bytes: copy.size_bytes,
+                },
+            ) {
+                let error = import_verified_copy_error(error);
+                if matches!(error, ImportExecutionError::SourceUnavailable(_)) {
+                    journal
+                        .interrupt(
+                            &layout,
+                            &lock,
+                            OperationInterruptionCause::SourceUnavailable,
+                        )
+                        .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+                }
+                return Err(error);
+            }
             copied_count = index + 1;
             progress(OperationProgress {
                 completed_units: copied_count as u64,
@@ -601,7 +618,18 @@ impl ImportRecoveryService {
             .map_err(|error| ImportExecutionError::Conflict(error.to_string()))?;
         let (journal_path, plan, published) = unfinished_plan(&layout, operation_id)?;
         if mode == ImportRecoveryMode::Resume {
-            validate_recovery_sources(&layout, &plan, &published)?;
+            if let Err(error) = validate_recovery_sources(&layout, &plan, &published) {
+                if matches!(error, ImportExecutionError::SourceUnavailable(_)) {
+                    OperationJournal::record_interruption(
+                        &layout,
+                        &lock,
+                        &journal_path,
+                        OperationInterruptionCause::SourceUnavailable,
+                    )
+                    .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+                }
+                return Err(error);
+            }
         }
         let total_count = plan.copies.len();
         let (mut outcome, mut cancelled_copy_count) = match mode {
@@ -612,35 +640,35 @@ impl ImportRecoveryService {
                 let mut progress_reader =
                     RecoveryProgressReader::new(&journal_path, reported_count)?;
                 let mut checkpoint_error = None;
-                let outcome = layout
-                    .recover_operation_cancellable(&lock, &journal_path, request, |checkpoint| {
-                        match checkpoint {
-                            RecoveryCheckpoint::DurableBoundary => {
-                                match progress_reader.refresh() {
-                                    Ok(copied_count) if copied_count != reported_count => {
-                                        reported_count = copied_count;
-                                        progress(OperationProgress {
-                                            completed_units: copied_count as u64,
-                                            total_units: total_count as u64,
-                                            message: format!(
-                                                "Recovered {copied_count} of {total_count}"
-                                            ),
-                                        });
-                                    }
-                                    Ok(_) => {}
-                                    Err(error) => {
-                                        checkpoint_error = Some(error);
-                                        return true;
-                                    }
+                let outcome = layout.recover_operation_cancellable(
+                    &lock,
+                    &journal_path,
+                    request,
+                    |checkpoint| match checkpoint {
+                        RecoveryCheckpoint::DurableBoundary => {
+                            match progress_reader.refresh() {
+                                Ok(copied_count) if copied_count != reported_count => {
+                                    reported_count = copied_count;
+                                    progress(OperationProgress {
+                                        completed_units: copied_count as u64,
+                                        total_units: total_count as u64,
+                                        message: format!(
+                                            "Recovered {copied_count} of {total_count}"
+                                        ),
+                                    });
                                 }
-                                cancellation.is_requested()
+                                Ok(_) => {}
+                                Err(error) => {
+                                    checkpoint_error = Some(error);
+                                    return true;
+                                }
                             }
-                            RecoveryCheckpoint::CompletionBoundary => {
-                                !cancellation.begin_completion()
-                            }
+                            cancellation.is_requested()
                         }
-                    })
-                    .map_err(import_recovery_error)?;
+                        RecoveryCheckpoint::CompletionBoundary => !cancellation.begin_completion(),
+                    },
+                );
+                let outcome = recovery_result(&layout, &lock, &journal_path, outcome)?;
                 if let Some(error) = checkpoint_error {
                     return Err(error);
                 }
@@ -655,11 +683,12 @@ impl ImportRecoveryService {
                     manifest_contents,
                 );
                 (
-                    CancellableRecoveryOutcome::Finished(
-                        layout
-                            .recover_operation(&lock, journal_path.clone(), request)
-                            .map_err(import_recovery_error)?,
-                    ),
+                    CancellableRecoveryOutcome::Finished(recovery_result(
+                        &layout,
+                        &lock,
+                        &journal_path,
+                        layout.recover_operation(&lock, journal_path.clone(), request),
+                    )?),
                     copied_count,
                 )
             }
@@ -674,11 +703,12 @@ impl ImportRecoveryService {
                 RecoveryMode::CancelRemainingCopies,
                 manifest_contents,
             );
-            outcome = CancellableRecoveryOutcome::Finished(
-                layout
-                    .recover_operation(&lock, current_journal_path, request)
-                    .map_err(import_recovery_error)?,
-            );
+            outcome = CancellableRecoveryOutcome::Finished(recovery_result(
+                &layout,
+                &lock,
+                &current_journal_path,
+                layout.recover_operation(&lock, current_journal_path.clone(), request),
+            )?);
             cancelled_copy_count = copied_count;
         }
         lock.release()
@@ -732,6 +762,26 @@ impl ImportRecoveryService {
             },
         ))
     }
+}
+
+fn recovery_result<T>(
+    layout: &CatalogLayout,
+    lock: &CatalogLock,
+    journal_path: &Path,
+    result: Result<T, RecoveryError>,
+) -> Result<T, ImportExecutionError> {
+    result.map_err(import_recovery_error).or_else(|error| {
+        if matches!(error, ImportExecutionError::SourceUnavailable(_)) {
+            OperationJournal::record_interruption(
+                layout,
+                lock,
+                journal_path,
+                OperationInterruptionCause::SourceUnavailable,
+            )
+            .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+        }
+        Err(error)
+    })
 }
 
 fn recovery_request(
@@ -2153,7 +2203,33 @@ mod tests {
             .unwrap();
         assert_eq!(unfinished.operation_id, operation_id);
         assert_eq!(unfinished.copied_count, 0);
+        assert_eq!(unfinished.remaining_count, 2);
         assert!(!unfinished.source_available);
+        assert_eq!(
+            unfinished.interruption,
+            crate::UnfinishedOperationInterruption::SourceUnavailable
+        );
+        for _ in 0..2 {
+            let error = ImportRecoveryService::recover(
+                &fixture.catalog,
+                &operation_id,
+                ImportRecoveryMode::Resume,
+                |_| {},
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), "source_unavailable");
+        }
+        assert_eq!(
+            journal_records(&fixture, &operation_id)
+                .iter()
+                .filter(|record| matches!(record, OperationRecord::Interruption { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            unfinished.activity_time.kind,
+            crate::UnfinishedOperationActivityTimeKind::InterruptedAt
+        );
     }
 
     #[test]
@@ -2177,7 +2253,12 @@ mod tests {
             .unwrap();
         assert_eq!(unfinished.operation_id, operation_id);
         assert_eq!(unfinished.copied_count, 1);
+        assert_eq!(unfinished.remaining_count, 1);
         assert!(!unfinished.source_available);
+        assert_eq!(
+            unfinished.interruption,
+            crate::UnfinishedOperationInterruption::SourceUnavailable
+        );
     }
 
     #[test]

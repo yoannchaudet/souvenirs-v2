@@ -303,6 +303,28 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(sheet.staticTexts["recovery-title"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.sheets.count, 1)
         XCTAssertTrue(sheet.staticTexts["recovery-source-unavailable"].exists)
+        for identifier in [
+            "recovery-interruption",
+            "recovery-activity-time",
+            "recovery-source-status",
+            "recovery-counts",
+            "recovery-stop-explanation"
+        ] {
+            XCTAssertTrue(
+                sheet.descendants(matching: .any)[identifier].exists,
+                "\(identifier) should appear before the recovery actions"
+            )
+        }
+        XCTAssertEqual(
+            sheet.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS '7 items are safely'")
+            ).count,
+            1
+        )
+        XCTAssertLessThan(
+            sheet.descendants(matching: .any)["recovery-counts"].frame.minY,
+            sheet.buttons["cancel-recovery"].frame.minY
+        )
         XCTAssertTrue(sheet.buttons["retry-recovery"].isEnabled)
         XCTAssertFalse(sheet.buttons["finish-recovery"].isEnabled)
         XCTAssertTrue(sheet.buttons["cancel-recovery"].isEnabled)
@@ -356,6 +378,16 @@ final class SouvenirsUITests: XCTestCase {
         app.buttons["open-catalog"].click()
         let sheet = activeSheet(app)
         XCTAssertTrue(sheet.staticTexts["recovery-title"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["recovery-checks"].exists
+        )
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["recovery-counts"].exists
+        )
+        XCTAssertLessThan(
+            sheet.descendants(matching: .any)["recovery-counts"].frame.minY,
+            sheet.buttons["finish-recovery"].frame.minY
+        )
         sheet.buttons["finish-recovery"].click()
 
         XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))

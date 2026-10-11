@@ -7,7 +7,7 @@ use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 // This is the oldest macOS client version supported by the engine.
 pub const MINIMUM_CLIENT_VERSION: &str = "0.2.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
@@ -419,7 +419,31 @@ pub struct UnfinishedOperationResult {
     pub source_name: String,
     pub copied_count: usize,
     pub total_count: usize,
+    pub remaining_count: usize,
     pub source_available: bool,
+    pub interruption: UnfinishedOperationInterruption,
+    pub activity_time: UnfinishedOperationActivityTime,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnfinishedOperationInterruption {
+    SourceUnavailable,
+    IncompleteWithoutTerminalRecord,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnfinishedOperationActivityTimeKind {
+    InterruptedAt,
+    LastRecordedActivity,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct UnfinishedOperationActivityTime {
+    pub kind: UnfinishedOperationActivityTimeKind,
+    pub unix_seconds: i64,
+    pub nanosecond: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -620,7 +644,7 @@ mod tests {
 
     #[test]
     fn golden_fixture_matches_rust_types() {
-        let fixture = fixture_path("protocol-v4.jsonl");
+        let fixture = fixture_path("protocol-v5.jsonl");
         let contents = fs::read_to_string(fixture).expect("fixture should be readable");
         let values: Vec<Value> = contents
             .lines()
@@ -680,7 +704,7 @@ mod tests {
         let expected = serde_json::to_string_pretty(&protocol_schema())
             .expect("protocol schema should serialize")
             + "\n";
-        let actual = fs::read_to_string(fixture_path("../schema/v4.json"))
+        let actual = fs::read_to_string(fixture_path("../schema/v5.json"))
             .expect("committed schema should be readable");
 
         assert_eq!(actual, expected, "regenerate the committed protocol schema");

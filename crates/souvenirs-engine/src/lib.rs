@@ -23,10 +23,11 @@ use souvenirs_protocol::{
     ImportDestinationMode, ImportPreflightCheck, ImportPreflightEvidence, ImportReviewResult,
     ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
     OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
-    StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
-    CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
-    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
-    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    StartOperationParameters, UnfinishedOperationActivityTime, UnfinishedOperationActivityTimeKind,
+    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_COLLECTIONS_METHOD,
+    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD,
+    IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
+    START_OPERATION_METHOD,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -435,7 +436,28 @@ impl Connection {
                                     source_name: operation.source_name,
                                     copied_count: operation.copied_count,
                                     total_count: operation.total_count,
+                                    remaining_count: operation.remaining_count,
                                     source_available: operation.source_available,
+                                    interruption: match operation.interruption {
+                                        souvenirs_application::UnfinishedOperationInterruption::SourceUnavailable => {
+                                            souvenirs_protocol::UnfinishedOperationInterruption::SourceUnavailable
+                                        }
+                                        souvenirs_application::UnfinishedOperationInterruption::IncompleteWithoutTerminalRecord => {
+                                            souvenirs_protocol::UnfinishedOperationInterruption::IncompleteWithoutTerminalRecord
+                                        }
+                                    },
+                                    activity_time: UnfinishedOperationActivityTime {
+                                        kind: match operation.activity_time.kind {
+                                            souvenirs_application::UnfinishedOperationActivityTimeKind::InterruptedAt => {
+                                                UnfinishedOperationActivityTimeKind::InterruptedAt
+                                            }
+                                            souvenirs_application::UnfinishedOperationActivityTimeKind::LastRecordedActivity => {
+                                                UnfinishedOperationActivityTimeKind::LastRecordedActivity
+                                            }
+                                        },
+                                        unix_seconds: operation.activity_time.unix_seconds,
+                                        nanosecond: operation.activity_time.nanosecond,
+                                    },
                                 }),
                             }),
                         )

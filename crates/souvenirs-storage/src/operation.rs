@@ -113,6 +113,28 @@ pub enum OperationOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationInterruptionCause {
+    SourceUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OperationTimestamp {
+    pub unix_seconds: i64,
+    pub nanosecond: u32,
+}
+
+impl OperationTimestamp {
+    fn now() -> Result<Self, OperationJournalError> {
+        let timestamp = OffsetDateTime::now_utc();
+        Ok(Self {
+            unix_seconds: timestamp.unix_timestamp(),
+            nanosecond: timestamp.nanosecond(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum RetainedDuplicateDisposition {
@@ -144,6 +166,13 @@ pub enum OperationRecord {
     },
     Transition {
         transition: DurableTransition,
+    },
+    Activity {
+        recorded_at: OperationTimestamp,
+    },
+    Interruption {
+        cause: OperationInterruptionCause,
+        recorded_at: OperationTimestamp,
     },
     Outcome {
         outcome: OperationOutcome,
@@ -455,6 +484,38 @@ impl OperationJournal {
         self.record_outcome(layout, lock, OperationOutcome::Cancelled)
     }
 
+    pub fn interrupt(
+        &mut self,
+        layout: &CatalogLayout,
+        lock: &CatalogLock,
+        cause: OperationInterruptionCause,
+    ) -> Result<(), OperationJournalError> {
+        self.ensure_active(layout, lock)?;
+        self.append_without_activity(&OperationRecord::Interruption {
+            cause,
+            recorded_at: OperationTimestamp::now()?,
+        })
+    }
+
+    pub fn record_interruption(
+        layout: &CatalogLayout,
+        lock: &CatalogLock,
+        path: &Path,
+        cause: OperationInterruptionCause,
+    ) -> Result<(), OperationJournalError> {
+        let (mut journal, records) = Self::open_for_recovery(layout, lock, path)?;
+        if matches!(
+            records.last(),
+            Some(OperationRecord::Interruption {
+                cause: recorded_cause,
+                ..
+            }) if *recorded_cause == cause
+        ) {
+            return Ok(());
+        }
+        journal.interrupt(layout, lock, cause)
+    }
+
     #[cfg(feature = "test-failpoints")]
     pub fn fail_at(&mut self, failpoint: Failpoint) {
         self.failpoint = Some(failpoint);
@@ -514,6 +575,27 @@ impl OperationJournal {
     }
 
     fn append(&mut self, record: &OperationRecord) -> Result<(), OperationJournalError> {
+        // Terminal outcomes and explicit interruptions must remain the last semantic record.
+        if !matches!(
+            record,
+            OperationRecord::Activity { .. }
+                | OperationRecord::Interruption { .. }
+                | OperationRecord::Outcome { .. }
+        ) {
+            let activity = OperationRecord::Activity {
+                recorded_at: OperationTimestamp::now()?,
+            };
+            append_operation_records(&mut self.file, &self.path, [record, &activity])?;
+        } else {
+            self.append_without_activity(record)?;
+        }
+        Ok(())
+    }
+
+    fn append_without_activity(
+        &mut self,
+        record: &OperationRecord,
+    ) -> Result<(), OperationJournalError> {
         append_operation_record(&mut self.file, &self.path, record)
     }
 }
@@ -664,12 +746,24 @@ pub(crate) fn append_operation_record(
     path: &Path,
     record: &OperationRecord,
 ) -> Result<(), OperationJournalError> {
-    let mut encoded =
-        serde_json::to_vec(record).map_err(|source| OperationJournalError::SerializeRecord {
-            path: path.to_path_buf(),
-            source,
+    append_operation_records(file, path, [record])
+}
+
+fn append_operation_records<'a>(
+    file: &mut File,
+    path: &Path,
+    records: impl IntoIterator<Item = &'a OperationRecord>,
+) -> Result<(), OperationJournalError> {
+    let mut encoded = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut encoded, record).map_err(|source| {
+            OperationJournalError::SerializeRecord {
+                path: path.to_path_buf(),
+                source,
+            }
         })?;
-    encoded.push(b'\n');
+        encoded.push(b'\n');
+    }
     file.write_all(&encoded)
         .and_then(|()| sync_file(file))
         .map_err(|source| OperationJournalError::Io {

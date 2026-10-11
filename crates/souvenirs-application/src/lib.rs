@@ -424,7 +424,31 @@ pub struct UnfinishedOperation {
     pub source_name: String,
     pub copied_count: usize,
     pub total_count: usize,
+    pub remaining_count: usize,
     pub source_available: bool,
+    pub interruption: UnfinishedOperationInterruption,
+    pub activity_time: UnfinishedOperationActivityTime,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnfinishedOperationInterruption {
+    SourceUnavailable,
+    IncompleteWithoutTerminalRecord,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnfinishedOperationActivityTimeKind {
+    InterruptedAt,
+    LastRecordedActivity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct UnfinishedOperationActivityTime {
+    pub kind: UnfinishedOperationActivityTimeKind,
+    pub unix_seconds: i64,
+    pub nanosecond: u32,
 }
 
 pub struct OperationInspectionService;
@@ -503,6 +527,43 @@ impl OperationInspectionService {
                     )
                 })
                 .count();
+            let remaining_count = total_count.checked_sub(copied_count).ok_or_else(|| {
+                CatalogServiceError::InvalidOperationJournal {
+                    path: path.clone(),
+                    message: format!(
+                        "journal records {copied_count} copied files for a total of {total_count}"
+                    ),
+                }
+            })?;
+            let (interruption, activity_time) = records
+                .iter()
+                .rev()
+                .find_map(|record| match record {
+                    OperationRecord::Interruption {
+                        cause: souvenirs_storage::OperationInterruptionCause::SourceUnavailable,
+                        recorded_at,
+                    } => Some((
+                        UnfinishedOperationInterruption::SourceUnavailable,
+                        UnfinishedOperationActivityTime {
+                            kind: UnfinishedOperationActivityTimeKind::InterruptedAt,
+                            unix_seconds: recorded_at.unix_seconds,
+                            nanosecond: recorded_at.nanosecond,
+                        },
+                    )),
+                    OperationRecord::Activity { recorded_at } => Some((
+                        UnfinishedOperationInterruption::IncompleteWithoutTerminalRecord,
+                        UnfinishedOperationActivityTime {
+                            kind: UnfinishedOperationActivityTimeKind::LastRecordedActivity,
+                            unix_seconds: recorded_at.unix_seconds,
+                            nanosecond: recorded_at.nanosecond,
+                        },
+                    )),
+                    _ => None,
+                })
+                .ok_or_else(|| CatalogServiceError::InvalidOperationJournal {
+                    path: path.clone(),
+                    message: "unfinished journal has no durable activity timestamp".to_owned(),
+                })?;
             return Ok(Some(UnfinishedOperation {
                 operation_id: operation_id.clone(),
                 collection_name: collection_name.clone(),
@@ -513,7 +574,10 @@ impl OperationInspectionService {
                     .to_owned(),
                 copied_count,
                 total_count: *total_count,
+                remaining_count,
                 source_available: source_path.is_dir(),
+                interruption,
+                activity_time,
             }));
         }
         Ok(None)
@@ -1569,6 +1633,25 @@ mod tests {
         journal
             .record_metadata(&layout, &lock, "Dolomites".to_owned(), source.clone(), 12)
             .unwrap();
+        journal
+            .interrupt(
+                &layout,
+                &lock,
+                souvenirs_storage::OperationInterruptionCause::SourceUnavailable,
+            )
+            .unwrap();
+        journal
+            .record_retained_duplicate(
+                &layout,
+                &lock,
+                &souvenirs_storage::RetainedDuplicate {
+                    source_file_id: "source-file-1".to_owned(),
+                    disposition: souvenirs_storage::RetainedDuplicateDisposition::SourceDuplicate {
+                        selected_source_file_id: "source-file-1".to_owned(),
+                    },
+                },
+            )
+            .unwrap();
         drop(journal);
         lock.release().unwrap();
         fs::write(
@@ -1586,8 +1669,106 @@ mod tests {
         assert_eq!(operation.operation_id, "import-one");
         assert_eq!(operation.collection_name, "Dolomites");
         assert_eq!(operation.source_name, "EOS_DIGITAL");
+        assert_eq!(operation.copied_count, 0);
         assert_eq!(operation.total_count, 12);
+        assert_eq!(operation.remaining_count, 12);
         assert!(!operation.source_available);
+        assert_eq!(
+            operation.interruption,
+            super::UnfinishedOperationInterruption::IncompleteWithoutTerminalRecord
+        );
+        assert_eq!(
+            operation.activity_time.kind,
+            super::UnfinishedOperationActivityTimeKind::LastRecordedActivity
+        );
+    }
+
+    #[test]
+    fn rejects_unfinished_operation_with_more_copies_than_total() {
+        let directory = tempdir().expect("temporary directory");
+        let catalog = directory.path().join("catalog");
+        let source = directory.path().join("EOS_DIGITAL");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir(&source).unwrap();
+        CatalogService::create(&catalog, "Family").unwrap();
+        let layout = souvenirs_storage::CatalogLayout::new(&catalog);
+        let lock = souvenirs_storage::CatalogLock::acquire(&layout).unwrap();
+        let mut journal = souvenirs_storage::OperationJournal::create(
+            &layout,
+            &lock,
+            "import-invalid-count",
+            &serde_json::json!({"confirmed": true}),
+        )
+        .unwrap();
+        journal
+            .record_metadata(&layout, &lock, "Dolomites".to_owned(), source, 1)
+            .unwrap();
+        let journal_path = journal.path().to_path_buf();
+        drop(journal);
+        lock.release().unwrap();
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&journal_path)
+            .unwrap();
+        use std::io::Write as _;
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "kind": "transition",
+                "transition": {
+                    "kind": "copy_published",
+                    "step_id": "copy-1",
+                    "destination": "one.jpg",
+                    "sha256": "digest"
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "kind": "transition",
+                "transition": {
+                    "kind": "copy_published",
+                    "step_id": "copy-2",
+                    "destination": "two.jpg",
+                    "sha256": "digest"
+                }
+            })
+        )
+        .unwrap();
+
+        let error = OperationInspectionService::unfinished(&catalog).unwrap_err();
+        assert_eq!(error.code(), "invalid_operation_journal");
+        assert!(error
+            .to_string()
+            .contains("2 copied files for a total of 1"));
+    }
+
+    #[test]
+    fn rejects_legacy_unfinished_operation_without_temporal_evidence() {
+        let directory = tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Family").unwrap();
+        let journal = souvenirs_storage::CatalogLayout::new(directory.path())
+            .journal_directory()
+            .join("20260101-000000-import-legacy.jsonl");
+        fs::write(
+            &journal,
+            concat!(
+                "{\"kind\":\"plan\",\"operation_id\":\"import-legacy\",\"plan\":{}}\n",
+                "{\"kind\":\"metadata\",\"collection_name\":\"Dolomites\",",
+                "\"source_path\":\"/Volumes/EOS_DIGITAL\",\"total_count\":12}\n"
+            ),
+        )
+        .unwrap();
+
+        let error = OperationInspectionService::unfinished(directory.path()).unwrap_err();
+        assert_eq!(error.code(), "invalid_operation_journal");
+        assert!(error
+            .to_string()
+            .contains("unfinished journal has no durable activity timestamp"));
     }
 
     #[test]

@@ -1297,17 +1297,59 @@
         }
       ]
     },
+    "UnfinishedOperationActivityTime": {
+      "type": "object",
+      "required": [
+        "kind",
+        "nanosecond",
+        "unix_seconds"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/UnfinishedOperationActivityTimeKind"
+        },
+        "nanosecond": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "unix_seconds": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "UnfinishedOperationActivityTimeKind": {
+      "type": "string",
+      "enum": [
+        "interrupted_at",
+        "last_recorded_activity"
+      ]
+    },
+    "UnfinishedOperationInterruption": {
+      "type": "string",
+      "enum": [
+        "source_unavailable",
+        "incomplete_without_terminal_record"
+      ]
+    },
     "UnfinishedOperationResult": {
       "type": "object",
       "required": [
+        "activity_time",
         "collection_name",
         "copied_count",
+        "interruption",
         "operation_id",
+        "remaining_count",
         "source_available",
         "source_name",
         "total_count"
       ],
       "properties": {
+        "activity_time": {
+          "$ref": "#/definitions/UnfinishedOperationActivityTime"
+        },
         "collection_name": {
           "type": "string"
         },
@@ -1316,8 +1358,16 @@
           "format": "uint",
           "minimum": 0.0
         },
+        "interruption": {
+          "$ref": "#/definitions/UnfinishedOperationInterruption"
+        },
         "operation_id": {
           "type": "string"
+        },
+        "remaining_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
         },
         "source_available": {
           "type": "boolean"

@@ -191,7 +191,10 @@ final class RealEngineSmokeTests: XCTestCase {
         XCTAssertEqual(unfinished?.operationID, operationID)
         XCTAssertEqual(unfinished?.copiedCount, 1)
         XCTAssertEqual(unfinished?.totalCount, 3)
+        XCTAssertEqual(unfinished?.remainingCount, 2)
         XCTAssertEqual(unfinished?.sourceAvailable, false)
+        XCTAssertEqual(unfinished?.interruption, .sourceUnavailable)
+        XCTAssertEqual(unfinished?.activityTime.kind, .interruptedAt)
 
         try FileManager.default.moveItem(at: detachedSource, to: fixture.source)
         let reconnected = try await supervisor.inspectUnfinishedOperation(
@@ -199,7 +202,9 @@ final class RealEngineSmokeTests: XCTestCase {
         )
         XCTAssertEqual(reconnected?.operationID, operationID)
         XCTAssertEqual(reconnected?.copiedCount, 1)
+        XCTAssertEqual(reconnected?.remainingCount, 2)
         XCTAssertEqual(reconnected?.sourceAvailable, true)
+        XCTAssertEqual(reconnected?.interruption, .sourceUnavailable)
 
         let recoveryID = try await supervisor.requestOperation(
             method: "operation.start",
@@ -326,7 +331,10 @@ final class RealEngineSmokeTests: XCTestCase {
         XCTAssertEqual(unfinished.collectionName, "Recovery Import")
         XCTAssertEqual(unfinished.copiedCount, 1)
         XCTAssertEqual(unfinished.totalCount, 3)
+        XCTAssertEqual(unfinished.remainingCount, 2)
         XCTAssertEqual(unfinished.sourceAvailable, true)
+        XCTAssertEqual(unfinished.interruption, .incompleteWithoutTerminalRecord)
+        XCTAssertEqual(unfinished.activityTime.kind, .lastRecordedActivity)
 
         let recoveryID = try await recoverySupervisor.requestOperation(
             method: "operation.start",

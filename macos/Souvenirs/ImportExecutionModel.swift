@@ -85,6 +85,10 @@ final class ImportExecutionCoordinator: ObservableObject {
     @Published private(set) var review: EngineSupervisor.ImportReview?
     @Published private(set) var sourceName = ""
     @Published private(set) var collectionName = ""
+    @Published private(set) var remainingUnits: UInt64 = 0
+    @Published private(set) var interruption: EngineSupervisor.UnfinishedOperation.Interruption?
+    @Published private(set) var recoveryActivityTime:
+        EngineSupervisor.UnfinishedOperation.ActivityTime?
     @Published private(set) var isRetryingRecovery = false
 
     private let engine: ImportExecutionEngine
@@ -121,6 +125,9 @@ final class ImportExecutionCoordinator: ObservableObject {
         collectionName = review.collectionName
         completedUnits = 0
         totalUnits = UInt64(max(review.transferCount, 1))
+        remainingUnits = 0
+        interruption = nil
+        recoveryActivityTime = nil
         progressMessage = "Preparing verified copy…"
         phase = .running
         operationTask = Task {
@@ -244,6 +251,9 @@ final class ImportExecutionCoordinator: ObservableObject {
         review = nil
         sourceName = ""
         collectionName = ""
+        remainingUnits = 0
+        interruption = nil
+        recoveryActivityTime = nil
         isRetryingRecovery = false
     }
 
@@ -338,6 +348,9 @@ final class ImportExecutionCoordinator: ObservableObject {
         collectionName = unfinished.collectionName
         completedUnits = UInt64(unfinished.copiedCount)
         totalUnits = UInt64(max(unfinished.totalCount, 1))
+        remainingUnits = UInt64(unfinished.remainingCount)
+        interruption = unfinished.interruption
+        recoveryActivityTime = unfinished.activityTime
     }
 
     private func decodeOutcome(_ data: Data) throws -> ImportOutcome {

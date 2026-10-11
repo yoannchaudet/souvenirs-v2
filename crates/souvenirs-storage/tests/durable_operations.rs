@@ -29,6 +29,13 @@ fn records(journal: &OperationJournal) -> Vec<OperationRecord> {
         .collect()
 }
 
+fn semantic_records(journal: &OperationJournal) -> Vec<OperationRecord> {
+    records(journal)
+        .into_iter()
+        .filter(|record| !matches!(record, OperationRecord::Activity { .. }))
+        .collect()
+}
+
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -45,7 +52,7 @@ fn persists_plan_transitions_and_completed_outcome_as_json_lines() {
 
     assert!(layout.root().join("2026").is_dir());
     assert_eq!(
-        records(&journal),
+        semantic_records(&journal),
         vec![
             OperationRecord::Plan {
                 operation_id: "import1".to_owned(),
@@ -67,6 +74,13 @@ fn persists_plan_transitions_and_completed_outcome_as_json_lines() {
                 outcome: OperationOutcome::Completed,
             },
         ]
+    );
+    assert_eq!(
+        records(&journal)
+            .iter()
+            .filter(|record| matches!(record, OperationRecord::Activity { .. }))
+            .count(),
+        3
     );
 }
 
@@ -100,7 +114,7 @@ fn persists_structured_retained_duplicate_references() {
     journal.complete(&layout, &lock).unwrap();
 
     assert_eq!(
-        records(&journal)[1..3],
+        semantic_records(&journal)[1..3],
         [
             OperationRecord::Retained {
                 source_file_id: "source-catalog".to_owned(),
@@ -284,7 +298,7 @@ fn shared_reader_rejects_malformed_durable_records() {
 
     assert!(matches!(
         read_operation_records(journal.path()),
-        Err(OperationJournalError::DeserializeRecord { line: 2, .. })
+        Err(OperationJournalError::DeserializeRecord { line: 3, .. })
     ));
 }
 
@@ -390,7 +404,7 @@ fn replaces_manifest_only_when_the_observed_baseline_matches() {
         }
     }
     assert!(matches!(
-        records(&journal).last(),
+        semantic_records(&journal).last(),
         Some(OperationRecord::Transition {
             transition: DurableTransition::ManifestReplaced { .. },
         })
@@ -427,7 +441,7 @@ fn refuses_manifest_replacement_after_baseline_drift() {
         ManifestReplacementError::PreviousManifestChanged { .. }
     ));
     assert_eq!(fs::read(manifest_path).unwrap(), b"changed\n");
-    assert_eq!(records(&journal).len(), 3);
+    assert_eq!(semantic_records(&journal).len(), 3);
 }
 
 #[test]

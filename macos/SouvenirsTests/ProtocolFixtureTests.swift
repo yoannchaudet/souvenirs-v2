@@ -43,7 +43,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsNonCanonicalFieldName() {
         assertRejected(
             """
-            {"id":"macos-handshake-1","protocol_version":4,"method":"handshake","params":{"clientVersion":"0.2.0"}}
+            {"id":"macos-handshake-1","protocol_version":5,"method":"handshake","params":{"clientVersion":"0.2.0"}}
             """,
             containing: "keys were"
         )
@@ -52,7 +52,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsUnknownEnumValue() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":4,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
+            {"kind":"event","protocol_version":5,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
             """,
             containing: "unsupported event type"
         )
@@ -61,7 +61,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsIncompatibleMessageShape() {
         assertRejected(
             """
-            {"kind":"response","id":"request-2","protocol_version":4,"status":"success","result":[]}
+            {"kind":"response","id":"request-2","protocol_version":5,"status":"success","result":[]}
             """,
             containing: "must be an object"
         )
@@ -70,7 +70,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsJSONTypeDrift() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":4,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
+            {"kind":"event","protocol_version":5,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
             """,
             containing: "must be an integer"
         )
@@ -81,7 +81,7 @@ final class ProtocolFixtureTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v4.jsonl")
+            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v5.jsonl")
     }
 
     private func assertRejected(
@@ -133,11 +133,11 @@ final class ProtocolFixtureTests: XCTestCase {
             )
             XCTAssertEqual(response.kind, "response")
             XCTAssertEqual(response.id, "macos-handshake-1")
-            XCTAssertEqual(response.protocolVersion, 4)
+            XCTAssertEqual(response.protocolVersion, 5)
             XCTAssertEqual(response.status, "success")
             XCTAssertEqual(response.result.type, "handshake")
             XCTAssertEqual(response.result.engineVersion, "0.1.0")
-            XCTAssertEqual(response.result.protocolVersion, 4)
+            XCTAssertEqual(response.result.protocolVersion, 5)
             XCTAssertEqual(response.result.compatibleClientVersion, "0.2.0")
             XCTAssertEqual(
                 response.result.capabilities,
@@ -219,7 +219,14 @@ final class ProtocolFixtureTests: XCTestCase {
                     sourceName: "EOS_DIGITAL",
                     copiedCount: 7,
                     totalCount: 12,
-                    sourceAvailable: false
+                    remainingCount: 5,
+                    sourceAvailable: false,
+                    interruption: .sourceUnavailable,
+                    activityTime: .init(
+                        kind: .interruptedAt,
+                        unixSeconds: 1_760_151_600,
+                        nanosecond: 0
+                    )
                 )
             )
         case 9:
@@ -517,7 +524,8 @@ private enum ProtocolFixtureValidator {
                 operation,
                 exactly: [
                     "operation_id", "collection_name", "source_name", "copied_count",
-                    "total_count", "source_available",
+                    "total_count", "remaining_count", "source_available", "interruption",
+                    "activity_time",
                 ],
                 at: "\(path).operation"
             )
@@ -526,7 +534,34 @@ private enum ProtocolFixtureValidator {
             _ = try requireString(operation, key: "source_name", at: "\(path).operation")
             _ = try requireInteger(operation, key: "copied_count", at: "\(path).operation")
             _ = try requireInteger(operation, key: "total_count", at: "\(path).operation")
+            _ = try requireInteger(operation, key: "remaining_count", at: "\(path).operation")
             _ = try requireBoolean(operation, key: "source_available", at: "\(path).operation")
+            _ = try requireString(operation, key: "interruption", at: "\(path).operation")
+            let activityTime = try requireObject(
+                operation,
+                key: "activity_time",
+                at: "\(path).operation"
+            )
+            try requireKeys(
+                activityTime,
+                exactly: ["kind", "unix_seconds", "nanosecond"],
+                at: "\(path).operation.activity_time"
+            )
+            _ = try requireString(
+                activityTime,
+                key: "kind",
+                at: "\(path).operation.activity_time"
+            )
+            _ = try requireInteger(
+                activityTime,
+                key: "unix_seconds",
+                at: "\(path).operation.activity_time"
+            )
+            _ = try requireInteger(
+                activityTime,
+                key: "nanosecond",
+                at: "\(path).operation.activity_time"
+            )
         case "catalog_collections":
             try requireKeys(result, exactly: ["type", "collections"], at: path)
             let collections = try requireArray(result, key: "collections", at: path)
