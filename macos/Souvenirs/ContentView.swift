@@ -1107,8 +1107,12 @@ private struct ImportPlanningSheet: View {
         .sheet(
             isPresented: $showsExistingCollections,
             onDismiss: {
-                keyboardFocus = .destination
-                destinationFocused = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard !showsExistingCollections else { return }
+                    keyboardFocus = .destination
+                    destinationFocused = true
+                }
             }
         ) {
             ExistingCollectionSelector(
