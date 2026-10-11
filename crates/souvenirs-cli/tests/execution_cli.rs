@@ -23,6 +23,14 @@ fn json_stdout(output: &Output) -> Value {
 }
 
 fn prepare_plan(temporary: &TempDir, confirmed: bool) -> (PathBuf, PathBuf, PathBuf) {
+    prepare_plan_with_existing_year(temporary, confirmed, false)
+}
+
+fn prepare_plan_with_existing_year(
+    temporary: &TempDir,
+    confirmed: bool,
+    existing_year: bool,
+) -> (PathBuf, PathBuf, PathBuf) {
     let catalog = temporary.path().join("catalog");
     let source = temporary.path().join("source");
     let snapshot = temporary.path().join("scan.json");
@@ -38,6 +46,9 @@ fn prepare_plan(temporary: &TempDir, confirmed: bool) -> (PathBuf, PathBuf, Path
         "--catalog",
         catalog.to_str().unwrap(),
     ]));
+    if existing_year {
+        fs::create_dir(catalog.join("2026")).unwrap();
+    }
     json_stdout(&run(&[
         "import",
         "scan",
@@ -81,6 +92,20 @@ fn operation_journal(catalog: &Path, operation_id: &str) -> PathBuf {
                 .is_some_and(|line| line.contains(operation_id))
         })
         .expect("operation journal should exist")
+}
+
+fn operation_journal_count(catalog: &Path, operation_id: &str) -> usize {
+    fs::read_dir(catalog.join(".souvenirs").join("journal"))
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            fs::read_to_string(entry.path())
+                .unwrap()
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains(operation_id))
+        })
+        .count()
 }
 
 fn simulate_interruption_after_first_copy(catalog: &Path, path: &Path) {
@@ -294,6 +319,38 @@ fn refuses_to_execute_an_unconfirmed_plan_without_mutating_the_catalog() {
     let error: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(error["error"]["code"], "conflict");
     assert!(!catalog.join("2026").exists());
+}
+
+#[test]
+fn rejects_portable_directory_drift_without_creating_a_journal() {
+    let temporary = TempDir::new().unwrap();
+    let (catalog, _source, plan) = prepare_plan_with_existing_year(&temporary, true, true);
+    let plan_json: Value = serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
+    let operation_id = plan_json["import_plan"]["document"]["plan_id"]
+        .as_str()
+        .unwrap();
+    let occupied = catalog.join("2026").join("2026-10-10 VACATION");
+    fs::create_dir(&occupied).unwrap();
+
+    let output = run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "conflict");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("planned destination is occupied"));
+    assert_eq!(operation_journal_count(&catalog, operation_id), 0);
+    assert!(occupied.is_dir());
 }
 
 #[test]

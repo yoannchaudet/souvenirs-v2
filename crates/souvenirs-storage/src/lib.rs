@@ -14,7 +14,7 @@ pub use capabilities::{
     StorageCapabilities, StorageCapabilityError, VolumeIdentity, WriteSuitability,
 };
 pub use catalog::{CatalogConfig, CatalogInitializationError, CatalogLayout, FORMAT_VERSION};
-pub use catalog_path::{validate_directory, CatalogPathError};
+pub use catalog_path::{validate_directory, CatalogPathError, PortableDestinationObserver};
 pub use copy::{CopyExpectation, VerifiedCopy, VerifiedCopyError};
 pub use lock::{CatalogLock, LockEnvironment, LockError, LockHolder, SystemLockEnvironment};
 pub use manifest::{ManifestReplacement, ManifestReplacementError, ManifestReplacementRequest};

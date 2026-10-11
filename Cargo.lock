@@ -1009,6 +1009,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "souvenirs-domain",
  "tempfile",
  "time",
 ]

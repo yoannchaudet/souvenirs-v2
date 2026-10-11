@@ -31,9 +31,10 @@ use souvenirs_domain::source::{
     SourcePath,
 };
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, ManifestReplacementRequest, OperationJournal,
-    OperationOutcome, OperationRecord, RecoveryCopy, RecoveryDirectory, RecoveryManifest,
-    RecoveryMode, RecoveryOutcome, RecoveryRequest, FORMAT_VERSION,
+    CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError, ManifestReplacementRequest,
+    OperationJournal, OperationOutcome, OperationRecord, PortableDestinationObserver, RecoveryCopy,
+    RecoveryDirectory, RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest,
+    FORMAT_VERSION,
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
@@ -991,6 +992,7 @@ fn import_execute(
 
     let lock = CatalogLock::acquire(&layout)
         .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
+    validate_plan_destinations(&layout, &stored.import_plan)?;
     let mut journal = OperationJournal::create(&layout, &lock, &operation_id, &stored.import_plan)
         .map_err(|error| CliError::conflict(format!("create operation journal: {error}")))?;
     let collection_name = stored
@@ -1304,18 +1306,34 @@ fn validate_plan_state(layout: &CatalogLayout, stored: &StoredPlan) -> Result<()
             }
         }
     }
-    for step in &plan.steps {
-        if let PlanStepKind::CopyFile { destination, .. } = &step.action {
-            let path = join_components(layout.root(), destination);
-            if path.exists() {
-                return Err(CliError::conflict(format!(
-                    "planned destination is occupied: {}",
-                    path.display()
-                )));
-            }
+    Ok(())
+}
+
+fn validate_plan_destinations(layout: &CatalogLayout, plan: &ImportPlan) -> Result<(), CliError> {
+    let mut observer =
+        PortableDestinationObserver::new(layout).map_err(destination_observation_cli_error)?;
+    for destination in plan.destinations_requiring_free() {
+        let relative_path = pathbuf(destination);
+        if observer
+            .is_occupied(&relative_path)
+            .map_err(destination_observation_cli_error)?
+        {
+            return Err(CliError::conflict(format!(
+                "planned destination is occupied: {}",
+                layout.root().join(relative_path).display()
+            )));
         }
     }
     Ok(())
+}
+
+fn destination_observation_cli_error(error: CatalogPathError) -> CliError {
+    match error {
+        CatalogPathError::Io { .. } => {
+            CliError::io(format!("inspect planned destination: {error}"))
+        }
+        other => CliError::conflict(format!("invalid planned destination: {other}")),
+    }
 }
 
 fn source_path_for_id(stored: &StoredPlan, source_file_id: &str) -> Result<PathBuf, CliError> {

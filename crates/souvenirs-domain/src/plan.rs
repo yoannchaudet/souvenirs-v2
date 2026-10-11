@@ -430,20 +430,36 @@ impl ImportPlan {
             .iter()
             .map(|path| portable_path(path).map(|path| path.collision_key()))
             .collect::<Result<_, _>>()?;
-        for step in &self.document.steps {
-            if let PlanStepKind::CopyFile { destination, .. } = &step.action {
-                if portable_path(destination)
-                    .is_ok_and(|path| occupied.contains(&path.collision_key()))
-                {
-                    findings.push(DriftFinding::DestinationOccupied {
-                        path: destination.clone(),
-                    });
-                }
+        for destination in self.destinations_requiring_free() {
+            if portable_path(destination).is_ok_and(|path| occupied.contains(&path.collision_key()))
+            {
+                findings.push(DriftFinding::DestinationOccupied {
+                    path: destination.to_vec(),
+                });
             }
         }
         findings.sort();
         findings.dedup();
         Ok(findings)
+    }
+
+    pub fn destinations_requiring_free(&self) -> impl Iterator<Item = &[String]> {
+        self.document
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                PlanStepKind::CreateDirectory { path } => Some(path.as_slice()),
+                PlanStepKind::CopyFile { destination, .. } => Some(destination.as_slice()),
+                PlanStepKind::WriteManifest {
+                    path,
+                    previous_digest: None,
+                    ..
+                } => Some(path.as_slice()),
+                PlanStepKind::WriteManifest {
+                    previous_digest: Some(_),
+                    ..
+                } => None,
+            })
     }
 }
 
@@ -1403,6 +1419,70 @@ mod tests {
         assert!(findings
             .iter()
             .any(|finding| matches!(finding, DriftFinding::DestinationOccupied { .. })));
+    }
+
+    #[test]
+    fn drift_reports_portably_occupied_directory_destinations() {
+        let mut document = document();
+        document.steps.push(PlanStep {
+            sequence: 4,
+            action: PlanStepKind::CreateDirectory {
+                path: vec!["2024".into(), "Café".into()],
+            },
+        });
+        let plan = ImportPlan::new(document).unwrap();
+        let observed = ObservedPlanState {
+            catalog_id: plan.document().catalog.catalog_id.clone(),
+            source_id: plan.document().source.source_id.clone(),
+            source_fingerprint: plan.document().source.fingerprint.clone(),
+            manifests: plan.document().catalog.manifests.clone(),
+            occupied_destinations: vec![vec!["2024".into(), "CAFE\u{301}".into()]],
+        };
+
+        assert_eq!(
+            plan.validate_drift(&observed).unwrap(),
+            [DriftFinding::DestinationOccupied {
+                path: vec!["2024".into(), "Café".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn drift_reports_an_occupied_new_manifest_destination() {
+        let mut document = document();
+        document.catalog.manifests.clear();
+        let manifest_path = vec!["2024".into(), "collection".into(), "SHA256SUMS".into()];
+        let manifest_step = document
+            .steps
+            .iter_mut()
+            .find(|step| matches!(step.action, PlanStepKind::WriteManifest { .. }))
+            .unwrap();
+        let PlanStepKind::WriteManifest {
+            previous_digest, ..
+        } = &mut manifest_step.action
+        else {
+            unreachable!();
+        };
+        *previous_digest = None;
+        let plan = ImportPlan::new(document).unwrap();
+        let observed = ObservedPlanState {
+            catalog_id: plan.document().catalog.catalog_id.clone(),
+            source_id: plan.document().source.source_id.clone(),
+            source_fingerprint: plan.document().source.fingerprint.clone(),
+            manifests: Vec::new(),
+            occupied_destinations: vec![vec![
+                "2024".into(),
+                "COLLECTION".into(),
+                "sha256sums".into(),
+            ]],
+        };
+
+        assert_eq!(
+            plan.validate_drift(&observed).unwrap(),
+            [DriftFinding::DestinationOccupied {
+                path: manifest_path,
+            }]
+        );
     }
 
     #[test]
