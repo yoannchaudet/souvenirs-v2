@@ -7,6 +7,8 @@ Start with the [specification guide](docs/README.md).
 
 ## Run deterministic engine scenarios
 
+Engine scenario overrides are available only in Debug builds and UI tests.
+
 Build the fake engine for macOS interface development:
 
 ```sh
@@ -24,5 +26,6 @@ Available scenarios are `ready`, `successful-operation`, `failed-operation`,
 `cancellation-race`, `unexpected-termination`, and `malformed-response`. These
 scenarios use standard input and output only. The app currently performs only
 the handshake, so it shows the `ready` state for operation scenarios until an
-interface calls the `EngineSupervisor.requestOperation` API. The production
-engine remains the default when either environment variable is absent.
+interface calls the `EngineSupervisor.requestOperation` API. Debug builds use
+the bundled engine when either environment variable is absent. Release builds
+always use the bundled engine.

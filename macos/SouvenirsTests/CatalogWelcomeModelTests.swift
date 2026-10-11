@@ -55,6 +55,36 @@ final class CatalogWelcomeModelTests: XCTestCase {
         XCTAssertFalse(model.canCreate)
     }
 
+    func testWriteValidationErrorShowsReasonAndBlocksCreation() async {
+        let engine = FakeCatalogEngine()
+        engine.error = EngineSupervisor.SupervisorError.protocolError(
+            code: "catalog_io",
+            message: """
+                Souvenirs cannot write to /Volumes/Archive. \
+                Check that the folder or volume allows changes.
+                """
+        )
+        let model = CatalogWelcomeModel(
+            engine: engine,
+            defaults: isolatedDefaults(),
+            recents: []
+        )
+
+        model.beginCreate()
+        await model.chooseCreateLocation("/Volumes/Archive")
+
+        XCTAssertEqual(
+            model.validation,
+            .invalid(
+                """
+                Souvenirs cannot write to /Volumes/Archive. \
+                Check that the folder or volume allows changes.
+                """
+            )
+        )
+        XCTAssertFalse(model.canCreate)
+    }
+
     func testOpenErrorAndRecentRemoval() async {
         let engine = FakeCatalogEngine()
         engine.error = TestError(message: "Not a catalog.")

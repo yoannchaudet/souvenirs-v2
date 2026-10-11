@@ -320,6 +320,40 @@ Each `ambiguous_sidecar` item finding requires an unhandled sidecar record that 
 Readers validate each document against its declared version.
 Readers continue to verify version 1 digests with the version 1 contract.
 
+Version 3 adds `datetime_disagreements` to each plan item.
+Each entry records the metadata source and one tagged normalized value.
+The value tag records its interpretation state.
+An offset value is valid only for `local_with_offset`.
+Datetime disagreements use source priority, source, then normalized value order.
+Version 3 requires the disagreement array even when it is empty.
+Relationship-resolved items report disagreements from the primary file and its owned sidecars.
+Relationship-unresolved items have no selected datetime candidate and use an empty disagreement array.
+Versions 1 and 2 omit the field and keep their original digest contracts.
+
+Version 4 adds a duplicate review to the plan document.
+The review records the selected catalog and source duplicate choices.
+It also records catalog matches and within-source digest groups.
+Each original records a transfer or retained duplicate disposition.
+A retained catalog duplicate names the first component-wise catalog path.
+A retained source duplicate names the selected source file.
+Sidecars use the transfer disposition.
+Execution copies a sidecar only when its item transfers at least one original.
+
+The catalog skip choice takes precedence when a digest matches the catalog and the source.
+The one-copy choice selects the earliest accepted wall-clock datetime.
+It then selects the first component-wise source path.
+The source file identifier is the final stable tie-breaker.
+
+Version 4 sorts catalog findings by source file identifier.
+It sorts each catalog path list component-wise.
+It sorts source groups by digest and source file identifiers.
+Source groups must exactly cover every repeated digest among source originals.
+The planner establishes catalog finding completeness from the catalog lookup.
+Versions 1 through 3 omit all duplicate fields and keep their original digest contracts.
+
+The CLI continues to emit version 3 plans until planning and locked drift validation support version 4.
+The committed version 4 schema defines the next producer and consumer contract.
+
 The saved-plan `confirmed` field is not part of the digest.
 Execution must reject the plan unless this field is `true`.
 
@@ -454,6 +488,7 @@ just test-rust
 just test-cli
 just test-swift
 just test-ui
+just test-engine-architectures
 just test-integration
 just test-storage
 just check
@@ -476,6 +511,8 @@ Pull requests run:
 - Swift compilation.
 - Swift state tests.
 - A small fake-engine UI suite.
+- Engine architecture verification.
+- A universal macOS application and engine build.
 
 The main branch also runs the full local filesystem integration suite, real-engine UI smoke tests, and failpoint recovery tests.
 

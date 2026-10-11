@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -259,7 +260,9 @@ impl OperationJournal {
                 path: parent.to_path_buf(),
                 source,
             })?;
-        if canonical_parent != canonical_journal_directory || !is_operation_journal(path) {
+        if canonical_parent != canonical_journal_directory
+            || !path.file_name().is_some_and(is_operation_journal_file_name)
+        {
             return Err(OperationJournalError::InvalidJournalPath(
                 path.to_path_buf(),
             ));
@@ -493,7 +496,9 @@ pub fn read_operation_records(
         path: path.to_path_buf(),
         source,
     })?;
-    if !metadata.file_type().is_file() || !is_operation_journal(path) {
+    if !metadata.file_type().is_file()
+        || !path.file_name().is_some_and(is_operation_journal_file_name)
+    {
         return Err(OperationJournalError::InvalidJournalPath(
             path.to_path_buf(),
         ));
@@ -640,7 +645,7 @@ fn ensure_no_unfinished_journal(layout: &CatalogLayout) -> Result<(), OperationJ
             source,
         })?;
         let path = entry.path();
-        if !is_operation_journal(&path) {
+        if !path.file_name().is_some_and(is_operation_journal_file_name) {
             continue;
         }
         if is_initialization_journal(&path) {
@@ -687,12 +692,10 @@ fn ensure_no_unfinished_journal(layout: &CatalogLayout) -> Result<(), OperationJ
     Ok(())
 }
 
-fn is_operation_journal(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
-        && !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("._"))
+/// Returns whether a file name identifies a discoverable operation journal.
+pub fn is_operation_journal_file_name(file_name: &OsStr) -> bool {
+    Path::new(file_name).extension() == Some(OsStr::new("jsonl"))
+        && !file_name.as_encoded_bytes().starts_with(b"._")
 }
 
 fn is_initialization_journal(path: &Path) -> bool {
@@ -928,5 +931,34 @@ impl Error for OperationJournalError {
             #[cfg(feature = "test-failpoints")]
             Self::Failpoint(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
+    use super::is_operation_journal_file_name;
+
+    #[test]
+    fn operation_journal_file_names_exclude_appledouble_sidecars() {
+        assert!(is_operation_journal_file_name(OsStr::new(
+            "20260101-000000-import.jsonl"
+        )));
+        assert!(is_operation_journal_file_name(OsStr::new(
+            "malformed-but-discoverable.jsonl"
+        )));
+        assert!(!is_operation_journal_file_name(OsStr::new(
+            "._20260101-000000-import.jsonl"
+        )));
+        assert!(!is_operation_journal_file_name(OsStr::new(
+            "20260101-000000-import.txt"
+        )));
+        #[cfg(unix)]
+        assert!(!is_operation_journal_file_name(OsStr::from_bytes(
+            b"._invalid-\xFF.jsonl"
+        )));
     }
 }

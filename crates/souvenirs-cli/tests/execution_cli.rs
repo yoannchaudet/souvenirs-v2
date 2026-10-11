@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn run(args: &[&str]) -> Output {
@@ -275,8 +277,101 @@ fn executes_inspects_and_verifies_without_parsing_human_output() {
         catalog.to_str().unwrap(),
     ]));
     assert_eq!(integrity["result"]["valid"], true);
+    assert_eq!(integrity["result"]["coverage_complete"], true);
     assert_eq!(integrity["result"]["checked_files"], 2);
     assert_eq!(integrity["result"]["findings"], serde_json::json!([]));
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_manifested_original_preserves_findings_and_continues_checking() {
+    let temporary = TempDir::new().unwrap();
+    let (catalog, _source, plan) = prepare_plan(&temporary, true);
+    json_stdout(&run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+    ]));
+
+    let year = catalog.join("2026");
+    fs::create_dir(year.join("2026-10-09 Earlier")).unwrap();
+    let collection = year.join("2026-10-10 Vacation");
+    let later = year.join("2026-10-11 Later");
+    fs::create_dir(&later).unwrap();
+    for filename in [
+        "2026-10-10 12-34-56 001.jpg",
+        "2026-10-10 12-34-56 002.jpg",
+        "SHA256SUMS",
+    ] {
+        fs::copy(collection.join(filename), later.join(filename)).unwrap();
+    }
+    let unreadable_manifest = later.join("SHA256SUMS");
+    fs::set_permissions(&unreadable_manifest, fs::Permissions::from_mode(0o000)).unwrap();
+    let unlistable = year.join("2026-10-12 Unlistable");
+    fs::create_dir(&unlistable).unwrap();
+    for filename in [
+        "2026-10-10 12-34-56 001.jpg",
+        "2026-10-10 12-34-56 002.jpg",
+        "SHA256SUMS",
+    ] {
+        fs::copy(collection.join(filename), unlistable.join(filename)).unwrap();
+    }
+    fs::set_permissions(&unlistable, fs::Permissions::from_mode(0o100)).unwrap();
+    fs::create_dir(year.join("2026-10-13 Final")).unwrap();
+    let unreadable = collection.join("2026-10-10 12-34-56 001.jpg");
+    let changed = collection.join("2026-10-10 12-34-56 002.jpg");
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::write(&changed, b"changed after import").unwrap();
+
+    let integrity = json_stdout(&run(&[
+        "integrity",
+        "check",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&unreadable_manifest, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&unlistable, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(integrity["result"]["valid"], false);
+    assert_eq!(integrity["result"]["coverage_complete"], false);
+    assert_eq!(integrity["result"]["checked_files"], 3);
+    assert_eq!(integrity["result"]["checked_manifests"], 2);
+    assert_eq!(
+        integrity["result"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|finding| finding["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "missing_manifest",
+            "unreadable_file",
+            "digest_mismatch",
+            "unreadable_file",
+            "unreadable_collection",
+            "missing_manifest"
+        ]
+    );
+    assert_eq!(
+        integrity["result"]["findings"][1]["path"],
+        "2026/2026-10-10 Vacation/2026-10-10 12-34-56 001.jpg"
+    );
+    assert!(integrity["result"]["findings"][1]["error"]
+        .as_str()
+        .unwrap()
+        .contains("Permission denied"));
+    assert_eq!(
+        integrity["result"]["findings"][3]["path"],
+        "2026/2026-10-11 Later/SHA256SUMS"
+    );
+    assert_eq!(
+        integrity["result"]["findings"][4]["collection"],
+        "2026/2026-10-12 Unlistable"
+    );
 }
 
 #[test]

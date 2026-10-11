@@ -287,10 +287,12 @@ fn is_reserved_windows_name(value: &str) -> bool {
         .unwrap_or_default()
         .trim_end_matches([' ', '.']);
     let folded = stem.to_ascii_uppercase();
-    matches!(folded.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || folded
-            .strip_prefix("COM")
-            .is_some_and(is_reserved_device_number)
+    matches!(
+        folded.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || folded
+        .strip_prefix("COM")
+        .is_some_and(is_reserved_device_number)
         || folded
             .strip_prefix("LPT")
             .is_some_and(is_reserved_device_number)
@@ -337,6 +339,22 @@ mod tests {
             "+2d Vacation",
         ] {
             assert!(CatalogLabel::new(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn rejects_windows_console_device_aliases() {
+        for invalid in ["conin$", "CONIN$", "ConIn$.txt", "conout$", "CONOUT$.log"] {
+            assert_eq!(
+                PortableComponent::new(invalid),
+                Err(NameError::ReservedWindowsName),
+                "{invalid}"
+            );
+            assert_eq!(
+                CatalogLabel::new(invalid),
+                Err(NameError::ReservedWindowsName),
+                "{invalid}"
+            );
         }
     }
 

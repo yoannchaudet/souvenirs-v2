@@ -28,15 +28,56 @@ jobs:
       - name: Validate shared protocol contract
         run: just test-protocol
 
+      - name: Test engine architecture verification
+        run: ./scripts/test-engine-architectures.sh
+
+      - name: Build universal app and engine
+        run: |
+          derived_data="$RUNNER_TEMP/SouvenirsUniversalDerivedData"
+          xcodebuild build \
+            -project macos/Souvenirs.xcodeproj \
+            -scheme Souvenirs \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath "$derived_data" \
+            ARCHS='arm64 x86_64' \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO
+          app="$derived_data/Build/Products/Release/Souvenirs.app"
+          ./scripts/engine-architectures.sh verify \
+            "$app/Contents/MacOS/Souvenirs" \
+            "$app/Contents/MacOS/souvenirs-engine"
+          app_architectures=$(lipo -archs "$app/Contents/MacOS/Souvenirs" | tr ' ' '\n' | sort | xargs)
+          engine_architectures=$(lipo -archs "$app/Contents/MacOS/souvenirs-engine" | tr ' ' '\n' | sort | xargs)
+          [[ "$app_architectures" == 'arm64 x86_64' ]]
+          [[ "$engine_architectures" == 'arm64 x86_64' ]]
+
       - name: Build and test Swift state
         run: just test-swift
         env:
           SWIFT_DERIVED_DATA_PATH: ${{ runner.temp }}/SouvenirsStateDerivedData
 
+      - name: Verify Debug engine overrides
+        run: |
+          app="$RUNNER_TEMP/SouvenirsStateDerivedData/Build/Products/Debug/Souvenirs.app"
+          [[ -d "$app" ]] || {
+            echo "Debug app not found: $app" >&2
+            exit 1
+          }
+          for override in SOUVENIRS_ENGINE_EXECUTABLE SOUVENIRS_FAKE_ENGINE_SCENARIO; do
+            grep -aFrq -- "$override" "$app/Contents/MacOS" || {
+              echo "Debug app does not contain development engine override: $override" >&2
+              exit 1
+            }
+          done
+
       - name: Run Swift UI tests
         run: just test-ui
         env:
           SWIFT_DERIVED_DATA_PATH: ${{ runner.temp }}/SouvenirsUIDerivedData
+
+      - name: Test release signing policy
+        run: just test-release-signing
 
       - name: Build and verify Release app
         run: |
