@@ -313,19 +313,13 @@ pub(crate) fn publish_path_exclusively(
     staged_path: &Path,
     destination: &Path,
 ) -> Result<(), PublishError> {
-    let parent = destination.parent().ok_or_else(|| {
-        PublishError::Io(io::Error::new(
+    let (Some(parent), Some(file_name)) = (destination.parent(), destination.file_name()) else {
+        return Err(PublishError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "publication destination has no parent",
-        ))
-    })?;
+            "publication destination needs a parent and file name",
+        )));
+    };
     let directory = File::open(parent).map_err(PublishError::Io)?;
-    let file_name = destination.file_name().ok_or_else(|| {
-        PublishError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "publication destination has no file name",
-        ))
-    })?;
     publish_with_directory(staged_path, &directory, file_name, destination)
 }
 
