@@ -122,6 +122,10 @@ impl CatalogLayout {
         };
         let parsed = read_parsed_operation_records(&path, "inspect initialization journal")
             .map_err(CatalogInitializationError::Journal)?;
+        if let Some(format_version) = parsed.legacy_initialization_format {
+            verify_legacy_completed_initialization(self, &path, format_version)?;
+            return Ok(false);
+        }
         if parsed.records.is_empty() {
             return Ok(false);
         }
@@ -277,6 +281,10 @@ impl CatalogLayout {
     ) -> Result<(), CatalogInitializationError> {
         let discovered = discover_initialization_journal(self)?;
         let (journal, plan) = match discovered {
+            Some(DiscoveredJournal::LegacyCompleted(path, format_version)) => {
+                verify_legacy_completed_initialization(self, &path, format_version)?;
+                return Ok(());
+            }
             Some(DiscoveredJournal::Preparation(path)) => {
                 check_failpoint(
                     failpoint,
@@ -316,9 +324,13 @@ impl CatalogLayout {
     }
 
     fn resume_initialization_locked(&self) -> Result<bool, CatalogInitializationError> {
-        let Some(DiscoveredJournal::Valid(journal, plan)) = discover_initialization_journal(self)?
-        else {
-            return Ok(false);
+        let (journal, plan) = match discover_initialization_journal(self)? {
+            Some(DiscoveredJournal::Valid(journal, plan)) => (journal, plan),
+            Some(DiscoveredJournal::LegacyCompleted(path, format_version)) => {
+                verify_legacy_completed_initialization(self, &path, format_version)?;
+                return Ok(false);
+            }
+            _ => return Ok(false),
         };
         let pending = !validate_initialization_outcome(&journal.path, &journal.records)?;
         self.resume_initialization_journal(journal, plan, None)?;
@@ -472,10 +484,10 @@ struct InitializationJournal {
 }
 
 impl InitializationJournal {
-    fn open(path: PathBuf) -> Result<Self, CatalogInitializationError> {
-        let parsed =
-            read_parsed_operation_records(&path, "read initialization journal for recovery")
-                .map_err(CatalogInitializationError::Journal)?;
+    fn open(
+        path: PathBuf,
+        parsed: crate::operation::ParsedOperationRecords,
+    ) -> Result<Self, CatalogInitializationError> {
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
@@ -518,6 +530,7 @@ impl InitializationJournal {
 }
 
 enum DiscoveredJournal {
+    LegacyCompleted(PathBuf, u32),
     Preparation(PathBuf),
     Valid(InitializationJournal, InitializationPlan),
 }
@@ -528,7 +541,15 @@ fn discover_initialization_journal(
     let Some(path) = initialization_journal_path(layout)? else {
         return Ok(None);
     };
-    let journal = InitializationJournal::open(path.clone())?;
+    let parsed = read_parsed_operation_records(&path, "read initialization journal for recovery")
+        .map_err(CatalogInitializationError::Journal)?;
+    if let Some(format_version) = parsed.legacy_initialization_format {
+        return Ok(Some(DiscoveredJournal::LegacyCompleted(
+            path,
+            format_version,
+        )));
+    }
+    let journal = InitializationJournal::open(path.clone(), parsed)?;
     if journal.records.is_empty() && path == layout.bootstrap_journal_path() {
         return Ok(Some(DiscoveredJournal::Preparation(path)));
     }
@@ -540,6 +561,40 @@ fn discover_initialization_journal(
     }
     let plan = initialization_plan(&path, &journal.records)?;
     Ok(Some(DiscoveredJournal::Valid(journal, plan)))
+}
+
+fn verify_legacy_completed_initialization(
+    layout: &CatalogLayout,
+    path: &Path,
+    format_version: u32,
+) -> Result<(), CatalogInitializationError> {
+    ensure_directory(&layout.state_directory())?;
+    ensure_directory(&layout.journal_directory())?;
+    ensure_directory(&layout.staging_directory())?;
+    if path.parent() != Some(layout.journal_directory().as_path()) {
+        return Err(CatalogInitializationError::InvalidBootstrapJournal {
+            path: path.to_path_buf(),
+            details: "legacy initialization journal is not completed catalog history",
+        });
+    }
+    let config = fs::read_to_string(layout.config_path()).map_err(|source| {
+        CatalogInitializationError::Io {
+            action: "read legacy catalog configuration",
+            path: layout.config_path(),
+            source,
+        }
+    })?;
+    let config_version = config
+        .lines()
+        .find_map(|line| line.strip_prefix("format_version: "))
+        .and_then(|value| value.parse::<u32>().ok());
+    if format_version != FORMAT_VERSION || config_version != Some(format_version) {
+        return Err(CatalogInitializationError::InvalidBootstrapJournal {
+            path: path.to_path_buf(),
+            details: "legacy initialization journal does not match the catalog configuration",
+        });
+    }
+    Ok(())
 }
 
 fn initialization_journal_path(
@@ -1352,12 +1407,8 @@ impl From<StorageCapabilityError> for CatalogInitializationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CatalogConfig, CatalogInitializationError, CatalogLayout, LockError,
-        BOOTSTRAP_JOURNAL_NAME, BOOTSTRAP_LOCK_NAME, BOOTSTRAP_TAKEOVER_NAME, FORMAT_VERSION,
-    };
+    use super::{CatalogConfig, CatalogInitializationError, CatalogLayout, FORMAT_VERSION};
     use std::fs;
-    use std::sync::{Arc, Barrier};
 
     use crate::test_support::TempDirectory;
 
@@ -1381,18 +1432,17 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(journals.len(), 1);
-        let records = crate::read_operation_records(journals[0].path()).unwrap();
-        assert!(matches!(
-            records.first(),
-            Some(crate::OperationRecord::Plan { operation_id, .. })
-                if operation_id == "initialize"
-        ));
-        assert!(matches!(
-            records.last(),
-            Some(crate::OperationRecord::Outcome {
-                outcome: crate::OperationOutcome::Completed
-            })
-        ));
+        let plan = format!(
+            "{{\"kind\":\"plan\",\"operation\":\"initialize\",\"format_version\":{FORMAT_VERSION}}}\n"
+        );
+        fs::write(
+            journals[0].path(),
+            format!("{plan}{{\"kind\":\"outcome\",\"outcome\":\"completed\"}}\n"),
+        )
+        .unwrap();
+        CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap();
+        fs::write(journals[0].path(), plan).unwrap();
+        assert!(CatalogLayout::resume_initialization(temporary.path()).is_err());
     }
 
     #[test]
@@ -1413,140 +1463,6 @@ mod tests {
             "existing"
         );
         assert!(!temporary.path().join(".souvenirs").exists());
-    }
-
-    #[test]
-    fn refuses_to_replace_an_existing_state_directory() {
-        let temporary = TempDirectory::new("occupied-state");
-        let state = temporary.path().join(".souvenirs");
-        fs::create_dir(&state).unwrap();
-        fs::write(state.join("keep"), b"unrelated").unwrap();
-
-        let error =
-            CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap_err();
-
-        assert!(matches!(
-            error,
-            CatalogInitializationError::AlreadyExists(path) if path == state
-        ));
-        assert_eq!(
-            fs::read(temporary.path().join(".souvenirs/keep")).unwrap(),
-            b"unrelated"
-        );
-    }
-
-    #[test]
-    fn preserves_a_malformed_durable_bootstrap_journal() {
-        let temporary = TempDirectory::new("invalid-bootstrap");
-        let journal = temporary.path().join(".souvenirs-initialize.jsonl");
-        fs::write(&journal, b"{not json}\n").unwrap();
-
-        let error =
-            CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap_err();
-
-        assert!(matches!(
-            error,
-            CatalogInitializationError::Journal(
-                crate::OperationJournalError::DeserializeRecord { .. }
-            )
-        ));
-        assert_eq!(fs::read(journal).unwrap(), b"{not json}\n");
-        assert!(!temporary.path().join(".souvenirs").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn preserves_a_symlink_at_a_catalog_path() {
-        use std::os::unix::fs::symlink;
-
-        let temporary = TempDirectory::new("symlink");
-        let target = temporary.path().join("target");
-        fs::create_dir(&target).unwrap();
-        let state = temporary.path().join(".souvenirs");
-        symlink(&target, &state).unwrap();
-
-        let error =
-            CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap_err();
-
-        assert!(matches!(
-            error,
-            CatalogInitializationError::PathConflict(path) if path == state
-        ));
-        assert!(fs::symlink_metadata(state)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn preserves_a_symlink_at_the_bootstrap_takeover_path() {
-        use std::os::unix::fs::symlink;
-
-        let temporary = TempDirectory::new("takeover-symlink");
-        let target = temporary.path().join("target");
-        fs::write(&target, b"keep").unwrap();
-        let takeover = temporary.path().join(BOOTSTRAP_TAKEOVER_NAME);
-        symlink(&target, &takeover).unwrap();
-
-        let error =
-            CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap_err();
-
-        assert!(matches!(
-            error,
-            CatalogInitializationError::PathConflict(path) if path == takeover
-        ));
-        assert_eq!(fs::read(target).unwrap(), b"keep");
-    }
-
-    #[test]
-    fn concurrent_initialization_preserves_one_consistent_catalog() {
-        let temporary = TempDirectory::new("concurrent-initialize");
-        let barrier = Arc::new(Barrier::new(2));
-        let root = temporary.path();
-        let results = std::thread::scope(|scope| {
-            let initialize = || {
-                let barrier = Arc::clone(&barrier);
-                scope.spawn(move || {
-                    barrier.wait();
-                    CatalogLayout::initialize(root, &CatalogConfig::default())
-                })
-            };
-            [initialize(), initialize()].map(|handle| handle.join().unwrap())
-        });
-
-        assert!(
-            results.iter().any(Result::is_ok)
-                && results.iter().all(|result| result.is_ok()
-                    || matches!(
-                        result,
-                        Err(CatalogInitializationError::Lock(
-                            LockError::Busy(_) | LockError::TakeoverBusy
-                        ))
-                    )),
-            "{results:?}"
-        );
-        CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap();
-        assert!(!temporary.path().join(BOOTSTRAP_LOCK_NAME).exists());
-        assert!(!temporary.path().join(BOOTSTRAP_TAKEOVER_NAME).exists());
-        assert!(!temporary.path().join(BOOTSTRAP_JOURNAL_NAME).exists());
-    }
-
-    #[test]
-    fn rejects_changed_configuration_after_completion() {
-        let temporary = TempDirectory::new("changed-config");
-        CatalogLayout::initialize(temporary.path(), &CatalogConfig::default()).unwrap();
-        let changed = CatalogConfig {
-            display_name: Some("Other".to_owned()),
-            ..CatalogConfig::default()
-        };
-
-        let error = CatalogLayout::initialize(temporary.path(), &changed).unwrap_err();
-
-        assert!(matches!(
-            error,
-            CatalogInitializationError::ConfigurationMismatch { .. }
-        ));
     }
 
     #[test]

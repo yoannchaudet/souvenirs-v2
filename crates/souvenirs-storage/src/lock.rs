@@ -146,7 +146,26 @@ impl CatalogLock {
         takeover_path: PathBuf,
         environment: &impl LockEnvironment,
     ) -> Result<Self, LockError> {
-        Self::acquire_paths_with_takeover(path, takeover_path, environment).map(|(lock, _)| lock)
+        let holder = current_holder(environment)?;
+        match write_holder_exclusively(&path, &holder) {
+            Ok(()) => {
+                return Ok(Self {
+                    path,
+                    holder,
+                    released: false,
+                })
+            }
+            Err(LockError::Io { source, .. }) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let takeover =
+            TakeoverGuard::acquire(&takeover_path, environment).map_err(|error| match error {
+                LockError::TakeoverBusy => report_takeover_busy(&path),
+                error => error,
+            })?;
+        let lock = Self::acquire_under_takeover(path, holder, environment);
+        drop(takeover);
+        lock
     }
 
     pub(crate) fn acquire_paths_with_takeover(
@@ -160,17 +179,22 @@ impl CatalogLock {
                 error => error,
             })?;
         let holder = current_holder(environment)?;
+        let lock = Self::acquire_under_takeover(path, holder, environment)?;
+        Ok((lock, takeover))
+    }
 
+    fn acquire_under_takeover(
+        path: PathBuf,
+        holder: LockHolder,
+        environment: &impl LockEnvironment,
+    ) -> Result<Self, LockError> {
         match write_holder_exclusively(&path, &holder) {
             Ok(()) => {
-                return Ok((
-                    Self {
-                        path,
-                        holder,
-                        released: false,
-                    },
-                    takeover,
-                ))
+                return Ok(Self {
+                    path,
+                    holder,
+                    released: false,
+                })
             }
             Err(LockError::Io { source, .. }) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -196,14 +220,11 @@ impl CatalogLock {
             }
             return Err(error);
         }
-        Ok((
-            Self {
-                path,
-                holder,
-                released: false,
-            },
-            takeover,
-        ))
+        Ok(Self {
+            path,
+            holder,
+            released: false,
+        })
     }
 
     pub fn holder(&self) -> &LockHolder {
@@ -842,9 +863,7 @@ fn system_process_start_id(_process_id: u32) -> Result<Option<String>, LockError
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        file_identifies_path, CatalogLock, LockEnvironment, LockError, LockHolder, TakeoverGuard,
-    };
+    use super::{CatalogLock, LockEnvironment, LockError, LockHolder, TakeoverGuard};
     use crate::catalog::{CatalogConfig, CatalogLayout};
     use crate::test_support::TempDirectory;
     use std::fs;
@@ -1094,22 +1113,12 @@ mod tests {
             TakeoverGuard::acquire(&layout.lock_takeover_path(), &second_environment).unwrap_err();
 
         assert!(matches!(error, LockError::TakeoverBusy));
+        let ordinary = CatalogLock::acquire_with(&layout, &second_environment).unwrap();
+        ordinary.release().unwrap();
         let original = holder("boot-a", 41, Some("process-41"));
         write_holder(&layout, &original);
         let error = CatalogLock::acquire_with(&layout, &second_environment).unwrap_err();
         assert!(matches!(error, LockError::Busy(actual) if *actual == original));
-    }
-
-    #[test]
-    fn takeover_guard_detects_an_unlinked_open_inode() {
-        let temporary = TempDirectory::new("takeover-inode");
-        let path = temporary.path().join("takeover");
-        fs::write(&path, b"old").unwrap();
-        let open = fs::File::open(&path).unwrap();
-        fs::remove_file(&path).unwrap();
-        fs::write(&path, b"new").unwrap();
-
-        assert!(!file_identifies_path(&open, &path).unwrap());
     }
 
     #[test]

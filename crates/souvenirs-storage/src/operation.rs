@@ -279,6 +279,7 @@ impl OperationJournal {
             records,
             complete_length,
             interrupted_tail,
+            ..
         } = read_parsed_operation_records(path, "read operation journal for recovery")?;
         let operation_id = match records.first() {
             Some(OperationRecord::Plan { operation_id, .. }) => operation_id.clone(),
@@ -504,6 +505,7 @@ pub(crate) struct ParsedOperationRecords {
     pub records: Vec<OperationRecord>,
     pub complete_length: u64,
     pub interrupted_tail: bool,
+    pub legacy_initialization_format: Option<u32>,
 }
 
 pub(crate) fn read_parsed_operation_records(
@@ -515,6 +517,14 @@ pub(crate) fn read_parsed_operation_records(
         path: path.to_path_buf(),
         source,
     })?;
+    if let Some((records, format_version)) = parse_completed_legacy_initialization(path, &bytes) {
+        return Ok(ParsedOperationRecords {
+            records,
+            complete_length: bytes.len() as u64,
+            interrupted_tail: false,
+            legacy_initialization_format: Some(format_version),
+        });
+    }
     let mut records = Vec::new();
     let mut start = 0;
     let mut line_number = 1;
@@ -540,7 +550,59 @@ pub(crate) fn read_parsed_operation_records(
         records,
         complete_length: start as u64,
         interrupted_tail: start < bytes.len(),
+        legacy_initialization_format: None,
     })
+}
+
+fn parse_completed_legacy_initialization(
+    path: &Path,
+    bytes: &[u8],
+) -> Option<(Vec<OperationRecord>, u32)> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyPlan {
+        kind: String,
+        operation: String,
+        format_version: u32,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyOutcome {
+        kind: String,
+        outcome: String,
+    }
+
+    if !is_initialization_journal(path) || !bytes.ends_with(b"\n") {
+        return None;
+    }
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty());
+    let plan: LegacyPlan = serde_json::from_slice(lines.next()?).ok()?;
+    let outcome: LegacyOutcome = serde_json::from_slice(lines.next()?).ok()?;
+    if lines.next().is_some()
+        || plan.kind != "plan"
+        || plan.operation != INITIALIZATION_OPERATION_ID
+        || outcome.kind != "outcome"
+        || outcome.outcome != "completed"
+    {
+        return None;
+    }
+    Some((
+        vec![
+            OperationRecord::Plan {
+                operation_id: INITIALIZATION_OPERATION_ID.to_owned(),
+                plan: serde_json::json!({
+                    "legacy_initialization": true,
+                    "format_version": plan.format_version,
+                }),
+            },
+            OperationRecord::Outcome {
+                outcome: OperationOutcome::Completed,
+            },
+        ],
+        plan.format_version,
+    ))
 }
 
 pub(crate) fn append_operation_record(
@@ -588,11 +650,22 @@ fn ensure_no_unfinished_journal(layout: &CatalogLayout) -> Result<(), OperationJ
         if !is_operation_journal(&path) {
             continue;
         }
+        if is_initialization_journal(&path) {
+            let parsed = read_parsed_operation_records(&path, "read initialization journal")?;
+            if parsed.records.last().is_some_and(|record| {
+                matches!(
+                    record,
+                    OperationRecord::Outcome {
+                        outcome: OperationOutcome::Completed
+                    }
+                )
+            }) {
+                continue;
+            }
+            return Err(OperationJournalError::UnfinishedOperation(path));
+        }
         if journal_tail_has_outcome(&path)? {
             continue;
-        }
-        if is_initialization_journal(&path) {
-            return Err(OperationJournalError::UnfinishedOperation(path));
         }
         let parsed = read_parsed_operation_records(&path, "read operation journal outcome")?;
         if parsed.records.is_empty() {
@@ -684,8 +757,10 @@ fn validate_new_operation_identifier(identifier: &str) -> Result<(), OperationJo
 }
 
 fn is_reserved_initialization_identifier(identifier: &str) -> bool {
-    identifier == "initialize" || identifier.ends_with("-initialize")
+    identifier == INITIALIZATION_OPERATION_ID || identifier.ends_with("-initialize")
 }
+
+const INITIALIZATION_OPERATION_ID: &str = "initialize";
 
 pub(crate) fn validate_identifier(
     kind: &'static str,

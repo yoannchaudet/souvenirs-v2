@@ -93,19 +93,14 @@ impl CatalogService {
         display_name: impl AsRef<str>,
     ) -> Result<CatalogLocation, CatalogServiceError> {
         let path = path.as_ref();
-        if CatalogLayout::resume_initialization(path)?.is_some() {
-            return Ok(location(path));
-        }
-        Self::validate(path, CatalogIntent::Create)?;
         let display_name = CatalogLabel::new(display_name.as_ref())
             .map_err(|error| CatalogServiceError::InvalidName(error.to_string()))?;
-        CatalogLayout::initialize(
-            path,
-            &CatalogConfig {
-                display_name: Some(display_name.to_string()),
-                ..CatalogConfig::default()
-            },
-        )?;
+        let config = CatalogConfig {
+            display_name: Some(display_name.to_string()),
+            ..CatalogConfig::default()
+        };
+        Self::validate(path, CatalogIntent::Create)?;
+        CatalogLayout::initialize(path, &config)?;
         Ok(location(path))
     }
 
@@ -960,6 +955,18 @@ mod tests {
             .expect("empty directory should be valid");
         CatalogService::create(directory.path(), "Family Catalog")
             .expect("catalog should initialize");
+        let journal = fs::read_dir(directory.path().join(".souvenirs/journal"))
+            .unwrap()
+            .flatten()
+            .next()
+            .unwrap()
+            .path();
+        fs::write(
+            journal,
+            "{\"kind\":\"plan\",\"operation\":\"initialize\",\"format_version\":2}\n\
+             {\"kind\":\"outcome\",\"outcome\":\"completed\"}\n",
+        )
+        .unwrap();
         let location = CatalogService::open(directory.path()).expect("catalog should open");
         assert_eq!(location.display_name.as_deref(), Some("Family Catalog"));
         assert_eq!(
@@ -974,7 +981,7 @@ mod tests {
 
     #[cfg(feature = "test-failpoints")]
     #[test]
-    fn application_resumes_a_published_initialization() {
+    fn application_resumes_only_the_requested_initialization() {
         let directories = [tempdir().unwrap(), tempdir().unwrap()];
         let config = souvenirs_storage::CatalogConfig {
             display_name: Some("Confirmed name".to_owned()),
@@ -989,11 +996,14 @@ mod tests {
             .unwrap_err();
         }
 
-        CatalogService::validate(directories[0].path(), CatalogIntent::Create).unwrap();
-        let location = CatalogService::create(directories[0].path(), "Different name").unwrap();
-        assert_eq!(location.display_name.as_deref(), Some("Confirmed name"));
-        let opened = CatalogService::open(directories[1].path()).unwrap();
-        assert_eq!(opened.display_name.as_deref(), Some("Confirmed name"));
+        CatalogService::create(directories[0].path(), "Confirmed name").unwrap();
+        assert!(matches!(
+            CatalogService::create(directories[1].path(), "Different name"),
+            Err(CatalogServiceError::Initialization(
+                souvenirs_storage::CatalogInitializationError::ConfigurationMismatch { .. }
+            ))
+        ));
+        CatalogService::open(directories[1].path()).unwrap();
     }
 
     #[test]
