@@ -299,6 +299,7 @@ final class ImportExecutionModelTests: XCTestCase {
                         state: .needsConfirmation,
                         itemCount: 4,
                         requiresClock: false,
+                        supportsUTCConversion: true,
                         asShownTime: "12:14",
                         convertedFromUTCTime: "14:14"
                     )

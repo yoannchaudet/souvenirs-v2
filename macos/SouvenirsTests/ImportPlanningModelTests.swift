@@ -14,8 +14,7 @@ final class ImportPlanningModelTests: XCTestCase {
         XCTAssertEqual(model.acceptedDate, "2026-10-10")
         XCTAssertEqual(model.review?.requiredDecisionCount, 1)
         XCTAssertEqual(model.dateChoiceCount, 4)
-        XCTAssertEqual(model.asShownTime, "12:14")
-        XCTAssertEqual(model.convertedFromUTCTime, "14:14")
+        XCTAssertTrue(model.supportsUTCConversion)
         XCTAssertTrue(model.canStart)
         XCTAssertEqual(model.review?.transferCount, 8)
         XCTAssertEqual(model.review?.skippedCount, 4)
@@ -84,6 +83,20 @@ final class ImportPlanningModelTests: XCTestCase {
         XCTAssertEqual(model.deferredDateCount, 1)
     }
 
+    func testProposalOnlyChoiceDoesNotOfferUTCConversion() async {
+        let engine = FakeImportPlanningEngine()
+        engine.supportsUTCConversion = false
+        let model = makeModel(engine: engine)
+
+        await model.load()
+
+        XCTAssertFalse(model.supportsUTCConversion)
+        XCTAssertEqual(
+            model.interpretationChoiceSources.first?.asShownTime,
+            "12:14"
+        )
+    }
+
     func testSummaryUsesEngineOwnedCountsAndDestination() async {
         let engine = FakeImportPlanningEngine()
         let model = makeModel(engine: engine)
@@ -119,6 +132,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
     var lastCollectionName: String?
     var lastDestinationMode: EngineSupervisor.ImportDestinationMode?
     var includesDeferredDate = false
+    var supportsUTCConversion = true
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
         if let error { throw error }
@@ -143,8 +157,9 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
                     state: .needsConfirmation,
                     itemCount: 4,
                     requiresClock: false,
+                    supportsUTCConversion: supportsUTCConversion,
                     asShownTime: "12:14",
-                    convertedFromUTCTime: "14:14"
+                    convertedFromUTCTime: supportsUTCConversion ? "14:14" : "12:14"
                 )
             ] + (includesDeferredDate
                 ? [
@@ -153,6 +168,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
                         state: .needsConfirmation,
                         itemCount: 1,
                         requiresClock: true,
+                        supportsUTCConversion: false,
                         asShownTime: nil,
                         convertedFromUTCTime: nil
                     )

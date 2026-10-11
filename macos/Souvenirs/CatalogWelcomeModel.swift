@@ -292,12 +292,8 @@ final class ImportPlanningModel: ObservableObject {
         }
     }
 
-    var asShownTime: String? {
-        dateChoiceSources.lazy.compactMap(\.asShownTime).first
-    }
-
-    var convertedFromUTCTime: String? {
-        dateChoiceSources.lazy.compactMap(\.convertedFromUTCTime).first
+    var supportsUTCConversion: Bool {
+        interpretationChoiceSources.contains { $0.supportsUTCConversion }
     }
 
     var isStartBlocked: Bool {

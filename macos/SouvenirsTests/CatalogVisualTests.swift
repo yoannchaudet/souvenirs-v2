@@ -560,6 +560,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
                     state: .needsConfirmation,
                     itemCount: 4,
                     requiresClock: false,
+                    supportsUTCConversion: true,
                     asShownTime: "12:14",
                     convertedFromUTCTime: "14:14"
                 )

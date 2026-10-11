@@ -1045,9 +1045,8 @@ private struct ImportPlanningSheet: View {
                         .focused($keyboardFocus, equals: .dateSummary)
                         .accessibilityFocused($dateFocused, equals: .dateSummary)
                         .accessibilityIdentifier("import-date-selection")
-                        .accessibilityLabel(
-                            "Selected date interpretation: \(selectedDateSummary(resolution))"
-                        )
+                        .accessibilityLabel("Selected date interpretation")
+                        .accessibilityValue(selectedDateSummary(resolution))
                     Spacer()
                     Button("Change") {
                         Task {
@@ -1075,29 +1074,42 @@ private struct ImportPlanningSheet: View {
                             .background(.orange.opacity(0.15), in: Circle())
                         VStack(alignment: .leading, spacing: 7) {
                             ForEach(
-                                model.interpretationChoiceSources,
-                                id: \.source
-                            ) { summary in
-                                Text(pendingDateSummary(summary))
-                                    .font(.callout.bold())
+                                Array(model.interpretationChoiceSources.enumerated()),
+                                id: \.offset
+                            ) { _, summary in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(pendingDateSummary(summary))
+                                        .font(.callout.bold())
+                                    if let asShownTime = summary.asShownTime {
+                                        Text("As shown: \(asShownTime)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if summary.supportsUTCConversion,
+                                       let convertedTime = summary.convertedFromUTCTime {
+                                        Text("Convert from UTC: \(convertedTime)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                             Text(dateFallbackDescription)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             HStack {
                                 decisionButton(
-                                    "As shown",
-                                    resultingTime: model.asShownTime,
+                                    model.supportsUTCConversion ? "As shown" : "Use proposed dates",
                                     value: .asShown,
                                     focus: .asShown
                                 )
-                                decisionButton(
-                                    "Convert from UTC",
-                                    resultingTime: model.convertedFromUTCTime,
-                                    detail: "Using \(model.utcOffsetDescription)",
-                                    value: .convertFromUTC,
-                                    focus: .convertFromUTC
-                                )
+                                if model.supportsUTCConversion {
+                                    decisionButton(
+                                        "Convert from UTC",
+                                        detail: "Using \(model.utcOffsetDescription)",
+                                        value: .convertFromUTC,
+                                        focus: .convertFromUTC
+                                    )
+                                }
                             }
                         }
                     }
@@ -1114,7 +1126,6 @@ private struct ImportPlanningSheet: View {
 
     private func decisionButton(
         _ title: String,
-        resultingTime: String?,
         detail: String? = nil,
         value: EngineSupervisor.ImportDateResolution,
         focus: FocusTarget
@@ -1128,11 +1139,6 @@ private struct ImportPlanningSheet: View {
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                if let resultingTime {
-                    Text("Example resulting time: \(resultingTime)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
                 if let detail {
                     Text(detail)
                         .font(.caption2)
@@ -1145,7 +1151,6 @@ private struct ImportPlanningSheet: View {
         .accessibilityLabel(
             [
                 title,
-                resultingTime.map { "example resulting time \($0)" },
                 detail
             ]
             .compactMap { $0 }
@@ -1175,17 +1180,10 @@ private struct ImportPlanningSheet: View {
     ) -> String {
         switch resolution {
         case .asShown:
-            return selectionSummary("As shown", time: model.asShownTime)
+            return model.supportsUTCConversion ? "As shown" : "Proposed dates"
         case .convertFromUTC:
-            return selectionSummary(
-                "Converted from UTC",
-                time: model.convertedFromUTCTime
-            )
+            return "Converted from UTC"
         }
-    }
-
-    private func selectionSummary(_ title: String, time: String?) -> String {
-        time.map { "\(title) · example \($0)" } ?? title
     }
 
     private func summary(_ scan: EngineSupervisor.ImportScan) -> some View {
@@ -1496,6 +1494,7 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
                     state: .needsConfirmation,
                     itemCount: 4,
                     requiresClock: false,
+                    supportsUTCConversion: true,
                     asShownTime: "12:14",
                     convertedFromUTCTime: "14:14"
                 )

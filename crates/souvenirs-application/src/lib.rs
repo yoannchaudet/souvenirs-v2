@@ -363,6 +363,7 @@ pub struct ImportDateSourceSummary {
     pub state: ImportDateState,
     pub item_count: usize,
     pub requires_clock: bool,
+    pub supports_utc_conversion: bool,
     pub as_shown_time: Option<String>,
     pub converted_from_utc_time: Option<String>,
 }
@@ -694,8 +695,16 @@ pub(crate) fn inspect_source(
     let mut interpretation_previews = BTreeMap::new();
     for batch in &confirmation_batches {
         if let Some(preview) = interpretation_preview(batch, utc_offset)? {
+            let supports_utc_conversion = matches!(
+                batch.key.requirement,
+                ConfirmationRequirement::ChooseLocalOrUtc
+                    | ConfirmationRequirement::SelectUtcOffset
+            );
             interpretation_previews
-                .entry(import_date_source(batch.key.source))
+                .entry((
+                    import_date_source(batch.key.source),
+                    supports_utc_conversion,
+                ))
                 .or_insert(preview);
         }
     }
@@ -751,17 +760,22 @@ pub(crate) fn inspect_source(
             DateTimeResolution::Accepted { accepted, .. } => {
                 let source = accepted_source(&accepted.source);
                 *source_counts
-                    .entry((source, ImportDateState::Accepted, false))
+                    .entry((source, ImportDateState::Accepted, false, false))
                     .or_insert(0) += 1;
                 Some(accepted)
             }
             DateTimeResolution::NeedsConfirmation(pending) => {
                 let source = import_date_source(pending.candidate.source);
-                let requires_clock = pending
+                let requirement = pending
                     .batch_key()
                     .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?
-                    .requirement
-                    == ConfirmationRequirement::AssignClock;
+                    .requirement;
+                let requires_clock = requirement == ConfirmationRequirement::AssignClock;
+                let supports_utc_conversion = matches!(
+                    requirement,
+                    ConfirmationRequirement::ChooseLocalOrUtc
+                        | ConfirmationRequirement::SelectUtcOffset
+                );
                 if decision.is_some() {
                     let accepted = confirmed_by_item.get(item.primary.as_str()).cloned();
                     let state = if accepted.is_some() {
@@ -771,13 +785,18 @@ pub(crate) fn inspect_source(
                         ImportDateState::NeedsConfirmation
                     };
                     *source_counts
-                        .entry((source, state, requires_clock))
+                        .entry((source, state, requires_clock, supports_utc_conversion))
                         .or_insert(0) += 1;
                     accepted
                 } else {
                     pending_item_count += 1;
                     *source_counts
-                        .entry((source, ImportDateState::NeedsConfirmation, requires_clock))
+                        .entry((
+                            source,
+                            ImportDateState::NeedsConfirmation,
+                            requires_clock,
+                            supports_utc_conversion,
+                        ))
                         .or_insert(0) += 1;
                     None
                 }
@@ -839,28 +858,32 @@ pub(crate) fn inspect_source(
         datetime_sources: source_counts
             .into_iter()
             .map(
-                |((source, state, requires_clock), item_count)| ImportDateSourceSummary {
-                    source,
-                    state,
-                    item_count,
-                    requires_clock,
-                    as_shown_time: if state == ImportDateState::NeedsConfirmation && !requires_clock
-                    {
-                        interpretation_previews
-                            .get(&source)
-                            .map(|preview| preview.0.clone())
-                    } else {
-                        None
-                    },
-                    converted_from_utc_time: if state == ImportDateState::NeedsConfirmation
-                        && !requires_clock
-                    {
-                        interpretation_previews
-                            .get(&source)
-                            .map(|preview| preview.1.clone())
-                    } else {
-                        None
-                    },
+                |((source, state, requires_clock, supports_utc_conversion), item_count)| {
+                    ImportDateSourceSummary {
+                        source,
+                        state,
+                        item_count,
+                        requires_clock,
+                        supports_utc_conversion,
+                        as_shown_time: if state == ImportDateState::NeedsConfirmation
+                            && !requires_clock
+                        {
+                            interpretation_previews
+                                .get(&(source, supports_utc_conversion))
+                                .map(|preview| preview.0.clone())
+                        } else {
+                            None
+                        },
+                        converted_from_utc_time: if state == ImportDateState::NeedsConfirmation
+                            && !requires_clock
+                        {
+                            interpretation_previews
+                                .get(&(source, supports_utc_conversion))
+                                .map(|preview| preview.1.clone())
+                        } else {
+                            None
+                        },
+                    }
                 },
             )
             .collect(),

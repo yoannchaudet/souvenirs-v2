@@ -850,6 +850,7 @@ fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportS
                 },
                 item_count: summary.item_count,
                 requires_clock: summary.requires_clock,
+                supports_utc_conversion: summary.supports_utc_conversion,
                 as_shown_time: summary.as_shown_time,
                 converted_from_utc_time: summary.converted_from_utc_time,
             })

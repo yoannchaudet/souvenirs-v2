@@ -472,6 +472,10 @@
         },
         "state": {
           "$ref": "#/definitions/ImportDateState"
+        },
+        "supports_utc_conversion": {
+          "default": false,
+          "type": "boolean"
         }
       }
     },
