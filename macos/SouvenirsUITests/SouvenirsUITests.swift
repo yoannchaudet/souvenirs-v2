@@ -152,9 +152,6 @@ final class SouvenirsUITests: XCTestCase {
         for text in [
             "/Volumes/photos/Family Catalog/2026/2026-10-10 Dolomites",
             "2026-10-10 12-14-00 001.jpg",
-            "The archive accepted a confirmed test write",
-            "Every planned name works on supported storage",
-            "The planned names do not replace existing files",
             "1. Copy it to a hidden working folder.",
             "2. Read the copy back and compare it with the source.",
             "3. Publish the final name and checksum."
@@ -166,16 +163,20 @@ final class SouvenirsUITests: XCTestCase {
                 "\(text) should appear in the expanded import details"
             )
         }
-        XCTAssertTrue(
-            sheet.descendants(matching: .any).matching(
-                NSPredicate(format: "label CONTAINS %@", "available when reviewed")
-            ).firstMatch.exists
-        )
-        XCTAssertTrue(
-            sheet.descendants(matching: .any).matching(
-                NSPredicate(format: "label CONTAINS %@", "resume or cancel safely")
-            ).firstMatch.exists
-        )
+        for text in [
+            "available when reviewed",
+            "accepted a confirmed test write",
+            "planned name works on supported storage",
+            "do not replace existing files",
+            "resume or cancel safely"
+        ] {
+            XCTAssertTrue(
+                sheet.descendants(matching: .any).matching(
+                    NSPredicate(format: "label CONTAINS %@", text)
+                ).firstMatch.exists,
+                "A detail containing \(text) should appear"
+            )
+        }
         sheet.buttons["change-date-selection"].click()
         XCTAssertTrue(sheet.buttons["date-convert-utc"].waitForExistence(timeout: 3))
     }
