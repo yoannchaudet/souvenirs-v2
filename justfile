@@ -51,6 +51,10 @@ test-smb-storage:
 build-release:
     ./scripts/build-release.sh
 
+# Test release signing policy with deterministic codesign output.
+test-release-signing:
+    ./scripts/test-release-signing.sh
+
 # Regenerate the committed engine protocol schema.
 protocol-schema:
     cargo run -p souvenirs-protocol --example generate_schema
@@ -63,6 +67,7 @@ import-plan-schema:
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+    just test-release-signing
     if [[ "$(uname -s)" == "Darwin" ]]; then just test-core-performance; fi
     if [[ "$(uname -s)" == "Darwin" ]]; then just test-swift; fi
     just test-rust
