@@ -315,7 +315,7 @@ final class ImportExecutionModelTests: XCTestCase {
             skippedCount: 3,
             leftOnSourceCount: 2,
             operationCount: 14,
-            requiredSpaceBytes: 41_000_000_000,
+            preflight: .fixture,
             canStart: true,
             reviewedPlan: "reviewed-plan"
         )

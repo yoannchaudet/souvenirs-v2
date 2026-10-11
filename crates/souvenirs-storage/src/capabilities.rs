@@ -80,6 +80,37 @@ impl StorageCapabilities {
         }
         probe_write_capability(path)
     }
+
+    pub fn available_space_bytes(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<u64, StorageCapabilityError> {
+        let path = path.as_ref();
+        if !self.volume.same_volume(VolumeIdentity::for_path(path)?) {
+            return Err(StorageCapabilityError::Inspect {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "available space must be observed on the detected volume",
+                ),
+            });
+        }
+        let statistics =
+            rustix::fs::statvfs(path).map_err(|source| StorageCapabilityError::Inspect {
+                path: path.to_path_buf(),
+                source: source.into(),
+            })?;
+        statistics
+            .f_bavail
+            .checked_mul(statistics.f_frsize)
+            .ok_or_else(|| StorageCapabilityError::Inspect {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "available filesystem space exceeds the supported range",
+                ),
+            })
+    }
 }
 
 fn probe_write_capability(path: &Path) -> Result<(), StorageCapabilityError> {
@@ -286,6 +317,20 @@ mod tests {
 
         assert_eq!(capabilities.write_suitability, WriteSuitability::Writable);
         assert!(capabilities.volume.same_volume(capabilities.volume));
+    }
+
+    #[test]
+    fn observes_available_space_for_destination() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let capabilities =
+            StorageCapabilities::detect(directory.path()).expect("detect capabilities");
+
+        assert!(
+            capabilities
+                .available_space_bytes(directory.path())
+                .expect("available space")
+                > 0
+        );
     }
 
     #[test]

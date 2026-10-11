@@ -297,7 +297,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             skippedCount: dateResolution == nil ? 4 + deferred : deferred,
             leftOnSourceCount: dateResolution == nil ? 6 + deferred : 2 + deferred,
             operationCount: dateResolution == nil ? 10 - deferred : 14 - deferred,
-            requiredSpaceBytes: 41_000_000_000,
+            preflight: .fixture,
             canStart: true,
             reviewedPlan: "reviewed-plan"
         )

@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public actor EngineSupervisor {
-    public static let protocolVersion: UInt32 = 3
+    public static let protocolVersion: UInt32 = 4
     public static let protocolClientVersion = "0.2.0"
 
     public struct Handshake: Equatable, Sendable {
@@ -286,7 +286,7 @@ public actor EngineSupervisor {
         public let skippedCount: Int
         public let leftOnSourceCount: Int
         public let operationCount: Int
-        public let requiredSpaceBytes: UInt64
+        public let preflight: ImportPreflightEvidence
         public let canStart: Bool
         public let reviewedPlan: String?
 
@@ -302,9 +302,35 @@ public actor EngineSupervisor {
             case skippedCount = "skipped_count"
             case leftOnSourceCount = "left_on_source_count"
             case operationCount = "operation_count"
-            case requiredSpaceBytes = "required_space_bytes"
+            case preflight
             case canStart = "can_start"
             case reviewedPlan = "reviewed_plan"
+        }
+    }
+
+    public enum ImportPreflightCheck: String, Codable, Equatable, Sendable {
+        case notRun = "not_run"
+        case passed
+        case failed
+    }
+
+    public struct ImportPreflightEvidence: Codable, Equatable, Sendable {
+        public let representativeFileNames: [String]
+        public let requiredBytes: UInt64
+        public let availableBytes: UInt64?
+        public let availableSpace: ImportPreflightCheck
+        public let writeProbe: ImportPreflightCheck
+        public let portableNames: ImportPreflightCheck
+        public let destinationConflicts: ImportPreflightCheck
+
+        enum CodingKeys: String, CodingKey {
+            case representativeFileNames = "representative_file_names"
+            case requiredBytes = "required_bytes"
+            case availableBytes = "available_bytes"
+            case availableSpace = "available_space"
+            case writeProbe = "write_probe"
+            case portableNames = "portable_names"
+            case destinationConflicts = "destination_conflicts"
         }
     }
 
@@ -2057,7 +2083,7 @@ private struct ImportReviewResult: Decodable, Sendable {
     let skippedCount: Int
     let leftOnSourceCount: Int
     let operationCount: Int
-    let requiredSpaceBytes: UInt64
+    let preflight: EngineSupervisor.ImportPreflightEvidence
     let canStart: Bool
     let reviewedPlan: String?
 
@@ -2074,7 +2100,7 @@ private struct ImportReviewResult: Decodable, Sendable {
             skippedCount: skippedCount,
             leftOnSourceCount: leftOnSourceCount,
             operationCount: operationCount,
-            requiredSpaceBytes: requiredSpaceBytes,
+            preflight: preflight,
             canStart: canStart,
             reviewedPlan: reviewedPlan
         )
@@ -2093,7 +2119,7 @@ private struct ImportReviewResult: Decodable, Sendable {
         case skippedCount = "skipped_count"
         case leftOnSourceCount = "left_on_source_count"
         case operationCount = "operation_count"
-        case requiredSpaceBytes = "required_space_bytes"
+        case preflight
         case canStart = "can_start"
         case reviewedPlan = "reviewed_plan"
     }

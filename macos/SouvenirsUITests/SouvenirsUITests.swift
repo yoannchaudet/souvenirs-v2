@@ -146,6 +146,22 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-operation-summary"].exists
         )
+        for identifier in [
+            "import-detail-destination",
+            "import-detail-file-0",
+            "import-detail-space",
+            "import-detail-write-probe",
+            "import-detail-portable-names",
+            "import-detail-no-replacement",
+            "import-detail-copy-sequence",
+            "import-detail-recovery"
+        ] {
+            XCTAssertTrue(
+                sheet.descendants(matching: .any)[identifier]
+                    .waitForExistence(timeout: 3),
+                "\(identifier) should appear in the expanded import details"
+            )
+        }
     }
 
     @MainActor

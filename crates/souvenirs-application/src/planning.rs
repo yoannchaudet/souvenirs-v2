@@ -8,15 +8,16 @@ use souvenirs_domain::names::{CatalogLabel, PortableComponent};
 use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_domain::relationships::sidecar_suffix_for_item;
 use souvenirs_domain::source::SourceFile;
-use souvenirs_storage::{validate_directory, CatalogLayout};
+use souvenirs_storage::{validate_directory, CatalogLayout, StorageCapabilities};
 
 use crate::execution::{
     digest_bytes, digest_file, encode_manifest, encode_reviewed_plan, existing_counters,
-    existing_manifest,
+    existing_manifest, validate_reviewed_plan,
 };
 use crate::{
     dated_collection_components, directory_identity, inspect_source, scan_summary, CatalogService,
-    DestinationMode, ImportPlanningError, ImportReview, ImportReviewRequest, SourceSnapshotEntry,
+    DestinationMode, ImportPlanningError, ImportPreflightCheck, ImportPreflightEvidence,
+    ImportReview, ImportReviewRequest, SourceSnapshotEntry,
 };
 
 #[derive(Clone, Debug)]
@@ -106,7 +107,15 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
                 skipped_count: inspected.pending_item_count,
                 left_on_source_count: scan.file_count,
                 operation_count: 0,
-                required_space_bytes: 0,
+                preflight: ImportPreflightEvidence {
+                    representative_file_names: Vec::new(),
+                    required_bytes: 0,
+                    available_bytes: None,
+                    available_space: ImportPreflightCheck::NotRun,
+                    write_probe: ImportPreflightCheck::NotRun,
+                    portable_names: ImportPreflightCheck::NotRun,
+                    destination_conflicts: ImportPreflightCheck::NotRun,
+                },
                 can_start: false,
                 reviewed_plan: None,
                 scan,
@@ -260,7 +269,15 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
         skipped_count: inspected.pending_item_count,
         left_on_source_count: inspected.excluded_file_count,
         operation_count: inspected.transfer_file_count + 2,
-        required_space_bytes: inspected.transfer_bytes,
+        preflight: ImportPreflightEvidence {
+            representative_file_names: Vec::new(),
+            required_bytes: inspected.transfer_bytes,
+            available_bytes: None,
+            available_space: ImportPreflightCheck::NotRun,
+            write_probe: ImportPreflightCheck::NotRun,
+            portable_names: ImportPreflightCheck::NotRun,
+            destination_conflicts: ImportPreflightCheck::NotRun,
+        },
         can_start: inspected.transfer_file_count > 0,
         reviewed_plan: None,
         scan,
@@ -303,12 +320,57 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
         },
     };
     if planned.review.can_start {
-        planned.review.reviewed_plan = Some(
-            encode_reviewed_plan(&planned)
-                .map_err(|error| ImportPlanningError::InvalidPlan(error.to_string()))?,
-        );
+        let reviewed_plan = encode_reviewed_plan(&planned)
+            .map_err(|error| ImportPlanningError::InvalidPlan(error.to_string()))?;
+        validate_reviewed_plan(&reviewed_plan)
+            .map_err(|error| ImportPlanningError::DestinationPreflight(error.to_string()))?;
+
+        let capabilities = StorageCapabilities::detect(&planned.catalog_path)
+            .map_err(|error| ImportPlanningError::DestinationPreflight(error.to_string()))?;
+        capabilities
+            .ensure_writable(&planned.catalog_path)
+            .map_err(|error| ImportPlanningError::DestinationPreflight(error.to_string()))?;
+        let available_bytes = capabilities
+            .available_space_bytes(&planned.catalog_path)
+            .map_err(|error| ImportPlanningError::DestinationPreflight(error.to_string()))?;
+        let available_space =
+            available_space_check(planned.review.preflight.required_bytes, available_bytes);
+
+        planned.review.preflight = ImportPreflightEvidence {
+            representative_file_names: planned
+                .items
+                .iter()
+                .flat_map(|item| &item.files)
+                .filter_map(|file| {
+                    file.destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_owned)
+                })
+                .take(3)
+                .collect(),
+            required_bytes: planned.review.preflight.required_bytes,
+            available_bytes: Some(available_bytes),
+            available_space,
+            write_probe: ImportPreflightCheck::Passed,
+            portable_names: ImportPreflightCheck::Passed,
+            destination_conflicts: ImportPreflightCheck::Passed,
+        };
+        if available_space == ImportPreflightCheck::Passed {
+            planned.review.reviewed_plan = Some(reviewed_plan);
+        } else {
+            planned.review.can_start = false;
+        }
     }
     Ok(planned)
+}
+
+fn available_space_check(required_bytes: u64, available_bytes: u64) -> ImportPreflightCheck {
+    if available_bytes >= required_bytes {
+        ImportPreflightCheck::Passed
+    } else {
+        ImportPreflightCheck::Failed
+    }
 }
 
 fn planned_file(
@@ -340,4 +402,22 @@ fn planned_file(
         size_bytes,
         role,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::available_space_check;
+    use crate::ImportPreflightCheck;
+
+    #[test]
+    fn available_space_check_reports_passed_and_failed_evidence() {
+        assert_eq!(
+            available_space_check(100, 100),
+            ImportPreflightCheck::Passed
+        );
+        assert_eq!(
+            available_space_check(101, 100),
+            ImportPreflightCheck::Failed
+        );
+    }
 }

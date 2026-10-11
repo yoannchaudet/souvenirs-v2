@@ -6,13 +6,13 @@ use serde_json::{json, Value};
 use souvenirs_protocol::{
     CancellationAccepted, CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart,
     CatalogCollectionsResult, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
-    ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportReviewResult,
-    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
-    OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
-    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_COLLECTIONS_METHOD,
-    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD,
-    IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
-    START_OPERATION_METHOD,
+    ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportPreflightCheck,
+    ImportPreflightEvidence, ImportReviewResult, ImportScanResult, OperationAccepted,
+    OperationEvent, OperationEventPayload, OperationInspectionResult, ProtocolError, Request,
+    RequestPayload, ResponseResult, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
+    CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
+    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
+    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 fn main() {
@@ -365,7 +365,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                     skipped_count: if resolved { 3 } else { 7 },
                                     left_on_source_count: if resolved { 2 } else { 6 },
                                     operation_count: if resolved { 14 } else { 10 },
-                                    required_space_bytes: 41_000_000_000,
+                                    preflight: fake_preflight(),
                                     can_start: true,
                                     reviewed_plan: Some("fake-reviewed-plan".to_owned()),
                                 })),
@@ -683,12 +683,28 @@ fn import_review(
                 skipped_count: if resolved { 3 } else { 7 },
                 left_on_source_count: if resolved { 2 } else { 6 },
                 operation_count: if resolved { 14 } else { 10 },
-                required_space_bytes: 41_000_000_000,
+                preflight: fake_preflight(),
                 can_start: true,
                 reviewed_plan: Some("fake-reviewed-plan".to_owned()),
             })),
         ),
     )
+}
+
+fn fake_preflight() -> ImportPreflightEvidence {
+    ImportPreflightEvidence {
+        representative_file_names: vec![
+            "2026-10-10 12-14-00 001.jpg".to_owned(),
+            "2026-10-10 12-14-00 001.xmp".to_owned(),
+            "2026-10-10 14-15-00 001.mov".to_owned(),
+        ],
+        required_bytes: 41_000_000_000,
+        available_bytes: Some(500_000_000_000),
+        available_space: ImportPreflightCheck::Passed,
+        write_probe: ImportPreflightCheck::Passed,
+        portable_names: ImportPreflightCheck::Passed,
+        destination_conflicts: ImportPreflightCheck::Passed,
+    }
 }
 
 fn operation_inspection(

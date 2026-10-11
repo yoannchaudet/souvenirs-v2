@@ -493,6 +493,58 @@
         "existing"
       ]
     },
+    "ImportPreflightCheck": {
+      "type": "string",
+      "enum": [
+        "not_run",
+        "passed",
+        "failed"
+      ]
+    },
+    "ImportPreflightEvidence": {
+      "type": "object",
+      "required": [
+        "available_space",
+        "destination_conflicts",
+        "portable_names",
+        "representative_file_names",
+        "required_bytes",
+        "write_probe"
+      ],
+      "properties": {
+        "available_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "available_space": {
+          "$ref": "#/definitions/ImportPreflightCheck"
+        },
+        "destination_conflicts": {
+          "$ref": "#/definitions/ImportPreflightCheck"
+        },
+        "portable_names": {
+          "$ref": "#/definitions/ImportPreflightCheck"
+        },
+        "representative_file_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "write_probe": {
+          "$ref": "#/definitions/ImportPreflightCheck"
+        }
+      }
+    },
     "ImportReviewParameters": {
       "type": "object",
       "required": [
@@ -1095,8 +1147,8 @@
             "destination_path",
             "left_on_source_count",
             "operation_count",
+            "preflight",
             "required_decision_count",
-            "required_space_bytes",
             "scan",
             "skipped_count",
             "transfer_count",
@@ -1138,14 +1190,12 @@
               "format": "uint",
               "minimum": 0.0
             },
+            "preflight": {
+              "$ref": "#/definitions/ImportPreflightEvidence"
+            },
             "required_decision_count": {
               "type": "integer",
               "format": "uint",
-              "minimum": 0.0
-            },
-            "required_space_bytes": {
-              "type": "integer",
-              "format": "uint64",
               "minimum": 0.0
             },
             "reviewed_plan": {

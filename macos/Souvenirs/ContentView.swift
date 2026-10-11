@@ -1364,7 +1364,7 @@ private struct ImportPlanningSheet: View {
                     )
                 }
                 Label(
-                    "\(review.operationCount) verified operations · \(bytes(review.requiredSpaceBytes))",
+                    "\(review.operationCount) verified operations · \(bytes(review.preflight.requiredBytes))",
                     systemImage: "checkmark.circle"
                 )
             }
@@ -1417,42 +1417,121 @@ private struct ImportPlanningSheet: View {
     private var details: some View {
         DisclosureGroup("Details: destination and checks", isExpanded: $model.showsDetails) {
             if let review = model.review {
-                HStack(alignment: .top, spacing: 10) {
-                    detailCard(
-                        title: "Where the files go",
-                        lines: [
-                            review.destinationPath,
-                            "Names use date, time, and a stable counter."
-                        ]
+                VStack(alignment: .leading, spacing: 12) {
+                    detailSection(title: "Where the files go") {
+                        Text(review.destinationPath)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("import-detail-destination")
+                        if !review.preflight.representativeFileNames.isEmpty {
+                            Text("Example file names")
+                                .font(.caption2.bold())
+                                .foregroundStyle(.secondary)
+                            ForEach(
+                                Array(review.preflight.representativeFileNames.enumerated()),
+                                id: \.offset
+                            ) { index, fileName in
+                                Text(fileName)
+                                    .textSelection(.enabled)
+                                    .accessibilityIdentifier("import-detail-file-\(index)")
+                            }
+                        }
+                    }
+
+                    if hasCompletedPreflight(review.preflight) {
+                        detailSection(title: "Checks completed during review") {
+                            if let availableBytes = review.preflight.availableBytes {
+                                if review.preflight.availableSpace == .passed {
+                                    detailCheck(
+                                        "\(bytes(review.preflight.requiredBytes)) needed; "
+                                            + "\(bytes(availableBytes)) available when reviewed",
+                                        identifier: "import-detail-space"
+                                    )
+                                } else if review.preflight.availableSpace == .failed {
+                                    Label(
+                                        "\(bytes(review.preflight.requiredBytes)) needed; "
+                                            + "only \(bytes(availableBytes)) available when reviewed",
+                                        systemImage: "exclamationmark.triangle"
+                                    )
+                                    .foregroundStyle(.orange)
+                                    .accessibilityIdentifier("import-detail-space")
+                                }
+                                Text(
+                                    "Available space is observed during review "
+                                        + "and can change before import."
+                                )
+                            }
+                            if review.preflight.writeProbe == .passed {
+                                detailCheck(
+                                    "The archive accepted a confirmed test write",
+                                    identifier: "import-detail-write-probe"
+                                )
+                            }
+                            if review.preflight.portableNames == .passed {
+                                detailCheck(
+                                    "Every planned name works on supported storage",
+                                    identifier: "import-detail-portable-names"
+                                )
+                            }
+                            if review.preflight.destinationConflicts == .passed {
+                                detailCheck(
+                                    "The planned names do not replace existing files",
+                                    identifier: "import-detail-no-replacement"
+                                )
+                            }
+                        }
+                    }
+
+                    detailSection(title: "How each file is verified") {
+                        Text("1. Copy it to a hidden working folder.")
+                        Text("2. Read the copy back and compare it with the source.")
+                        Text("3. Publish the final name and checksum.")
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("import-detail-copy-sequence")
+
+                    Text(
+                        "If the import is interrupted, Souvenirs keeps enough information "
+                            + "to resume or cancel safely when you reopen the archive."
                     )
-                    detailCard(
-                        title: "Checked before starting",
-                        lines: [
-                            "Enough source data was read",
-                            "No existing file will be replaced",
-                            "The source remains read-only"
-                        ]
-                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("import-detail-recovery")
                 }
                 .padding(.top, 8)
+                .textSelection(.enabled)
             }
         }
         .accessibilityIdentifier("import-details")
     }
 
-    private func detailCard(title: String, lines: [String]) -> some View {
+    private func detailSection<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.caption.bold())
-            ForEach(lines, id: \.self) { line in
-                Label(line, systemImage: "checkmark")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
+            content()
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .padding(10)
-        .frame(maxWidth: .infinity, minHeight: 90, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private func detailCheck(_ text: String, identifier: String) -> some View {
+        Label(text, systemImage: "checkmark")
+            .accessibilityIdentifier(identifier)
+    }
+
+    private func hasCompletedPreflight(
+        _ evidence: EngineSupervisor.ImportPreflightEvidence
+    ) -> Bool {
+        evidence.availableBytes != nil
+            || evidence.availableSpace != .notRun
+            || evidence.writeProbe == .passed
+            || evidence.portableNames == .passed
+            || evidence.destinationConflicts == .passed
     }
 
     private var thumbnailGrid: some View {
@@ -1674,7 +1753,19 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
             skippedCount: dateResolution == nil ? 4 : 0,
             leftOnSourceCount: dateResolution == nil ? 6 : scan.unsupportedCount,
             operationCount: (dateResolution == nil ? 8 : scan.mediaCount) + 2,
-            requiredSpaceBytes: scan.totalBytes,
+            preflight: .init(
+                representativeFileNames: [
+                    "2026-10-10 12-14-00 001.jpg",
+                    "2026-10-10 12-14-00 001.xmp",
+                    "2026-10-10 14-15-00 001.mov"
+                ],
+                requiredBytes: scan.totalBytes,
+                availableBytes: 500_000_000_000,
+                availableSpace: .passed,
+                writeProbe: .passed,
+                portableNames: .passed,
+                destinationConflicts: .passed
+            ),
             canStart: true,
             reviewedPlan: "preview-reviewed-plan"
         )
