@@ -85,6 +85,7 @@ final class ImportExecutionCoordinator: ObservableObject {
     @Published private(set) var review: EngineSupervisor.ImportReview?
     @Published private(set) var sourceName = ""
     @Published private(set) var collectionName = ""
+    @Published private(set) var isRetryingRecovery = false
 
     private let engine: ImportExecutionEngine
     private var operationTask: Task<Void, Never>?
@@ -163,10 +164,11 @@ final class ImportExecutionCoordinator: ObservableObject {
     }
 
     func retryRecovery() {
-        guard let recovery, let catalog else { return }
-        phase = .recovering
+        guard let recovery, let catalog, !isRetryingRecovery else { return }
+        isRetryingRecovery = true
         progressMessage = "Checking for \(sourceName)…"
         operationTask = Task {
+            defer { isRetryingRecovery = false }
             do {
                 guard let unfinished = try await engine.inspectUnfinishedOperation(
                     catalogPath: catalog.path
@@ -174,6 +176,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                     phase = .failed("The unfinished import could not be found.")
                     return
                 }
+                guard !Task.isCancelled else { return }
                 guard unfinished.operationID == recovery.operationID else {
                     phase = .failed("A different unfinished import was found.")
                     return
@@ -183,6 +186,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                     phase = .recoveryPrompt(sourceAvailable: false)
                     return
                 }
+                phase = .recovering
                 try await recover(unfinished, catalog: catalog)
             } catch {
                 guard !Task.isCancelled else { return }
@@ -193,6 +197,8 @@ final class ImportExecutionCoordinator: ObservableObject {
 
     func deferRecovery() {
         guard recovery != nil else { return }
+        operationTask?.cancel()
+        isRetryingRecovery = false
         phase = .recoveryDeferred
     }
 
@@ -216,6 +222,8 @@ final class ImportExecutionCoordinator: ObservableObject {
 
     func stopRecoveryHere() {
         guard let recovery else { return }
+        operationTask?.cancel()
+        isRetryingRecovery = false
         operationID = recovery.operationID
         phase = .stopping
         Task {
@@ -236,6 +244,7 @@ final class ImportExecutionCoordinator: ObservableObject {
         review = nil
         sourceName = ""
         collectionName = ""
+        isRetryingRecovery = false
     }
 
     private func consume(operationID: String, recovering: Bool) async throws {
