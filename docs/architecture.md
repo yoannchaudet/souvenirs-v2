@@ -454,6 +454,7 @@ just test-rust
 just test-cli
 just test-swift
 just test-ui
+just test-engine-architectures
 just test-integration
 just test-storage
 just check
@@ -476,6 +477,8 @@ Pull requests run:
 - Swift compilation.
 - Swift state tests.
 - A small fake-engine UI suite.
+- Engine architecture verification.
+- A universal macOS application and engine build.
 
 The main branch also runs the full local filesystem integration suite, real-engine UI smoke tests, and failpoint recovery tests.
 

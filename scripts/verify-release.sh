@@ -37,6 +37,12 @@ app=$1
 engine="$app/Contents/MacOS/souvenirs-engine"
 [[ -d "$app" ]] || { echo "app bundle not found: $app" >&2; exit 1; }
 [[ -x "$engine" ]] || { echo "embedded engine not found: $engine" >&2; exit 1; }
+app_executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+app_executable="$app/Contents/MacOS/$app_executable_name"
+[[ -x "$app_executable" ]] || { echo "app executable not found: $app_executable" >&2; exit 1; }
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+"$repo_root/scripts/engine-architectures.sh" verify "$app_executable" "$engine"
 
 codesign --verify --strict --verbose=2 "$engine"
 codesign --verify --deep --strict --verbose=2 "$app"

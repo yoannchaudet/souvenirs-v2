@@ -39,6 +39,10 @@ test-ui:
         CODE_SIGN_IDENTITY=- \
         DEVELOPMENT_TEAM=
 
+# Validate Xcode-to-Rust architecture mapping and mismatch rejection.
+test-engine-architectures:
+    ./scripts/test-engine-architectures.sh
+
 # Validate interruption recovery on disposable APFS and exFAT disk images.
 test-representative-storage:
     ./scripts/validate-representative-storage.sh
@@ -63,6 +67,7 @@ import-plan-schema:
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+    just test-engine-architectures
     if [[ "$(uname -s)" == "Darwin" ]]; then just test-core-performance; fi
     if [[ "$(uname -s)" == "Darwin" ]]; then just test-swift; fi
     just test-rust

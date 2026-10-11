@@ -263,16 +263,17 @@
 			inputPaths = (
 				"$(SRCROOT)/../Cargo.lock",
 				"$(SRCROOT)/../Cargo.toml",
+				"$(SRCROOT)/../scripts/engine-architectures.sh",
 			);
 			name = "Build Rust Engine";
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(SRCROOT)/../target/$(ENGINE_CARGO_PROFILE)/souvenirs-engine",
+				"$(TARGET_TEMP_DIR)/souvenirs-engine",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\n\ncd \"$SRCROOT/..\"\nif [ \"$ENGINE_CARGO_PROFILE\" = \"release\" ]; then\n    cargo build --locked --release --package souvenirs-engine --bins\nelse\n    cargo build --locked --package souvenirs-engine --bins\nfi\n";
+			shellScript = "set -eu\n\n# ARCHS is an Xcode-generated, space-separated list and must expand into arguments.\n# shellcheck disable=SC2086\n\"$SRCROOT/../scripts/engine-architectures.sh\" build \\\n    \"$ENGINE_CARGO_PROFILE\" \\\n    \"$TARGET_TEMP_DIR/souvenirs-engine\" \\\n    $ARCHS\n";
 		};
 		D00000000000000000000002 /* Embed Rust Engine */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -282,7 +283,8 @@
 			inputFileListPaths = (
 			);
 			inputPaths = (
-				"$(SRCROOT)/../target/$(ENGINE_CARGO_PROFILE)/souvenirs-engine",
+				"$(SRCROOT)/../scripts/engine-architectures.sh",
+				"$(TARGET_TEMP_DIR)/souvenirs-engine",
 			);
 			name = "Embed Rust Engine";
 			outputFileListPaths = (
@@ -292,7 +294,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\n\nengine_source=\"$SRCROOT/../target/$ENGINE_CARGO_PROFILE/souvenirs-engine\"\nengine_destination=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/MacOS/souvenirs-engine\"\nmkdir -p \"$(dirname \"$engine_destination\")\"\ninstall -m 755 \"$engine_source\" \"$engine_destination\"\n\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" = \"YES\" ]; then\n    identity=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n    if [ \"${ENABLE_HARDENED_RUNTIME:-NO}\" = \"YES\" ]; then\n        set -- --force --sign \"$identity\" --options runtime\n    else\n        set -- --force --sign \"$identity\"\n    fi\n    # OTHER_CODE_SIGN_FLAGS is supplied by Xcode as command-line arguments.\n    codesign \"$@\" ${OTHER_CODE_SIGN_FLAGS:-} \"$engine_destination\"\nfi\n";
+			shellScript = "set -eu\n\nengine_source=\"$TARGET_TEMP_DIR/souvenirs-engine\"\nengine_destination=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/MacOS/souvenirs-engine\"\napplication_executable=\"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\"\nmkdir -p \"$(dirname \"$engine_destination\")\"\ninstall -m 755 \"$engine_source\" \"$engine_destination\"\n\"$SRCROOT/../scripts/engine-architectures.sh\" verify \\\n    \"$application_executable\" \\\n    \"$engine_destination\"\n\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" = \"YES\" ]; then\n    identity=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n    if [ \"${ENABLE_HARDENED_RUNTIME:-NO}\" = \"YES\" ]; then\n        set -- --force --sign \"$identity\" --options runtime\n    else\n        set -- --force --sign \"$identity\"\n    fi\n    # OTHER_CODE_SIGN_FLAGS is supplied by Xcode as command-line arguments.\n    codesign \"$@\" ${OTHER_CODE_SIGN_FLAGS:-} \"$engine_destination\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
