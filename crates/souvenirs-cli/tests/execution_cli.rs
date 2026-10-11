@@ -240,6 +240,97 @@ fn operation_id_from_plan(plan: &Path) -> String {
         .to_owned()
 }
 
+fn prepare_retained_duplicate_plan(
+    temporary: &TempDir,
+) -> (PathBuf, PathBuf, PathBuf, String, Vec<String>) {
+    let catalog = temporary.path().join("catalog");
+    let source = temporary.path().join("source");
+    let snapshot = temporary.path().join("scan.json");
+    let plan = temporary.path().join("plan.json");
+    fs::create_dir(&catalog).unwrap();
+    fs::create_dir(&source).unwrap();
+    json_stdout(&run(&[
+        "catalog",
+        "initialize",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
+    let existing = catalog.join("2024/2024-01-01 Existing");
+    fs::create_dir_all(&existing).unwrap();
+    fs::write(existing.join("existing.jpg"), b"catalog duplicate").unwrap();
+    fs::write(
+        existing.join("SHA256SUMS"),
+        format!("{}  existing.jpg\n", sha256_hex(b"catalog duplicate")),
+    )
+    .unwrap();
+    fs::write(source.join("catalog.jpg"), b"catalog duplicate").unwrap();
+    fs::write(source.join("selected.jpg"), b"source duplicate").unwrap();
+    fs::write(source.join("retained.mov"), b"source duplicate").unwrap();
+    json_stdout(&run(&[
+        "import",
+        "scan",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        snapshot.to_str().unwrap(),
+    ]));
+    json_stdout(&run(&[
+        "import",
+        "plan",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--snapshot",
+        snapshot.to_str().unwrap(),
+        "--output",
+        plan.to_str().unwrap(),
+        "--collection",
+        "Reviewed",
+        "--destination-mode",
+        "create",
+        "--accepted-at",
+        "2026-10-10T12:34:56",
+        "--catalog-duplicates",
+        "skip",
+        "--source-duplicates",
+        "one-per-digest",
+        "--confirm",
+    ]));
+    let stored: Value = serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
+    let files = stored["import_plan"]["document"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["files"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    let catalog_retained = files
+        .iter()
+        .find(|file| file["duplicate_disposition"]["kind"] == "retain_catalog_duplicate")
+        .unwrap();
+    let source_retained = files
+        .iter()
+        .find(|file| file["duplicate_disposition"]["kind"] == "retain_source_duplicate")
+        .unwrap();
+    (
+        catalog,
+        source,
+        plan,
+        source_retained["duplicate_disposition"]["selected_source_file_id"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        vec![
+            catalog_retained["source_file_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            source_retained["source_file_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ],
+    )
+}
+
 fn first_planned_destination(catalog: &Path, plan: &Path) -> PathBuf {
     let plan: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
     let components = plan["import_plan"]["document"]["steps"]
@@ -287,6 +378,19 @@ fn simulate_interruption_after_first_copy(catalog: &Path, path: &Path) {
             fs::remove_file(entry.path()).unwrap();
         }
     }
+}
+
+fn simulate_interruption_after_metadata(path: &Path) {
+    let contents = fs::read_to_string(path).unwrap();
+    let lines = contents.lines().collect::<Vec<_>>();
+    let metadata_index = lines
+        .iter()
+        .position(|line| {
+            let record: Value = serde_json::from_str(line).unwrap();
+            record["kind"] == "metadata"
+        })
+        .expect("journal should contain recovery metadata");
+    fs::write(path, format!("{}\n", lines[..=metadata_index].join("\n"))).unwrap();
 }
 
 fn simulate_interruption_after_first_verification(
@@ -380,6 +484,185 @@ fn executes_inspects_and_verifies_without_parsing_human_output() {
     assert_eq!(integrity["result"]["coverage_complete"], true);
     assert_eq!(integrity["result"]["checked_files"], 2);
     assert_eq!(integrity["result"]["findings"], serde_json::json!([]));
+}
+
+#[test]
+fn execution_records_retained_duplicates_and_reports_counts_without_touching_source() {
+    let temporary = TempDir::new().unwrap();
+    let (catalog, source, plan, selected_source_file_id, retained_source_file_ids) =
+        prepare_retained_duplicate_plan(&temporary);
+    let source_before = tree_snapshot(&source);
+    let progress = temporary.path().join("progress.jsonl");
+
+    let executed = json_stdout(&run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--progress",
+        progress.to_str().unwrap(),
+    ]));
+    assert_eq!(executed["result"]["copied_count"], 1);
+    assert_eq!(executed["result"]["skipped_count"], 2);
+    assert_eq!(executed["result"]["left_on_source_count"], 2);
+    assert_eq!(tree_snapshot(&source), source_before);
+
+    let operation_id = executed["result"]["operation_id"].as_str().unwrap();
+    let journal = fs::read_to_string(operation_journal(&catalog, operation_id)).unwrap();
+    let retained = journal
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|record| record["kind"] == "retained")
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), 2);
+    let by_source = retained
+        .iter()
+        .map(|record| (record["source_file_id"].as_str().unwrap(), record))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        by_source[retained_source_file_ids[0].as_str()]["disposition"],
+        serde_json::json!({
+            "kind": "catalog_duplicate",
+            "catalog_path": ["2024", "2024-01-01 Existing", "existing.jpg"]
+        })
+    );
+    assert_eq!(
+        by_source[retained_source_file_ids[1].as_str()]["disposition"],
+        serde_json::json!({
+            "kind": "source_duplicate",
+            "selected_source_file_id": selected_source_file_id
+        })
+    );
+
+    let events = fs::read_to_string(progress)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "retained")
+            .count(),
+        2
+    );
+    assert_eq!(events.last().unwrap()["skipped_count"], 2);
+    assert_eq!(events.last().unwrap()["copied_count"], 1);
+
+    let status = json_stdout(&run(&[
+        "operation",
+        "status",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--operation-id",
+        operation_id,
+    ]));
+    assert_eq!(status["result"]["copied_count"], 1);
+    assert_eq!(status["result"]["skipped_count"], 2);
+}
+
+#[test]
+fn recovery_and_cancellation_replay_retained_duplicates_once() {
+    for (command, expected_outcome) in [("recover", "completed"), ("cancel", "cancelled")] {
+        let temporary = TempDir::new().unwrap();
+        let catalog = temporary.path().join("catalog");
+        let source = temporary.path().join("source");
+        let snapshot = temporary.path().join("scan.json");
+        let plan = temporary.path().join("plan.json");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir(&source).unwrap();
+        json_stdout(&run(&[
+            "catalog",
+            "initialize",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]));
+        let existing = catalog.join("2024/2024-01-01 Existing");
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(existing.join("existing.jpg"), b"duplicate").unwrap();
+        fs::write(
+            existing.join("SHA256SUMS"),
+            format!("{}  existing.jpg\n", sha256_hex(b"duplicate")),
+        )
+        .unwrap();
+        fs::write(source.join("duplicate.jpg"), b"duplicate").unwrap();
+        json_stdout(&run(&[
+            "import",
+            "scan",
+            "--source",
+            source.to_str().unwrap(),
+            "--output",
+            snapshot.to_str().unwrap(),
+        ]));
+        json_stdout(&run(&[
+            "import",
+            "plan",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--snapshot",
+            snapshot.to_str().unwrap(),
+            "--output",
+            plan.to_str().unwrap(),
+            "--collection",
+            "Reviewed",
+            "--destination-mode",
+            "create",
+            "--accepted-at",
+            "2026-10-10T12:34:56",
+            "--catalog-duplicates",
+            "skip",
+            "--confirm",
+        ]));
+        let source_before = tree_snapshot(&source);
+        let executed = json_stdout(&run(&[
+            "import",
+            "execute",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--plan",
+            plan.to_str().unwrap(),
+        ]));
+        let operation_id = executed["result"]["operation_id"].as_str().unwrap();
+        let journal_path = operation_journal(&catalog, operation_id);
+        simulate_interruption_after_metadata(&journal_path);
+        let progress = temporary.path().join(format!("{command}.jsonl"));
+
+        let recovered = json_stdout(&run(&[
+            "operation",
+            command,
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--operation-id",
+            operation_id,
+            "--plan",
+            plan.to_str().unwrap(),
+            "--progress",
+            progress.to_str().unwrap(),
+        ]));
+        assert_eq!(recovered["result"]["outcome"], expected_outcome);
+        assert_eq!(recovered["result"]["copied_count"], 0);
+        assert_eq!(recovered["result"]["skipped_count"], 1);
+        assert_eq!(recovered["result"]["left_on_source_count"], 1);
+        assert_eq!(tree_snapshot(&source), source_before);
+
+        let records = fs::read_to_string(journal_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["kind"] == "retained")
+                .count(),
+            1
+        );
+        let events = fs::read_to_string(progress).unwrap();
+        assert!(events.contains("\"event\":\"retained\""));
+        assert!(events.contains("\"skipped_count\":1"));
+    }
 }
 
 #[cfg(unix)]

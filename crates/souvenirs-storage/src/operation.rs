@@ -113,6 +113,19 @@ pub enum OperationOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum RetainedDuplicateDisposition {
+    CatalogDuplicate { catalog_path: Vec<String> },
+    SourceDuplicate { selected_source_file_id: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RetainedDuplicate {
+    pub source_file_id: String,
+    pub disposition: RetainedDuplicateDisposition,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OperationRecord {
@@ -124,6 +137,10 @@ pub enum OperationRecord {
         collection_name: String,
         source_path: PathBuf,
         total_count: usize,
+    },
+    Retained {
+        source_file_id: String,
+        disposition: RetainedDuplicateDisposition,
     },
     Transition {
         transition: DurableTransition,
@@ -407,6 +424,20 @@ impl OperationJournal {
         })
     }
 
+    pub fn record_retained_duplicate(
+        &mut self,
+        layout: &CatalogLayout,
+        lock: &CatalogLock,
+        retained: &RetainedDuplicate,
+    ) -> Result<(), OperationJournalError> {
+        self.ensure_active(layout, lock)?;
+        validate_retained_duplicate(retained)?;
+        self.append(&OperationRecord::Retained {
+            source_file_id: retained.source_file_id.clone(),
+            disposition: retained.disposition.clone(),
+        })
+    }
+
     pub fn complete(
         &mut self,
         layout: &CatalogLayout,
@@ -485,6 +516,31 @@ impl OperationJournal {
     fn append(&mut self, record: &OperationRecord) -> Result<(), OperationJournalError> {
         append_operation_record(&mut self.file, &self.path, record)
     }
+}
+
+pub(crate) fn validate_retained_duplicate(
+    retained: &RetainedDuplicate,
+) -> Result<(), OperationJournalError> {
+    validate_source_file_identifier(&retained.source_file_id)?;
+    match &retained.disposition {
+        RetainedDuplicateDisposition::CatalogDuplicate { catalog_path } => {
+            validate_catalog_relative(&catalog_path.iter().collect::<PathBuf>())
+                .map_err(OperationJournalError::CatalogPath)
+        }
+        RetainedDuplicateDisposition::SourceDuplicate {
+            selected_source_file_id,
+        } => validate_source_file_identifier(selected_source_file_id),
+    }
+}
+
+fn validate_source_file_identifier(identifier: &str) -> Result<(), OperationJournalError> {
+    if identifier.is_empty() {
+        return Err(OperationJournalError::InvalidIdentifier {
+            kind: "source file",
+            value: identifier.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 pub fn read_operation_records(

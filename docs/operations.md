@@ -113,7 +113,12 @@ The catalog skip choice takes precedence when a digest belongs to both duplicate
 A skipped catalog duplicate retains the first component-wise matching catalog path.
 A skipped source duplicate retains the selected source file identifier.
 The planner leaves a sidecar at the source when its local owner does not transfer.
-The journal records the complete plan and preserves these retained references.
+The automation CLI writes one durable retained record for each skipped original.
+A catalog duplicate record preserves the planned `catalog_path`.
+A source duplicate record preserves the planned `selected_source_file_id`.
+CLI recovery writes any missing retained records before it records the operation outcome.
+Repeated recovery does not duplicate an existing matching record.
+CLI progress, status, and outcomes report copied and skipped counts.
 Duplicate detection uses the [index](storage.md#index) for catalog content and the copy digest for sources.
 
 ## Organize backlog

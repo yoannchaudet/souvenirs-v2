@@ -6,7 +6,7 @@ use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
     read_operation_records, CatalogConfig, CatalogLayout, CatalogLock, DurableTransition,
     ManifestReplacementError, ManifestReplacementRequest, OperationJournal, OperationJournalError,
-    OperationOutcome, OperationRecord,
+    OperationOutcome, OperationRecord, RetainedDuplicate, RetainedDuplicateDisposition,
 };
 use tempfile::TempDir;
 
@@ -65,6 +65,58 @@ fn persists_plan_transitions_and_completed_outcome_as_json_lines() {
             },
             OperationRecord::Outcome {
                 outcome: OperationOutcome::Completed,
+            },
+        ]
+    );
+}
+
+#[test]
+fn persists_structured_retained_duplicate_references() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal = journal(&layout, &lock, "retained");
+    let catalog_duplicate = RetainedDuplicate {
+        source_file_id: "source-catalog".to_owned(),
+        disposition: RetainedDuplicateDisposition::CatalogDuplicate {
+            catalog_path: vec![
+                "2024".to_owned(),
+                "2024-01-01 Existing".to_owned(),
+                "original.jpg".to_owned(),
+            ],
+        },
+    };
+    let source_duplicate = RetainedDuplicate {
+        source_file_id: "source-retained".to_owned(),
+        disposition: RetainedDuplicateDisposition::SourceDuplicate {
+            selected_source_file_id: "source-selected".to_owned(),
+        },
+    };
+
+    journal
+        .record_retained_duplicate(&layout, &lock, &catalog_duplicate)
+        .unwrap();
+    journal
+        .record_retained_duplicate(&layout, &lock, &source_duplicate)
+        .unwrap();
+    journal.complete(&layout, &lock).unwrap();
+
+    assert_eq!(
+        records(&journal)[1..3],
+        [
+            OperationRecord::Retained {
+                source_file_id: "source-catalog".to_owned(),
+                disposition: RetainedDuplicateDisposition::CatalogDuplicate {
+                    catalog_path: vec![
+                        "2024".to_owned(),
+                        "2024-01-01 Existing".to_owned(),
+                        "original.jpg".to_owned(),
+                    ],
+                },
+            },
+            OperationRecord::Retained {
+                source_file_id: "source-retained".to_owned(),
+                disposition: RetainedDuplicateDisposition::SourceDuplicate {
+                    selected_source_file_id: "source-selected".to_owned(),
+                },
             },
         ]
     );
