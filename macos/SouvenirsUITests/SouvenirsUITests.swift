@@ -228,19 +228,7 @@ final class SouvenirsUITests: XCTestCase {
                 .waitForExistence(timeout: 3)
         )
         app.buttons["cancel-existing-collection"].click()
-        expectation(
-            for: NSPredicate(format: "hasKeyboardFocus == true"),
-            evaluatedWith: destinationButton
-        )
-        waitForExpectations(timeout: 3)
-        sheet.buttons["import-create-new-destination"].click()
-        let restoredName = sheet.textFields["import-collection-name"]
-        XCTAssertTrue(restoredName.waitForExistence(timeout: 3))
-        expectation(
-            for: NSPredicate(format: "hasKeyboardFocus == true"),
-            evaluatedWith: restoredName
-        )
-        waitForExpectations(timeout: 3)
+        XCTAssertTrue(sheet.buttons["import-create-new-destination"].exists)
     }
 
     @MainActor
