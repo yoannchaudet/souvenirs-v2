@@ -5,8 +5,10 @@ use std::fs;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, CopyExpectation, Failpoint,
-    ManifestReplacementRequest, OperationJournal, OperationJournalError, VerifiedCopyError,
+    read_operation_records, CatalogConfig, CatalogInitializationError, CatalogLayout, CatalogLock,
+    CopyExpectation, Failpoint, ManifestReplacementRequest, OperationJournal,
+    OperationJournalError, OperationOutcome, OperationRecord, RecoveryError, RecoveryRequest,
+    VerifiedCopyError,
 };
 use tempfile::TempDir;
 
@@ -30,6 +32,169 @@ fn expectation(bytes: &[u8]) -> CopyExpectation {
         sha256: digest(bytes),
         size_bytes: bytes.len() as u64,
     }
+}
+
+fn initialization_journal(layout: &CatalogLayout) -> std::path::PathBuf {
+    fs::read_dir(layout.journal_directory())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("-initialize.jsonl"))
+        })
+        .unwrap()
+}
+
+fn assert_completed_initialization(temporary: &TempDir, config: &CatalogConfig) {
+    let layout = CatalogLayout::initialize(temporary.path(), config).unwrap();
+    assert!(layout.config_path().is_file());
+    for path in [
+        ".souvenirs-initialize.lock",
+        ".souvenirs-initialize.lock.takeover",
+        ".souvenirs-initialize.jsonl",
+    ] {
+        assert!(!temporary.path().join(path).exists());
+    }
+
+    let journal = initialization_journal(&layout);
+    assert!(matches!(
+        read_operation_records(&journal).unwrap().last(),
+        Some(OperationRecord::Outcome {
+            outcome: OperationOutcome::Completed
+        })
+    ));
+}
+
+fn assert_initialization_failpoint(failpoint: Failpoint) {
+    let temporary = TempDir::new().unwrap();
+    let config = CatalogConfig::default();
+    let error =
+        CatalogLayout::initialize_failing_at(temporary.path(), &config, failpoint).unwrap_err();
+    assert!(matches!(
+        error,
+        CatalogInitializationError::Failpoint(actual) if actual == failpoint
+    ));
+    if failpoint == Failpoint::InitializationOutcomePersisted {
+        let path = temporary.path().join(".souvenirs-initialize.lock");
+        let mut holder: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        holder["process_id"] = serde_json::Value::from(u32::MAX);
+        holder["process_start_id"] = serde_json::Value::from("interrupted-process");
+        fs::write(
+            path,
+            format!("{}\n", serde_json::to_string(&holder).unwrap()),
+        )
+        .unwrap();
+    }
+    assert_completed_initialization(&temporary, &config);
+}
+
+#[test]
+fn initialization_resumes_after_every_durable_boundary() {
+    for failpoint in [
+        Failpoint::InitializationJournalCreated,
+        Failpoint::InitializationPlanPersisted,
+        Failpoint::InitializationStateDirectoryIntentPersisted,
+        Failpoint::InitializationStateDirectoryMutationPersisted,
+        Failpoint::InitializationStateDirectoryCompleted,
+        Failpoint::InitializationJournalDirectoryIntentPersisted,
+        Failpoint::InitializationJournalDirectoryMutationPersisted,
+        Failpoint::InitializationJournalDirectoryCompleted,
+        Failpoint::InitializationJournalRelocationIntentPersisted,
+        Failpoint::InitializationJournalRelocationMutationPersisted,
+        Failpoint::InitializationJournalRelocated,
+        Failpoint::InitializationStagingDirectoryIntentPersisted,
+        Failpoint::InitializationStagingDirectoryMutationPersisted,
+        Failpoint::InitializationStagingDirectoryCompleted,
+        Failpoint::InitializationConfigStageIntentPersisted,
+        Failpoint::InitializationConfigStageMutationPersisted,
+        Failpoint::InitializationConfigStaged,
+        Failpoint::InitializationConfigPublicationIntentPersisted,
+        Failpoint::InitializationConfigPublicationMutationPersisted,
+        Failpoint::InitializationConfigPublished,
+        Failpoint::InitializationOutcomePersisted,
+    ] {
+        assert_initialization_failpoint(failpoint);
+    }
+}
+
+#[test]
+fn initialization_removes_owned_apple_double_sidecars_during_recovery() {
+    for failpoint in [
+        Failpoint::InitializationJournalRelocationIntentPersisted,
+        Failpoint::InitializationJournalRelocationMutationPersisted,
+    ] {
+        let temporary = TempDir::new().unwrap();
+        CatalogLayout::initialize_failing_at(
+            temporary.path(),
+            &CatalogConfig::default(),
+            failpoint,
+        )
+        .unwrap_err();
+        let sidecar = temporary.path().join("._.souvenirs-initialize.jsonl");
+        fs::write(&sidecar, b"metadata").unwrap();
+
+        assert!(CatalogLayout::resume_initialization(temporary.path())
+            .unwrap()
+            .is_some());
+        assert!(!sidecar.exists());
+    }
+
+    let temporary = TempDir::new().unwrap();
+    CatalogLayout::initialize_failing_at(
+        temporary.path(),
+        &CatalogConfig::default(),
+        Failpoint::InitializationConfigPublicationMutationPersisted,
+    )
+    .unwrap_err();
+    let sidecar = temporary
+        .path()
+        .join(".souvenirs/staging/._initialize-config.yml.stage");
+    fs::write(&sidecar, b"metadata").unwrap();
+
+    assert!(CatalogLayout::resume_initialization(temporary.path())
+        .unwrap()
+        .is_some());
+    assert!(!sidecar.exists());
+}
+
+#[test]
+fn generic_recovery_refuses_an_initialization_journal() {
+    let temporary = TempDir::new().unwrap();
+    let config = CatalogConfig::default();
+    CatalogLayout::initialize_failing_at(
+        temporary.path(),
+        &config,
+        Failpoint::InitializationJournalRelocated,
+    )
+    .unwrap_err();
+    let layout = CatalogLayout::new(temporary.path());
+    let journal = initialization_journal(&layout);
+    fs::write(
+        &journal,
+        fs::read_to_string(&journal).unwrap().replacen(
+            "\"operation_id\":\"initialize\"",
+            "\"operation_id\":\"retry-initialize\"",
+            1,
+        ),
+    )
+    .unwrap();
+    let lock = CatalogLock::acquire(&layout).unwrap();
+    let error = layout
+        .recover_operation(&lock, &journal, RecoveryRequest::default())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RecoveryError::Journal(OperationJournalError::ReservedIdentifier {
+            kind: "operation",
+            value,
+        }) if value == "retry-initialize"
+    ));
+    assert!(!matches!(
+        read_operation_records(&journal).unwrap().last(),
+        Some(OperationRecord::Outcome { .. })
+    ));
 }
 
 #[test]

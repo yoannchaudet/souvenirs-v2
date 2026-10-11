@@ -92,6 +92,9 @@ impl CatalogService {
         display_name: impl AsRef<str>,
     ) -> Result<CatalogLocation, CatalogServiceError> {
         let path = path.as_ref();
+        if CatalogLayout::resume_initialization(path)?.is_some() {
+            return Ok(location(path));
+        }
         Self::validate(path, CatalogIntent::Create)?;
         let display_name = CatalogLabel::new(display_name.as_ref())
             .map_err(|error| CatalogServiceError::InvalidName(error.to_string()))?;
@@ -964,6 +967,27 @@ mod tests {
             CatalogService::validate(directory.path(), CatalogIntent::Create),
             Err(CatalogServiceError::AlreadyCatalog(_))
         ));
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[test]
+    fn create_resumes_a_published_configuration_without_guessing_it() {
+        let directory = tempdir().unwrap();
+        let config = souvenirs_storage::CatalogConfig {
+            display_name: Some("Confirmed name".to_owned()),
+            ..souvenirs_storage::CatalogConfig::default()
+        };
+        souvenirs_storage::CatalogLayout::initialize_failing_at(
+            directory.path(),
+            &config,
+            souvenirs_storage::Failpoint::InitializationConfigPublished,
+        )
+        .unwrap_err();
+
+        let location = CatalogService::create(directory.path(), "Different name").unwrap();
+
+        assert_eq!(location.display_name.as_deref(), Some("Confirmed name"));
+        assert!(CatalogService::open(directory.path()).is_ok());
     }
 
     #[test]

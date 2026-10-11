@@ -80,6 +80,29 @@ pub enum DurableTransition {
         step_id: String,
         staged_path: PathBuf,
     },
+    InitializationJournalRelocationStarted {
+        destination: PathBuf,
+    },
+    InitializationJournalRelocated {
+        destination: PathBuf,
+    },
+    InitializationConfigStageStarted {
+        staged_path: PathBuf,
+        sha256: String,
+    },
+    InitializationConfigStaged {
+        staged_path: PathBuf,
+        sha256: String,
+    },
+    InitializationConfigPublicationStarted {
+        staged_path: PathBuf,
+        destination: PathBuf,
+        sha256: String,
+    },
+    InitializationConfigPublished {
+        destination: PathBuf,
+        sha256: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -262,6 +285,12 @@ impl OperationJournal {
             _ => return Err(OperationJournalError::MissingPlan(path.to_path_buf())),
         };
         validate_identifier("operation", &operation_id)?;
+        if is_reserved_initialization_identifier(&operation_id) {
+            return Err(OperationJournalError::ReservedIdentifier {
+                kind: "operation",
+                value: operation_id,
+            });
+        }
         let finished = records
             .last()
             .is_some_and(|record| matches!(record, OperationRecord::Outcome { .. }));
@@ -450,21 +479,7 @@ impl OperationJournal {
     }
 
     fn append(&mut self, record: &OperationRecord) -> Result<(), OperationJournalError> {
-        let mut encoded = serde_json::to_vec(record).map_err(|source| {
-            OperationJournalError::SerializeRecord {
-                path: self.path.clone(),
-                source,
-            }
-        })?;
-        encoded.push(b'\n');
-        self.file
-            .write_all(&encoded)
-            .and_then(|()| sync_file(&self.file))
-            .map_err(|source| OperationJournalError::Io {
-                action: "append and persist operation journal",
-                path: self.path.clone(),
-                source,
-            })
+        append_operation_record(&mut self.file, &self.path, record)
     }
 }
 
@@ -485,13 +500,13 @@ pub fn read_operation_records(
     Ok(read_parsed_operation_records(path, "read operation journal")?.records)
 }
 
-struct ParsedOperationRecords {
-    records: Vec<OperationRecord>,
-    complete_length: u64,
-    interrupted_tail: bool,
+pub(crate) struct ParsedOperationRecords {
+    pub records: Vec<OperationRecord>,
+    pub complete_length: u64,
+    pub interrupted_tail: bool,
 }
 
-fn read_parsed_operation_records(
+pub(crate) fn read_parsed_operation_records(
     path: &Path,
     action: &'static str,
 ) -> Result<ParsedOperationRecords, OperationJournalError> {
@@ -510,6 +525,7 @@ fn read_parsed_operation_records(
             line_number += 1;
             continue;
         }
+
         records.push(serde_json::from_slice(line).map_err(|source| {
             OperationJournalError::DeserializeRecord {
                 path: path.to_path_buf(),
@@ -525,6 +541,26 @@ fn read_parsed_operation_records(
         complete_length: start as u64,
         interrupted_tail: start < bytes.len(),
     })
+}
+
+pub(crate) fn append_operation_record(
+    file: &mut File,
+    path: &Path,
+    record: &OperationRecord,
+) -> Result<(), OperationJournalError> {
+    let mut encoded =
+        serde_json::to_vec(record).map_err(|source| OperationJournalError::SerializeRecord {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    encoded.push(b'\n');
+    file.write_all(&encoded)
+        .and_then(|()| sync_file(file))
+        .map_err(|source| OperationJournalError::Io {
+            action: "append and persist operation journal",
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn ensure_lock(layout: &CatalogLayout, lock: &CatalogLock) -> Result<(), OperationJournalError> {
@@ -638,13 +674,17 @@ fn journal_tail_has_outcome(path: &Path) -> Result<bool, OperationJournalError> 
 
 fn validate_new_operation_identifier(identifier: &str) -> Result<(), OperationJournalError> {
     validate_identifier("operation", identifier)?;
-    if identifier == "initialize" || identifier.ends_with("-initialize") {
+    if is_reserved_initialization_identifier(identifier) {
         return Err(OperationJournalError::ReservedIdentifier {
             kind: "operation",
             value: identifier.to_owned(),
         });
     }
     Ok(())
+}
+
+fn is_reserved_initialization_identifier(identifier: &str) -> bool {
+    identifier == "initialize" || identifier.ends_with("-initialize")
 }
 
 pub(crate) fn validate_identifier(
@@ -687,6 +727,32 @@ pub enum Failpoint {
     RecoveryManifestDestinationObservedBeforePersistence,
     RecoveryStageRemovalObservedBeforePersistence,
     OutcomePersisted,
+    InitializationJournalCreated,
+    InitializationPlanPersisted,
+    InitializationStateDirectoryIntentPersisted,
+    InitializationStateDirectoryMutationPersisted,
+    InitializationStateDirectoryCompleted,
+    InitializationJournalDirectoryIntentPersisted,
+    InitializationJournalDirectoryMutationPersisted,
+    InitializationJournalDirectoryCompleted,
+    InitializationJournalRelocationIntentPersisted,
+    InitializationJournalRelocationMutationPersisted,
+    InitializationJournalRelocated,
+    InitializationStagingDirectoryIntentPersisted,
+    InitializationStagingDirectoryMutationPersisted,
+    InitializationStagingDirectoryCompleted,
+    InitializationConfigStageIntentPersisted,
+    InitializationConfigStageMutationPersisted,
+    InitializationConfigStaged,
+    InitializationConfigPublicationIntentPersisted,
+    InitializationConfigPublicationMutationPersisted,
+    InitializationConfigPublished,
+    InitializationRecoveryDirectoryObservedBeforePersistence,
+    InitializationRecoveryRelocationObservedBeforePersistence,
+    InitializationRecoveryConfigStageObservedBeforePersistence,
+    InitializationRecoveryConfigObservedBeforePersistence,
+    InitializationRecoveryCleanupObservedBeforePersistence,
+    InitializationOutcomePersisted,
 }
 
 #[derive(Debug)]

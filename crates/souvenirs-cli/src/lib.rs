@@ -528,8 +528,13 @@ fn catalog_initialize(catalog: &Path) -> Result<(), CliError> {
             catalog.display()
         )));
     }
-    CatalogLayout::initialize(catalog, &CatalogConfig::default())
-        .map_err(|error| CliError::conflict(error.to_string()))?;
+    if CatalogLayout::resume_initialization(catalog)
+        .map_err(|error| CliError::conflict(error.to_string()))?
+        .is_none()
+    {
+        CatalogLayout::initialize(catalog, &CatalogConfig::default())
+            .map_err(|error| CliError::conflict(error.to_string()))?;
+    }
     write_result(
         "catalog.initialize",
         CatalogInitialized {
