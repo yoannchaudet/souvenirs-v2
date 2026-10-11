@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+. "$repo_root/scripts/release-signing.sh"
+
 usage() {
     echo "usage: $0 [--allow-adhoc] [--allow-no-timestamp] [--notarized] APP" >&2
     exit 2
@@ -55,6 +58,10 @@ grep -Eq 'flags=.*runtime' <<<"$engine_details" || {
 app_team=$(sed -n 's/^TeamIdentifier=//p' <<<"$app_details")
 engine_team=$(sed -n 's/^TeamIdentifier=//p' <<<"$engine_details")
 if [[ "$allow_adhoc" == false ]]; then
+    ! grep -Eq '(^Signature=adhoc|flags=.*adhoc)' <<<"$app_details"$'\n'"$engine_details" || {
+        echo "release contains an ad hoc signature" >&2
+        exit 1
+    }
     [[ -n "$app_team" && "$app_team" != "not set" ]] || {
         echo "app is not signed with a team identity" >&2
         exit 1
@@ -63,10 +70,8 @@ if [[ "$allow_adhoc" == false ]]; then
         echo "engine is not signed with a team identity" >&2
         exit 1
     }
-    ! grep -Eq '(^Signature=adhoc|flags=.*adhoc)' <<<"$app_details"$'\n'"$engine_details" || {
-        echo "release contains an ad hoc signature" >&2
-        exit 1
-    }
+    require_developer_id_application_authority "app" "$app_details"
+    require_developer_id_application_authority "engine" "$engine_details"
     [[ "$engine_team" == "$app_team" ]] || {
         echo "app and embedded engine use different signing teams" >&2
         exit 1
