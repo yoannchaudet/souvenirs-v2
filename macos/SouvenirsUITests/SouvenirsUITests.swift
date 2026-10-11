@@ -11,9 +11,11 @@ final class SouvenirsUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["engine-status"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Create a New Archive…"].exists)
-        XCTAssertTrue(app.staticTexts["Open an Existing Archive…"].exists)
         let launcher = app.buttons["create-catalog"]
+        XCTAssertTrue(launcher.label.contains("Create a New Archive…"))
+        XCTAssertTrue(
+            app.buttons["open-catalog"].label.contains("Open an Existing Archive…")
+        )
         launcher.click()
         let sheet = app.sheets.firstMatch
         XCTAssertTrue(sheet.waitForExistence(timeout: 2))
@@ -336,9 +338,10 @@ final class SouvenirsUITests: XCTestCase {
                 .matching(identifier: "recovery-counts").count,
             1
         )
-        XCTAssertEqual(
-            sheet.descendants(matching: .any)["recovery-counts"].label,
-            "7 items are safely in your archive. 5 items remain on EOS_DIGITAL."
+        XCTAssertTrue(
+            sheet.staticTexts[
+                "7 items are safely in your archive. 5 items remain on EOS_DIGITAL."
+            ].exists
         )
         XCTAssertLessThan(
             sheet.descendants(matching: .any)["recovery-counts"].frame.minY,
