@@ -7,10 +7,11 @@ work_directory=$(mktemp -d "${TMPDIR:-/tmp}/souvenirs-release-signing.XXXXXX")
 trap 'rm -rf "$work_directory"' EXIT
 
 app="$work_directory/Souvenirs.app"
+app_executable="$app/Contents/MacOS/Souvenirs"
 engine="$app/Contents/MacOS/souvenirs-engine"
 mkdir -p "$(dirname "$engine")" "$work_directory/bin"
-touch "$engine"
-chmod +x "$engine"
+touch "$app_executable" "$engine"
+chmod +x "$app_executable" "$engine"
 
 cat >"$work_directory/bin/codesign" <<'EOF'
 #!/bin/bash
@@ -137,6 +138,16 @@ expect_success \
     "ad hoc CI build" \
     env PATH="$test_path" APP_SIGNING_KIND=adhoc ENGINE_SIGNING_KIND=adhoc \
     "$verify" --allow-adhoc "$app"
+
+override_fixture="$app/Contents/Frameworks/EngineSupport"
+mkdir -p "$(dirname "$override_fixture")"
+printf '%s\n' "SOUVENIRS_ENGINE_EXECUTABLE" >"$override_fixture"
+expect_failure \
+    "development engine override" \
+    "release app contains development engine override: SOUVENIRS_ENGINE_EXECUTABLE" \
+    env PATH="$test_path" APP_SIGNING_KIND=adhoc ENGINE_SIGNING_KIND=adhoc \
+    "$verify" --allow-adhoc "$app"
+rm "$override_fixture"
 
 expect_failure \
     "explicit Apple Development identity" \

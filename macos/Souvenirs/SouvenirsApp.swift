@@ -2,10 +2,12 @@ import AppKit
 import Combine
 import SwiftUI
 
+#if DEBUG
 struct EngineLaunchConfiguration: Equatable {
     let executableURL: URL
     let arguments: [String]
 }
+#endif
 
 @MainActor
 final class EngineAppModel: ObservableObject {
@@ -22,16 +24,19 @@ final class EngineAppModel: ObservableObject {
     private var isStopping = false
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        #if DEBUG
         if let configuration = Self.fakeEngineConfiguration(environment: environment) {
             supervisor = EngineSupervisor(
                 executableURL: configuration.executableURL,
                 arguments: configuration.arguments
             )
-        } else {
-            supervisor = EngineSupervisor()
+            return
         }
+        #endif
+        supervisor = EngineSupervisor()
     }
 
+    #if DEBUG
     static func fakeEngineConfiguration(
         environment: [String: String]
     ) -> EngineLaunchConfiguration? {
@@ -44,6 +49,7 @@ final class EngineAppModel: ObservableObject {
             arguments: ["--scenario", scenario]
         )
     }
+    #endif
 
     func start() {
         guard lifecycleTask == nil else {

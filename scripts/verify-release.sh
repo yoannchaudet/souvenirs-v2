@@ -37,9 +37,21 @@ done
 [[ $# -eq 1 ]] || usage
 
 app=$1
+app_executable="$app/Contents/MacOS/Souvenirs"
 engine="$app/Contents/MacOS/souvenirs-engine"
 [[ -d "$app" ]] || { echo "app bundle not found: $app" >&2; exit 1; }
+[[ -x "$app_executable" ]] || {
+    echo "app executable not found: $app_executable" >&2
+    exit 1
+}
 [[ -x "$engine" ]] || { echo "embedded engine not found: $engine" >&2; exit 1; }
+
+for override in SOUVENIRS_ENGINE_EXECUTABLE SOUVENIRS_FAKE_ENGINE_SCENARIO; do
+    if grep -aFrq -- "$override" "$app"; then
+        echo "release app contains development engine override: $override" >&2
+        exit 1
+    fi
+done
 
 codesign --verify --strict --verbose=2 "$engine"
 codesign --verify --deep --strict --verbose=2 "$app"
