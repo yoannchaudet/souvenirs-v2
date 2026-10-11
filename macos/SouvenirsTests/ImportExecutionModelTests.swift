@@ -124,7 +124,7 @@ final class ImportExecutionModelTests: XCTestCase {
         engine.send(.init(
             operationID: "operation-1",
             sequence: 0,
-            payload: .cancelled
+            payload: .cancelled(copiedCount: 7)
         ))
         engine.finish()
         await waitUntil { model.phase == .cancelled(copiedCount: 7) }

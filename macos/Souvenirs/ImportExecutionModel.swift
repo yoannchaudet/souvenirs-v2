@@ -250,8 +250,9 @@ final class ImportExecutionCoordinator: ObservableObject {
             case .failed(let code, let message):
                 phase = code == "source_unavailable"
                     ? .sourceUnavailable : .failed(message)
-            case .cancelled:
-                phase = .cancelled(copiedCount: Int(completedUnits))
+            case .cancelled(let copiedCount):
+                completedUnits = UInt64(copiedCount)
+                phase = .cancelled(copiedCount: copiedCount)
             }
         }
         if phase == .running || phase == .recovering || phase == .stopping {

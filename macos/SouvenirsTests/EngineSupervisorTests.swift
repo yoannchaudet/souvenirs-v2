@@ -370,7 +370,7 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 3
             printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
             printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":2,"event":"cancelled"}'
+            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":2,"event":"cancelled","copied_count":1}'
             while IFS= read -r _; do :; done
             """
         )
@@ -393,6 +393,39 @@ final class EngineSupervisorTests: XCTestCase {
                     operationID: "operation-1",
                     expected: 1,
                     actual: 2
+                )
+            )
+        }
+        try await supervisor.stop()
+    }
+
+    func testCancelledEventRejectsNegativeCopiedCount() async throws {
+        let executable = try makeExecutable(
+            """
+            IFS= read -r _ || exit 2
+            printf '%s\\n' '\(handshakeResponse)'
+            IFS= read -r _ || exit 3
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"cancelled","copied_count":-1}'
+            while IFS= read -r _; do :; done
+            """
+        )
+        let supervisor = makeSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+        _ = try await supervisor.handshake()
+        let operationID = try await supervisor.requestOperation(
+            method: "test.operation",
+            parameters: TestParameters(value: "negative-copied-count")
+        )
+
+        do {
+            _ = try await collect(try await supervisor.events(for: operationID))
+            XCTFail("Expected the event stream to reject a negative copied count")
+        } catch let error as EngineSupervisor.SupervisorError {
+            XCTAssertEqual(
+                error,
+                .malformedResponse(
+                    "A cancelled event requires a nonnegative copied_count"
                 )
             )
         }
