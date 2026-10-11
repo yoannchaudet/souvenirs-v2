@@ -5,8 +5,21 @@ struct ContentView: View {
     let engineStatus: EngineAppModel.Status
     @ObservedObject var model: CatalogWelcomeModel
     @ObservedObject var imports: ImportExecutionCoordinator
+    let onRetryEngine: (() -> Void)?
     @State private var showsCreatedItems = false
     @AccessibilityFocusState private var recoveryTitleFocused: Bool
+
+    init(
+        engineStatus: EngineAppModel.Status,
+        model: CatalogWelcomeModel,
+        imports: ImportExecutionCoordinator,
+        onRetryEngine: (() -> Void)? = nil
+    ) {
+        self.engineStatus = engineStatus
+        self.model = model
+        self.imports = imports
+        self.onRetryEngine = onRetryEngine
+    }
 
     var body: some View {
         Group {
@@ -91,6 +104,7 @@ struct ContentView: View {
                         prominent: true,
                         identifier: "create-catalog"
                     ) {
+                        guard engineStatus.catalogActionsAvailable else { return }
                         model.beginCreate()
                     }
                     welcomeAction(
@@ -100,6 +114,7 @@ struct ContentView: View {
                         prominent: false,
                         identifier: "open-catalog"
                     ) {
+                        guard engineStatus.catalogActionsAvailable else { return }
                         chooseFolder { path in
                             Task { await model.openCatalog(at: path) }
                         }
@@ -128,6 +143,7 @@ struct ContentView: View {
                 } else {
                     ForEach(model.recents) { catalog in
                         Button {
+                            guard engineStatus.catalogActionsAvailable else { return }
                             Task {
                                 await model.openCatalog(
                                     at: catalog.path,
@@ -154,6 +170,8 @@ struct ContentView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .disabled(!engineStatus.catalogActionsAvailable)
+                        .accessibilityHint(catalogActionAccessibilityHint)
                         .accessibilityIdentifier("recent-catalog-\(catalog.id)")
                         .contextMenu {
                             Button("Remove from Recents") {
@@ -164,6 +182,7 @@ struct ContentView: View {
                     }
                 }
                 Spacer()
+                catalogActionsUnavailableNotice
                 engineBadge
             }
             .padding(20)
@@ -748,12 +767,43 @@ struct ContentView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!engineStatus.catalogActionsAvailable)
         .foregroundStyle(prominent ? Color.white : Color.primary)
         .background(
             prominent ? Color.accentColor : Color(nsColor: .controlColor),
             in: RoundedRectangle(cornerRadius: 10)
         )
+        .opacity(engineStatus.catalogActionsAvailable ? 1 : 0.62)
+        .accessibilityHint(catalogActionAccessibilityHint)
         .accessibilityIdentifier(identifier)
+    }
+
+    @ViewBuilder
+    private var catalogActionsUnavailableNotice: some View {
+        if let description = engineStatus.catalogActionsUnavailableDescription {
+            VStack(alignment: .leading, spacing: 7) {
+                Label("Catalog actions unavailable", systemImage: "exclamationmark.triangle")
+                    .font(.caption.weight(.medium))
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if case .failed = engineStatus, let onRetryEngine {
+                    Button("Try Again", action: onRetryEngine)
+                        .accessibilityIdentifier("retry-engine")
+                }
+            }
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.yellow.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Catalog actions unavailable")
+            .accessibilityValue(description)
+            .accessibilityIdentifier("catalog-actions-unavailable")
+        }
+    }
+
+    private var catalogActionAccessibilityHint: String {
+        engineStatus.catalogActionsUnavailableDescription ?? ""
     }
 
     @ViewBuilder
@@ -793,8 +843,8 @@ struct ContentView: View {
                 Label("Connecting…", systemImage: "ellipsis.circle")
             case .ready:
                 Label("Engine ready", systemImage: "checkmark.circle.fill")
-            case .failed(let message):
-                Label(message, systemImage: "exclamationmark.triangle.fill")
+            case .failed:
+                Label("Engine unavailable", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
             }
         }

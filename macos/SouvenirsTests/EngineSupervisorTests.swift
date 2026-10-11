@@ -947,6 +947,24 @@ final class EngineSupervisorTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testEngineAppModelRetriesAfterStartupFailure() async throws {
+        let executable = try makeExecutable("sleep 0.1\nexit 17")
+        let model = EngineAppModel(
+            environment: [
+                "SOUVENIRS_ENGINE_EXECUTABLE": executable.path,
+                "SOUVENIRS_FAKE_ENGINE_SCENARIO": "startup-failure",
+            ]
+        )
+
+        model.start()
+        await waitForEngineFailure(model)
+
+        model.retry()
+        XCTAssertEqual(model.status, .connecting)
+        await waitForEngineFailure(model)
+    }
+
     func testTerminationHandlerUsesInjectedMapper() async throws {
         let executable = try makeExecutable("exit 17")
         let mappedTermination = EngineSupervisor.Termination(
@@ -1058,6 +1076,17 @@ final class EngineSupervisorTests: XCTestCase {
             ofItemAtPath: executable.path
         )
         return executable
+    }
+
+    @MainActor
+    private func waitForEngineFailure(_ model: EngineAppModel) async {
+        for _ in 0..<100 {
+            if case .failed = model.status {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Expected the engine model to report startup failure")
     }
 
     private func collect(

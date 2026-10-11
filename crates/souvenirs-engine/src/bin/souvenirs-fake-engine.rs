@@ -1,4 +1,5 @@
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
@@ -29,6 +30,8 @@ fn main() {
 
 #[derive(Clone, Copy)]
 enum Scenario {
+    StartupFailure,
+    StartupFailureOnce,
     Ready,
     SuccessfulOperation,
     FailedOperation,
@@ -58,6 +61,8 @@ fn parse_scenario() -> Result<Scenario, String> {
         return Err(usage());
     }
     let scenario = match arguments.next().as_deref() {
+        Some("startup-failure") => Scenario::StartupFailure,
+        Some("startup-failure-once") => Scenario::StartupFailureOnce,
         Some("ready") => Scenario::Ready,
         Some("successful-operation") => Scenario::SuccessfulOperation,
         Some("failed-operation") => Scenario::FailedOperation,
@@ -85,6 +90,8 @@ fn usage() -> String {
         "Usage: souvenirs-fake-engine --scenario <name>",
         "",
         "Scenarios:",
+        "  startup-failure",
+        "  startup-failure-once",
         "  ready",
         "  successful-operation",
         "  failed-operation",
@@ -126,6 +133,34 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
             "Client version must use major.minor.patch unsigned decimal syntax.",
         );
     }
+    if matches!(scenario, Scenario::StartupFailure) {
+        return write_protocol_error(
+            &mut output,
+            handshake.id,
+            "startup_failed",
+            "The test engine could not start.",
+        );
+    }
+    if matches!(scenario, Scenario::StartupFailureOnce) {
+        let marker = env::var("SOUVENIRS_FAKE_ENGINE_RETRY_MARKER").map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SOUVENIRS_FAKE_ENGINE_RETRY_MARKER is required",
+            )
+        })?;
+        match OpenOptions::new().write(true).create_new(true).open(marker) {
+            Ok(_) => {
+                return write_protocol_error(
+                    &mut output,
+                    handshake.id,
+                    "startup_failed",
+                    "The test engine could not start.",
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
     write_message(
         &mut output,
         &EngineMessage::success(
@@ -149,6 +184,12 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
     )?;
 
     match scenario {
+        Scenario::StartupFailure => unreachable!("startup failure exits before dispatch"),
+        Scenario::StartupFailureOnce => {
+            while let Some(request) = next_request(&mut input, &mut output)? {
+                reject_request(&mut output, request)?;
+            }
+        }
         Scenario::Ready => {
             while let Some(request) = next_request(&mut input, &mut output)? {
                 reject_request(&mut output, request)?;
