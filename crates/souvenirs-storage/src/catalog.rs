@@ -238,26 +238,25 @@ impl CatalogLayout {
         let result = operation();
         #[cfg(feature = "test-failpoints")]
         if matches!(result, Err(CatalogInitializationError::Failpoint(_))) {
+            if let Some(takeover) = takeover {
+                let _ = takeover.remove();
+            }
             lock.abandon();
-            drop(takeover);
             return result;
         }
+        let cleanup = takeover
+            .map(|guard| guard.remove())
+            .transpose()
+            .map_err(CatalogInitializationError::Lock);
         match result {
             Ok(value) => {
-                let release = lock.release().map_err(CatalogInitializationError::Lock);
-                let cleanup = takeover
-                    .map(|guard| guard.remove())
-                    .transpose()
-                    .map_err(CatalogInitializationError::Lock);
-                release?;
                 cleanup?;
+                lock.release().map_err(CatalogInitializationError::Lock)?;
                 Ok(value)
             }
             Err(error) => {
+                let _ = cleanup;
                 drop(lock);
-                if let Some(takeover) = takeover {
-                    let _ = takeover.remove();
-                }
                 Err(error)
             }
         }

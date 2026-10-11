@@ -35,7 +35,9 @@ fn expectation(bytes: &[u8]) -> CopyExpectation {
 
 fn assert_completed_initialization(temporary: &TempDir, config: &CatalogConfig) {
     CatalogLayout::initialize(temporary.path(), config).unwrap();
-    assert!(!temporary.path().join(".souvenirs-initialize.lock").exists());
+    let root = temporary.path();
+    assert!(!root.join(".souvenirs-initialize.lock").exists());
+    assert!(!root.join(".souvenirs-initialize.lock.takeover").exists());
 }
 
 fn forge_dead_bootstrap_holder(temporary: &TempDir) {

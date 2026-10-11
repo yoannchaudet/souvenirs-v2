@@ -55,6 +55,12 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
         b"{\"kind\":\"plan\",\"operation\":\"initialize\",\"format_version\":2}\n",
     )
     .unwrap();
+    json_stdout(&run(&[
+        "catalog",
+        "initialize",
+        "--catalog",
+        catalog.to_str().unwrap(),
+    ]));
 
     let inspected = json_stdout(&run(&[
         "catalog",
@@ -801,11 +807,12 @@ fn help_is_successful_and_human_readable() {
         "--catalog",
         temporary.path().to_str().unwrap(),
     ];
-    json_stdout(&run(&initialize));
-    let repeated = run(&initialize);
-    assert_eq!(repeated.status.code(), Some(4));
-    let error: Value = serde_json::from_slice(&repeated.stderr).unwrap();
-    assert_eq!(error["error"]["code"], "conflict");
+    let mismatch = run(&initialize);
+    let error: Value = serde_json::from_slice(&mismatch.stderr).unwrap();
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("configuration differs"));
     let output = run(&["--help"]);
     assert!(output.status.success());
     assert!(!output.stdout.is_empty());

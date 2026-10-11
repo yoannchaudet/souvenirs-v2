@@ -528,19 +528,17 @@ fn catalog_initialize(catalog: &Path) -> Result<(), CliError> {
             catalog.display()
         )));
     }
-    if CatalogLayout::resume_initialization(catalog)
-        .map_err(|error| CliError::conflict(error.to_string()))?
-        .is_none()
-    {
-        if require_catalog(catalog).is_ok() {
-            return Err(CliError::conflict(format!(
-                "catalog is already initialized: {}",
-                catalog.display()
-            )));
-        }
-        CatalogLayout::initialize(catalog, &CatalogConfig::default())
-            .map_err(|error| CliError::conflict(error.to_string()))?;
+    let pending = CatalogLayout::new(catalog)
+        .has_pending_initialization()
+        .map_err(|error| CliError::conflict(error.to_string()))?;
+    if !pending && require_catalog(catalog).is_ok() {
+        return Err(CliError::conflict(format!(
+            "catalog is already initialized: {}",
+            catalog.display()
+        )));
     }
+    CatalogLayout::initialize(catalog, &CatalogConfig::default())
+        .map_err(|error| CliError::conflict(error.to_string()))?;
     write_result(
         "catalog.initialize",
         CatalogInitialized {
