@@ -302,6 +302,10 @@ final class ImportPlanningModel: ObservableObject {
         return !review.canStart || review.reviewedPlan == nil
     }
 
+    var dateChoicePreventsStart: Bool {
+        errorMessage == nil && review?.canStart == false
+    }
+
     var startImportAccessibilityHint: String {
         if isPrepared {
             return "The import plan is ready."

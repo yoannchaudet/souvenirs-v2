@@ -1081,13 +1081,13 @@ private struct ImportPlanningSheet: View {
                                     Text(pendingDateSummary(summary))
                                         .font(.callout.bold())
                                     if let asShownTime = summary.asShownTime {
-                                        Text("As shown: \(asShownTime)")
+                                        Text("Example · As shown: \(asShownTime)")
                                             .font(.caption2)
                                             .foregroundStyle(.secondary)
                                     }
                                     if summary.supportsUTCConversion,
                                        let convertedTime = summary.convertedFromUTCTime {
-                                        Text("Convert from UTC: \(convertedTime)")
+                                        Text("Example · Convert from UTC: \(convertedTime)")
                                             .font(.caption2)
                                             .foregroundStyle(.secondary)
                                     }
@@ -1105,7 +1105,7 @@ private struct ImportPlanningSheet: View {
                                 if model.supportsUTCConversion {
                                     decisionButton(
                                         "Convert from UTC",
-                                        detail: "Using \(model.utcOffsetDescription)",
+                                        detail: "Using current \(model.utcOffsetDescription) for all items",
                                         value: .convertFromUTC,
                                         focus: .convertFromUTC
                                     )
@@ -1164,7 +1164,7 @@ private struct ImportPlanningSheet: View {
     }
 
     private var dateFallbackDescription: String {
-        if model.isStartBlocked {
+        if model.dateChoicePreventsStart {
             return """
                 These items will stay on the source until you select an interpretation.
                 """

@@ -103,8 +103,8 @@ final class SouvenirsUITests: XCTestCase {
             sheet.descendants(matching: .any)["import-date-decision"].exists
         )
         XCTAssertTrue(sheet.buttons["start-import"].isEnabled)
-        XCTAssertTrue(sheet.staticTexts["As shown: 12:14"].exists)
-        XCTAssertTrue(sheet.staticTexts["Convert from UTC: 14:14"].exists)
+        XCTAssertTrue(sheet.staticTexts["Example · As shown: 12:14"].exists)
+        XCTAssertTrue(sheet.staticTexts["Example · Convert from UTC: 14:14"].exists)
 
         sheet.buttons["date-as-shown"].click()
         XCTAssertTrue(
