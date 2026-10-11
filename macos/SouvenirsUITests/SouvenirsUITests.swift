@@ -221,6 +221,11 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(selected.waitForExistence(timeout: 3))
         XCTAssertEqual(selected.value as? String, "Brittany")
         XCTAssertEqual(destinationButton.label, "Change…")
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: destinationButton
+        )
+        waitForExpectations(timeout: 3)
 
         destinationButton.click()
         XCTAssertTrue(

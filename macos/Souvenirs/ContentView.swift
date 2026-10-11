@@ -1107,13 +1107,9 @@ private struct ImportPlanningSheet: View {
         .sheet(
             isPresented: $showsExistingCollections,
             onDismiss: {
-                let destinationMode = model.destinationMode
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(150))
-                    guard
-                        !showsExistingCollections,
-                        model.destinationMode == destinationMode
-                    else { return }
+                    guard !showsExistingCollections else { return }
                     keyboardFocus = .destination
                     destinationFocused = true
                 }
