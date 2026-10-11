@@ -26,11 +26,44 @@ final class CatalogVisualTests: XCTestCase {
                 model: model,
                 imports: imports
             ),
+            size: NSSize(width: 920, height: 620),
+            name: "catalog-welcome",
+            assertsHeightFits: true
+        )
+
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: imports
+            ),
             size: NSSize(width: 586, height: 386),
-            name: "catalog-welcome"
+            name: "catalog-welcome-minimum",
+            assertsHeightFits: true
+        )
+
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: imports
+            ),
+            size: NSSize(width: 1_200, height: 800),
+            name: "catalog-welcome-enlarged",
+            assertsHeightFits: true
         )
 
         model.beginCreate()
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: imports
+            ),
+            size: NSSize(width: 920, height: 620),
+            name: "catalog-create-empty"
+        )
+
         await model.chooseCreateLocation("/Volumes/photos/Family Catalog")
         try capture(
             ContentView(
@@ -38,10 +71,36 @@ final class CatalogVisualTests: XCTestCase {
                 model: model,
                 imports: imports
             ),
-            size: NSSize(width: 465, height: 455),
+            size: NSSize(width: 920, height: 620),
             name: "catalog-create"
         )
 
+        engine.validationError = EngineSupervisor.SupervisorError.protocolError(
+            code: "catalog_location_invalid",
+            message: "This folder is read-only. Choose a writable folder."
+        )
+        await model.chooseCreateLocation("/Volumes/READ_ONLY/Family Catalog")
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: imports
+            ),
+            size: NSSize(width: 920, height: 620),
+            name: "catalog-create-invalid"
+        )
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: imports
+            ),
+            size: NSSize(width: 586, height: 386),
+            name: "catalog-create-invalid-small"
+        )
+
+        engine.validationError = nil
+        await model.chooseCreateLocation("/Volumes/photos/Family Catalog")
         await model.createCatalog()
         try capture(
             ContentView(
@@ -52,12 +111,48 @@ final class CatalogVisualTests: XCTestCase {
             size: NSSize(width: 920, height: 620),
             name: "catalog-ready"
         )
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: imports
+            ),
+            size: NSSize(width: 586, height: 386),
+            name: "catalog-ready-minimum"
+        )
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: imports
+            ),
+            size: NSSize(width: 1_200, height: 800),
+            name: "catalog-ready-enlarged"
+        )
 
         if case .catalog(let catalog) = model.route {
+            engine.scanSuspended = true
             model.beginImport(from: "/Volumes/EOS_DIGITAL", into: catalog)
-            for _ in 0..<10 where model.importPlanning?.review == nil {
+            for _ in 0..<20 where model.importPlanning?.isLoading != true {
                 await Task.yield()
             }
+            XCTAssertTrue(model.importPlanning?.isLoading == true)
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 586, height: 386),
+                name: "import-review-loading-small"
+            )
+
+            engine.resumeScan()
+            for _ in 0..<20 where model.importPlanning?.review == nil {
+                await Task.yield()
+            }
+            XCTAssertNotNil(model.importPlanning?.review)
+            XCTAssertFalse(model.importPlanning?.isLoading ?? true)
 
             try capture(
                 ContentView(
@@ -65,25 +160,67 @@ final class CatalogVisualTests: XCTestCase {
                     model: model,
                     imports: imports
                 ),
-                size: NSSize(width: 920, height: 640),
-                name: "import-review"
+                size: NSSize(width: 920, height: 620),
+                name: "import-review-decision"
+            )
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 586, height: 386),
+                name: "import-review-decision-small"
+            )
+
+            model.importPlanning?.showsDetails = true
+            XCTAssertTrue(model.importPlanning?.showsDetails == true)
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 920, height: 620),
+                name: "import-review-details"
+            )
+
+            engine.reviewError = EngineSupervisor.SupervisorError.protocolError(
+                code: "review_failed",
+                message: "The source could not be reviewed."
+            )
+            await model.importPlanning?.refreshReview()
+            XCTAssertEqual(
+                model.importPlanning?.errorMessage,
+                "The source could not be reviewed."
+            )
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 920, height: 620),
+                name: "import-review-error"
             )
         }
     }
 
     func testCaptureImportExecutionAndRecoveryScreens() async throws {
-        let engine = VisualCatalogEngine()
         let catalog = RecentCatalog(
             path: "/Volumes/photos/Family Catalog",
             name: "Family Catalog",
             volumeName: "photos-nas.local"
         )
-        let model = CatalogWelcomeModel(engine: engine, recents: [catalog])
+        let modelEngine = VisualCatalogEngine()
+        let model = CatalogWelcomeModel(engine: modelEngine, recents: [catalog])
         await model.openCatalog(at: catalog.path)
-        let imports = ImportExecutionCoordinator(engine: engine)
-        imports.start(review: try await engine.review(), catalog: catalog)
-        await engine.waitForStream()
-        engine.send(.init(
+
+        let runningEngine = VisualCatalogEngine()
+        let running = ImportExecutionCoordinator(engine: runningEngine)
+        running.start(review: try await runningEngine.review(), catalog: catalog)
+        await runningEngine.waitForStream()
+        runningEngine.send(.init(
             operationID: "visual-operation",
             sequence: 0,
             payload: .progress(
@@ -93,20 +230,75 @@ final class CatalogVisualTests: XCTestCase {
             )
         ))
         for _ in 0..<20 {
-            if imports.completedUnits == 7 { break }
+            if running.completedUnits == 7 { break }
             await Task.yield()
         }
+        XCTAssertEqual(running.completedUnits, 7)
+        XCTAssertEqual(running.phase, .running)
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
                 model: model,
-                imports: imports
+                imports: running
             ),
             size: NSSize(width: 920, height: 620),
             name: "import-execution"
         )
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: running
+            ),
+            size: NSSize(width: 586, height: 386),
+            name: "import-execution-small"
+        )
 
-        engine.send(.init(
+        running.stop()
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: running
+            ),
+            size: NSSize(width: 920, height: 620),
+            name: "import-stopping"
+        )
+        runningEngine.send(.init(
+            operationID: "visual-operation",
+            sequence: 1,
+            payload: .cancelled(copiedCount: 7)
+        ))
+        for _ in 0..<20 {
+            if case .cancelled = running.phase { break }
+            await Task.yield()
+        }
+        XCTAssertEqual(running.phase, .cancelled(copiedCount: 7))
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: running
+            ),
+            size: NSSize(width: 920, height: 620),
+            name: "import-cancelled"
+        )
+        runningEngine.finish()
+
+        let completedEngine = VisualCatalogEngine()
+        let completed = ImportExecutionCoordinator(engine: completedEngine)
+        completed.start(review: try await completedEngine.review(), catalog: catalog)
+        await completedEngine.waitForStream()
+        completedEngine.send(.init(
+            operationID: "visual-operation",
+            sequence: 0,
+            payload: .progress(
+                completedUnits: 12,
+                totalUnits: 12,
+                message: "Reading back and checking each copy…"
+            )
+        ))
+        completedEngine.send(.init(
             operationID: "visual-operation",
             sequence: 1,
             payload: .completed(
@@ -115,23 +307,83 @@ final class CatalogVisualTests: XCTestCase {
                 )
             )
         ))
-        engine.finish()
+        completedEngine.finish()
         for _ in 0..<10 {
-            if case .completed = imports.phase { break }
+            if case .completed = completed.phase { break }
             await Task.yield()
         }
+        XCTAssertEqual(
+            completed.phase,
+            .completed(
+                ImportOutcome(
+                    copiedCount: 12,
+                    skippedCount: 3,
+                    leftOnSourceCount: 2
+                )
+            )
+        )
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
                 model: model,
-                imports: imports
+                imports: completed
             ),
             size: NSSize(width: 920, height: 620),
             name: "import-completed"
         )
 
-        let recoveryEngine = VisualCatalogEngine()
-        recoveryEngine.inspection = .init(
+        let failedEngine = VisualCatalogEngine()
+        let failed = ImportExecutionCoordinator(engine: failedEngine)
+        failed.start(review: try await failedEngine.review(), catalog: catalog)
+        await failedEngine.waitForStream()
+        failedEngine.send(.init(
+            operationID: "visual-operation",
+            sequence: 0,
+            payload: .failed(
+                code: "copy_failed",
+                message: "The destination stopped responding."
+            )
+        ))
+        for _ in 0..<20 {
+            if case .failed = failed.phase { break }
+            await Task.yield()
+        }
+        XCTAssertEqual(failed.phase, .failed("The destination stopped responding."))
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: failed
+            ),
+            size: NSSize(width: 920, height: 620),
+            name: "import-failed"
+        )
+        failedEngine.finish()
+
+        let recoveryPresentEngine = VisualCatalogEngine()
+        recoveryPresentEngine.inspection = .init(
+            operationID: "interrupted-operation",
+            collectionName: "Dolomites",
+            sourceName: "EOS_DIGITAL",
+            copiedCount: 7,
+            totalCount: 12,
+            sourceAvailable: true
+        )
+        let recoveryPresent = ImportExecutionCoordinator(engine: recoveryPresentEngine)
+        await recoveryPresent.inspect(catalog: catalog)
+        XCTAssertEqual(recoveryPresent.phase, .recoveryPrompt(sourceAvailable: true))
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: recoveryPresent
+            ),
+            size: NSSize(width: 920, height: 620),
+            name: "import-recovery-source-present"
+        )
+
+        let recoveryMissingEngine = VisualCatalogEngine()
+        recoveryMissingEngine.inspection = .init(
             operationID: "interrupted-operation",
             collectionName: "Dolomites",
             sourceName: "EOS_DIGITAL",
@@ -139,25 +391,70 @@ final class CatalogVisualTests: XCTestCase {
             totalCount: 12,
             sourceAvailable: false
         )
-        let recovery = ImportExecutionCoordinator(engine: recoveryEngine)
-        await recovery.inspect(catalog: catalog)
+        let recoveryMissing = ImportExecutionCoordinator(engine: recoveryMissingEngine)
+        await recoveryMissing.inspect(catalog: catalog)
+        XCTAssertEqual(recoveryMissing.phase, .recoveryPrompt(sourceAvailable: false))
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
                 model: model,
-                imports: recovery
+                imports: recoveryMissing
             ),
             size: NSSize(width: 920, height: 620),
             name: "import-recovery-source-missing"
+        )
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: recoveryMissing
+            ),
+            size: NSSize(width: 586, height: 386),
+            name: "import-recovery-source-missing-small"
+        )
+
+        recoveryMissing.deferRecovery()
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: recoveryMissing
+            ),
+            size: NSSize(width: 920, height: 620),
+            name: "import-recovery-deferred"
+        )
+        try capture(
+            ContentView(
+                engineStatus: .ready(engineVersion: "0.1.0"),
+                model: model,
+                imports: recoveryMissing
+            ),
+            size: NSSize(width: 586, height: 386),
+            name: "import-recovery-deferred-small"
         )
     }
 
     private func capture<ViewType: View>(
         _ view: ViewType,
         size: NSSize,
-        name: String
+        name: String,
+        assertsHeightFits: Bool = false
     ) throws {
-        let hostingView = NSHostingView(rootView: view)
+        let hostingController = NSHostingController(rootView: view)
+        let hostingView = hostingController.view
+        let fittingSize = hostingController.sizeThatFits(in: size)
+        XCTAssertLessThanOrEqual(
+            fittingSize.width,
+            size.width + 1,
+            "\(name) requires \(fittingSize.width)pt but only \(size.width)pt is available"
+        )
+        if assertsHeightFits {
+            XCTAssertLessThanOrEqual(
+                fittingSize.height,
+                size.height + 1,
+                "\(name) requires \(fittingSize.height)pt but only \(size.height)pt is available"
+            )
+        }
         hostingView.frame = NSRect(origin: .zero, size: size)
         hostingView.layoutSubtreeIfNeeded()
         guard let representation = hostingView.bitmapImageRepForCachingDisplay(
@@ -188,11 +485,18 @@ final class CatalogVisualTests: XCTestCase {
 @MainActor
 private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEngine {
     var inspection: EngineSupervisor.UnfinishedOperation?
+    var validationError: Error?
+    var reviewError: Error?
+    var scanSuspended = false
     private var continuation:
         AsyncThrowingStream<EngineSupervisor.OperationEvent, any Error>.Continuation?
+    private var scanContinuation: CheckedContinuation<Void, Never>?
     func validateCatalog(path: String, intent: String) async throws
         -> EngineSupervisor.CatalogLocation {
-        location(path)
+        if let validationError {
+            throw validationError
+        }
+        return location(path)
     }
 
     func createCatalog(
@@ -207,7 +511,12 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
     }
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
-        .init(
+        if scanSuspended {
+            await withCheckedContinuation { continuation in
+                scanContinuation = continuation
+            }
+        }
+        return .init(
             sourcePath: sourcePath,
             sourceName: "EOS_DIGITAL",
             fileCount: 17,
@@ -234,6 +543,9 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
         acceptedDate: String,
         dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> EngineSupervisor.ImportReview {
+        if let reviewError {
+            throw reviewError
+        }
         let scan = try await scanImport(sourcePath: sourcePath)
         return .init(
             scan: scan,
@@ -288,6 +600,12 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
         while continuation == nil {
             await Task.yield()
         }
+    }
+
+    func resumeScan() {
+        scanSuspended = false
+        scanContinuation?.resume()
+        scanContinuation = nil
     }
 
     func send(_ event: EngineSupervisor.OperationEvent) {

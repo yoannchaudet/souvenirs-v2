@@ -42,6 +42,19 @@ final class SouvenirsUITests: XCTestCase {
             app.staticTexts["catalog-location-error"].waitForExistence(timeout: 3)
         )
         XCTAssertFalse(app.buttons["confirm-create-catalog"].isEnabled)
+
+        let disclosure = app.buttons["created-items-disclosure"]
+        XCTAssertTrue(disclosure.exists)
+        disclosure.click()
+        XCTAssertEqual(disclosure.value as? String, "Expanded")
+        XCTAssertTrue(
+            app.descendants(matching: .any)["created-items-description"]
+                .waitForExistence(timeout: 2)
+        )
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "catalog-create-expanded-invalid"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     @MainActor

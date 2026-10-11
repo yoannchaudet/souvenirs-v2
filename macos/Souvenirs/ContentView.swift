@@ -35,6 +35,8 @@ struct ContentView: View {
                             model.dismissImport()
                         }
                     )
+                    .frame(maxWidth: 620, maxHeight: 500)
+                    .padding(20)
                 }
             }
             recoveryOverlay
@@ -103,11 +105,12 @@ struct ContentView: View {
                         }
                     }
                 }
+                .frame(maxWidth: 330)
                 .padding(.top, 20)
                 Spacer()
             }
-            .frame(width: 330)
-            .padding(.horizontal, 28)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, 20)
 
             Divider()
 
@@ -167,90 +170,112 @@ struct ContentView: View {
             .frame(width: 255)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.48))
         }
-        .frame(width: 586, height: 386)
+        .frame(minWidth: 586, minHeight: 386)
     }
 
     private var createCatalog: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 15) {
-                Text("New Catalog")
-                    .font(.title2.bold())
-                Text("Choose where your photos will live. You can open this folder in Finder at any time.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Name").font(.caption)
-                    TextField("Catalog name", text: $model.catalogName)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("catalog-name")
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Location").font(.caption)
-                    HStack(spacing: 8) {
-                        HStack(spacing: 9) {
-                            Image(systemName: "externaldrive")
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(locationTitle)
-                                    .fontWeight(.medium)
-                                    .lineLimit(1)
-                                Text(locationSubtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 11)
-                        .frame(height: 48)
-                        .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 9)
-                                .stroke(.separator.opacity(0.65))
-                        }
-
-                        Button("Choose…") {
-                            chooseFolder { path in
-                                Task { await model.chooseCreateLocation(path) }
-                            }
-                        }
-                        .accessibilityIdentifier("choose-catalog-location")
-                    }
-                    validationLine
-                }
-
-                DisclosureGroup("What will be created", isExpanded: $showsCreatedItems) {
-                    Text(".souvenirs.yml and a small .souvenirs folder. Your photos are added later, by import.")
-                        .font(.caption)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 15) {
+                    Text("New Catalog")
+                        .font(.title2.bold())
+                    Text("Choose where your photos will live. You can open this folder in Finder at any time.")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
-                        .padding(.top, 4)
-                }
-                .accessibilityIdentifier("created-items-disclosure")
-                .padding(12)
-                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
 
-                if case .invalid(let message) = model.validation {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("This location can’t be used")
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Name").font(.caption)
+                        TextField("Catalog name", text: $model.catalogName)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("catalog-name")
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Location").font(.caption)
+                        HStack(spacing: 8) {
+                            HStack(spacing: 9) {
+                                Image(systemName: "externaldrive")
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(locationTitle)
+                                        .fontWeight(.medium)
+                                        .lineLimit(1)
+                                    Text(locationSubtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 11)
+                            .frame(height: 48)
+                            .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 9)
+                                    .stroke(.separator.opacity(0.65))
+                            }
+
+                            Button("Choose…") {
+                                chooseFolder { path in
+                                    Task { await model.chooseCreateLocation(path) }
+                                }
+                            }
+                            .accessibilityIdentifier("choose-catalog-location")
+                        }
+                        validationLine
+                    }
+
+                    if case .invalid(let message) = model.validation {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("This location can’t be used")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Label(message, systemImage: "exclamationmark.circle")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.red.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(.red.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [3]))
+                        }
+                        .accessibilityIdentifier("catalog-location-error")
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button {
+                            showsCreatedItems.toggle()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2)
+                                    .rotationEffect(.degrees(showsCreatedItems ? 90 : 0))
+                                Text("What will be created")
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("created-items-disclosure")
+                        .accessibilityValue(showsCreatedItems ? "Expanded" : "Collapsed")
+
+                        if showsCreatedItems {
+                            Text(".souvenirs.yml and a small .souvenirs folder. Your photos are added later, by import.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Label(message, systemImage: "exclamationmark.circle")
-                            .font(.caption)
-                            .foregroundStyle(.red)
+                            .padding(.top, 4)
+                            .accessibilityIdentifier("created-items-description")
+                        }
                     }
                     .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.red.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(.red.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [3]))
-                    }
-                    .accessibilityIdentifier("catalog-location-error")
+                    .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
                 }
-                Spacer(minLength: 0)
+                .padding(24)
+                .frame(maxWidth: 520)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
             HStack {
@@ -267,7 +292,7 @@ struct ContentView: View {
             }
             .padding(16)
         }
-        .frame(width: 465, height: 455)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.regularMaterial)
     }
 
@@ -302,7 +327,7 @@ struct ContentView: View {
 
             Divider()
 
-            VStack {
+            VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(imports.collectionName.isEmpty ? "All Photos" : imports.collectionName)
@@ -323,46 +348,13 @@ struct ContentView: View {
                    imports.phase != .recoveryDeferred {
                     importActivity(catalog)
                 } else {
-                    if imports.catalog?.path == catalog.path,
-                       imports.phase == .recoveryDeferred {
-                        deferredRecovery
-                    }
-                    Spacer()
-                    Image(systemName: "square.and.arrow.down")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.blue)
-                    .frame(width: 84, height: 66)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 12))
-                    .shadow(color: .black.opacity(0.09), radius: 14, y: 7)
-                    Text("Your catalog is ready")
-                    .font(.title2.bold())
-                    .padding(.top, 18)
-                    .accessibilityIdentifier("catalog-ready")
-                Text("Insert a memory card, or choose a folder of photos. Souvenirs will\nshow you exactly what it plans to copy before anything happens.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 3)
-                Button("Choose a Folder to Import…") {
-                    chooseFolder { path in
-                        model.beginImport(from: path, into: catalog)
-                    }
-                }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(
-                        imports.catalog?.path == catalog.path
-                            && imports.phase == .recoveryDeferred
-                    )
-                    .accessibilityIdentifier("choose-import-folder")
-                    .padding(.top, 10)
-                Text("Memory cards appear in the sidebar when you connect them.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 4)
-                    Spacer()
+                    catalogReadyContent(catalog)
                 }
                 HStack(spacing: 3) {
                     Image(systemName: "folder")
                     Text("Stored as ordinary folders on \(catalog.volumeName) ·")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     Button("Show in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([
                             URL(fileURLWithPath: catalog.path)
@@ -370,17 +362,68 @@ struct ContentView: View {
                     }
 
                     .buttonStyle(.link)
+                    .layoutPriority(1)
                     .accessibilityIdentifier("show-catalog-in-finder")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .padding(.bottom, 14)
+                .padding(.horizontal, 18)
+                .frame(minHeight: 34)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 820, minHeight: 560)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: catalog.path) {
             await imports.inspect(catalog: catalog)
+        }
+    }
+
+    private func catalogReadyContent(_ catalog: RecentCatalog) -> some View {
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    if imports.catalog?.path == catalog.path,
+                       imports.phase == .recoveryDeferred {
+                        deferredRecovery
+                            .padding(.bottom, 24)
+                    }
+                    Spacer(minLength: 24)
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.blue)
+                        .frame(width: 84, height: 66)
+                        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+                        .shadow(color: .black.opacity(0.09), radius: 14, y: 7)
+                    Text("Your catalog is ready")
+                        .font(.title2.bold())
+                        .padding(.top, 18)
+                        .accessibilityIdentifier("catalog-ready")
+                    Text("Insert a memory card, or choose a folder of photos. Souvenirs will show you exactly what it plans to copy before anything happens.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 560)
+                        .padding(.top, 3)
+                    Button("Choose a Folder to Import…") {
+                        chooseFolder { path in
+                            model.beginImport(from: path, into: catalog)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        imports.catalog?.path == catalog.path
+                            && imports.phase == .recoveryDeferred
+                    )
+                    .accessibilityIdentifier("choose-import-folder")
+                    .padding(.top, 10)
+                    Text("Memory cards appear in the sidebar when you connect them.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 4)
+                    Spacer(minLength: 24)
+                }
+                .padding(.horizontal, 18)
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height)
+            }
         }
     }
 
@@ -450,77 +493,81 @@ struct ContentView: View {
     }
 
     private var importProgress: some View {
-        VStack(spacing: 18) {
-            VStack(alignment: .leading, spacing: 9) {
-                HStack {
-                    Text(
-                        imports.progressMessage == "Checking the source…"
-                            ? "Checking the source"
-                            : "Copying \(imports.completedUnits) of \(imports.totalUnits)"
-                    )
-                        .font(.headline)
-                        .accessibilityIdentifier("import-progress-count")
-                    Spacer()
-                    Text("\(imports.percentCompleted)%")
+        ScrollView {
+            VStack(spacing: 18) {
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack {
+                        Text(
+                            imports.progressMessage == "Checking the source…"
+                                ? "Checking the source"
+                                : "Copying \(imports.completedUnits) of \(imports.totalUnits)"
+                        )
+                            .font(.headline)
+                            .accessibilityIdentifier("import-progress-count")
+                        Spacer()
+                        Text("\(imports.percentCompleted)%")
+                            .foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: imports.fractionCompleted)
+                        .progressViewStyle(.linear)
+                        .accessibilityIdentifier("import-progress-bar")
+                    HStack {
+                        Label(
+                            "Keep \(imports.sourceName) connected. Nothing on it will change. You can close this window.",
+                            systemImage: "checkmark.shield"
+                        )
+                        .font(.caption)
                         .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Stop…") { imports.stop() }
+                            .disabled(!imports.canStop)
+                            .accessibilityIdentifier("stop-import")
+                    }
                 }
-                ProgressView(value: imports.fractionCompleted)
-                    .progressViewStyle(.linear)
-                    .accessibilityIdentifier("import-progress-bar")
-                HStack {
-                    Label(
-                        "Keep \(imports.sourceName) connected. Nothing on it will change. You can close this window.",
-                        systemImage: "checkmark.shield"
-                    )
+                .padding(16)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .shadow(color: .black.opacity(0.08), radius: 14, y: 6)
+
+                Text(imports.progressMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Stop…") { imports.stop() }
-                        .disabled(!imports.canStop)
-                        .accessibilityIdentifier("stop-import")
-                }
+                    .accessibilityIdentifier("import-progress-message")
+                thumbnailWall
             }
-            .padding(16)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            .shadow(color: .black.opacity(0.08), radius: 14, y: 6)
-
-            Text(imports.progressMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("import-progress-message")
-            thumbnailWall
+            .padding(22)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
-        .padding(22)
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private func completedImport(_ outcome: ImportOutcome) -> some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 11) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(.green)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("All \(outcome.copiedCount) copied and checked. You can eject \(imports.sourceName).")
+        ScrollView {
+            VStack(spacing: 14) {
+                HStack(spacing: 11) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("All \(outcome.copiedCount) copied and checked. You can eject \(imports.sourceName).")
                         .font(.headline)
                         .accessibilityIdentifier("import-completed")
-                    Text("\(outcome.skippedCount) already in your archive were skipped · \(outcome.leftOnSourceCount) remain on the source")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        Text("\(outcome.skippedCount) already in your archive were skipped · \(outcome.leftOnSourceCount) remain on the source")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Done") { imports.dismissOutcome() }
+                        .accessibilityIdentifier("dismiss-import-completed")
                 }
-                Spacer()
-                Button("Done") { imports.dismissOutcome() }
-                    .accessibilityIdentifier("dismiss-import-completed")
+                .padding(14)
+                .background(.green.opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12).stroke(.green.opacity(0.28))
+                }
+                thumbnailWall
             }
-            .padding(14)
-            .background(.green.opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12).stroke(.green.opacity(0.28))
-            }
-            thumbnailWall
+            .padding(22)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
-        .padding(22)
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var thumbnailWall: some View {
@@ -541,22 +588,24 @@ struct ContentView: View {
     }
 
     private var deferredRecovery: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "externaldrive.badge.exclamationmark")
-                .font(.title2)
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Import paused")
-                    .font(.headline)
-                    .accessibilityIdentifier("import-recovery-deferred")
-                Text(
-                    "\(imports.completedUnits) verified items are safe. Choose Try Again when you're ready to finish importing “\(imports.collectionName)”."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "externaldrive.badge.exclamationmark")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Import paused")
+                        .font(.headline)
+                        .accessibilityIdentifier("import-recovery-deferred")
+                    Text(
+                        "\(imports.completedUnits) verified items are safe. Choose Try Again when you're ready to finish importing “\(imports.collectionName)”."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
             }
-            Spacer()
             HStack {
+                Spacer()
                 Button("Stop Here…") { imports.stopRecoveryHere() }
                     .accessibilityIdentifier("cancel-deferred-recovery")
                 Button("Try Again") { imports.retryRecovery() }
@@ -570,7 +619,6 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 10).stroke(.orange.opacity(0.3))
         }
         .padding(.horizontal, 18)
-        .padding(.top, 12)
     }
 
     private func activityMessage(
@@ -582,23 +630,29 @@ struct ContentView: View {
         actionTitle: String?,
         action: @escaping () -> Void = {}
     ) -> some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: icon)
-                .font(.system(size: 34))
-                .foregroundStyle(tint)
-            Text(title)
-                .font(.title2.bold())
-                .accessibilityIdentifier(identifier)
-            Text(message)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 440)
-            if let actionTitle {
-                Button(actionTitle, action: action)
-                    .accessibilityIdentifier("\(identifier)-action")
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 12) {
+                    Spacer(minLength: 24)
+                    Image(systemName: icon)
+                        .font(.system(size: 34))
+                        .foregroundStyle(tint)
+                    Text(title)
+                        .font(.title2.bold())
+                        .accessibilityIdentifier(identifier)
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 440)
+                    if let actionTitle {
+                        Button(actionTitle, action: action)
+                            .accessibilityIdentifier("\(identifier)-action")
+                    }
+                    Spacer(minLength: 24)
+                }
+                .padding(.horizontal, 18)
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height)
             }
-            Spacer()
         }
     }
 
@@ -607,39 +661,45 @@ struct ContentView: View {
         if case .recoveryPrompt(let sourceAvailable) = imports.phase {
             ZStack {
                 Color.black.opacity(0.24).ignoresSafeArea()
-                VStack(alignment: .leading, spacing: 14) {
-                    Label(
-                        sourceAvailable
-                            ? "Finish importing “\(imports.collectionName)”?"
-                            : "Connect \(imports.sourceName) to finish the import",
-                        systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
-                    )
-                    .font(.title3.bold())
-                    .accessibilityIdentifier("recovery-title")
-                    .accessibilityFocused($recoveryTitleFocused)
-                    .onAppear { recoveryTitleFocused = true }
-                    Text(
-                        sourceAvailable
-                            ? "The import stopped before it finished. Nothing was lost."
-                            : "\(imports.completedUnits) items are safely in your catalog. The rest are still on the source."
-                    )
-                    .foregroundStyle(.secondary)
-                    Label(
-                        "\(imports.completedUnits) items are safely in your catalog.",
-                        systemImage: "checkmark"
-                    )
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
-                    if !sourceAvailable {
-                        Label(
-                            "Reconnect \(imports.sourceName), then choose Try Again.",
-                            systemImage: "externaldrive.badge.exclamationmark"
-                        )
-                            .font(.caption)
+                VStack(spacing: 0) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Label(
+                                sourceAvailable
+                                    ? "Finish importing “\(imports.collectionName)”?"
+                                    : "Connect \(imports.sourceName) to finish the import",
+                                systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
+                            )
+                            .font(.title3.bold())
+                            .accessibilityIdentifier("recovery-title")
+                            .accessibilityFocused($recoveryTitleFocused)
+                            .onAppear { recoveryTitleFocused = true }
+                            Text(
+                                sourceAvailable
+                                    ? "The import stopped before it finished. Nothing was lost."
+                                    : "\(imports.completedUnits) items are safely in your catalog. The rest are still on the source."
+                            )
                             .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("recovery-source-unavailable")
+                            Label(
+                                "\(imports.completedUnits) items are safely in your catalog.",
+                                systemImage: "checkmark"
+                            )
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+                            if !sourceAvailable {
+                                Label(
+                                    "Reconnect \(imports.sourceName), then choose Try Again.",
+                                    systemImage: "externaldrive.badge.exclamationmark"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("recovery-source-unavailable")
+                            }
+                        }
+                        .padding(24)
                     }
+                    Divider()
                     HStack {
                         Button("Stop Here…") { imports.stopRecoveryHere() }
                             .accessibilityIdentifier("cancel-recovery")
@@ -655,11 +715,13 @@ struct ContentView: View {
                             .disabled(!sourceAvailable)
                             .accessibilityIdentifier("finish-recovery")
                     }
+                    .padding(16)
                 }
-                .padding(24)
-                .frame(width: 465)
+                .frame(maxWidth: 465, maxHeight: 320)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
                 .shadow(color: .black.opacity(0.28), radius: 32, y: 18)
+                .padding(20)
             }
         }
     }
@@ -681,7 +743,7 @@ struct ContentView: View {
                 }
                 Spacer()
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .frame(height: 50)
             .contentShape(Rectangle())
         }
@@ -831,7 +893,7 @@ private struct ImportPlanningSheet: View {
             .padding(16)
             .background(.regularMaterial)
         }
-        .frame(width: 620, height: 500)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.28), radius: 34, y: 18)
