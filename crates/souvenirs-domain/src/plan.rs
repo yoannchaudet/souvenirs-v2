@@ -243,6 +243,37 @@ pub struct DuplicateReview {
     pub source_duplicate_groups: Vec<SourceDuplicateGroup>,
 }
 
+pub fn catalog_duplicate_findings<E>(
+    items: &[PlanItem],
+    mut paths_for_digest: impl FnMut(&ContentDigest) -> Result<Vec<Vec<String>>, E>,
+) -> Result<Vec<CatalogDuplicate>, E> {
+    let mut paths_by_digest = BTreeMap::<ContentDigest, Vec<Vec<String>>>::new();
+    let mut findings = Vec::new();
+    for file in items
+        .iter()
+        .flat_map(|item| &item.files)
+        .filter(|file| file.role != PlanFileRole::Sidecar)
+    {
+        let paths = if let Some(paths) = paths_by_digest.get(&file.digest) {
+            paths.clone()
+        } else {
+            let mut paths = paths_for_digest(&file.digest)?;
+            paths.sort();
+            paths.dedup();
+            paths_by_digest.insert(file.digest.clone(), paths.clone());
+            paths
+        };
+        if !paths.is_empty() {
+            findings.push(CatalogDuplicate {
+                source_file_id: file.source_file_id.clone(),
+                catalog_paths: paths,
+            });
+        }
+    }
+    findings.sort_by(|left, right| left.source_file_id.cmp(&right.source_file_id));
+    Ok(findings)
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanDateTime {
@@ -2002,6 +2033,48 @@ mod tests {
                 catalog: CatalogDuplicateChoice::Import,
                 source: SourceDuplicateChoice::ImportAll,
             }
+        );
+    }
+
+    #[test]
+    fn catalog_duplicate_findings_use_exact_original_digests() {
+        let mut document = document();
+        document.items[0].files[0].digest = document.items[1].files[1].digest.clone();
+        let matching_digest = document.items[1].files[1].digest.clone();
+        let mut lookup_count = 0;
+
+        let findings = catalog_duplicate_findings(&document.items, |digest| {
+            lookup_count += 1;
+            Ok::<_, std::convert::Infallible>(if digest == &matching_digest {
+                vec![
+                    vec!["2025".into(), "Later".into(), "same.MOV".into()],
+                    vec!["2024".into(), "Earlier".into(), "same.JPG".into()],
+                ]
+            } else {
+                Vec::new()
+            })
+        })
+        .unwrap();
+
+        assert_eq!(lookup_count, 1);
+        assert_eq!(
+            findings,
+            vec![
+                CatalogDuplicate {
+                    source_file_id: "file-a".into(),
+                    catalog_paths: vec![
+                        vec!["2024".into(), "Earlier".into(), "same.JPG".into()],
+                        vec!["2025".into(), "Later".into(), "same.MOV".into()],
+                    ],
+                },
+                CatalogDuplicate {
+                    source_file_id: "file-b".into(),
+                    catalog_paths: vec![
+                        vec!["2024".into(), "Earlier".into(), "same.JPG".into()],
+                        vec!["2025".into(), "Later".into(), "same.MOV".into()],
+                    ],
+                },
+            ]
         );
     }
 
