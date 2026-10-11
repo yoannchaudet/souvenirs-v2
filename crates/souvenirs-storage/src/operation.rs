@@ -80,6 +80,29 @@ pub enum DurableTransition {
         step_id: String,
         staged_path: PathBuf,
     },
+    InitializationJournalRelocationStarted {
+        destination: PathBuf,
+    },
+    InitializationJournalRelocated {
+        destination: PathBuf,
+    },
+    InitializationConfigStageStarted {
+        staged_path: PathBuf,
+        sha256: String,
+    },
+    InitializationConfigStaged {
+        staged_path: PathBuf,
+        sha256: String,
+    },
+    InitializationConfigPublicationStarted {
+        staged_path: PathBuf,
+        destination: PathBuf,
+        sha256: String,
+    },
+    InitializationConfigPublished {
+        destination: PathBuf,
+        sha256: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -256,12 +279,19 @@ impl OperationJournal {
             records,
             complete_length,
             interrupted_tail,
+            ..
         } = read_parsed_operation_records(path, "read operation journal for recovery")?;
         let operation_id = match records.first() {
             Some(OperationRecord::Plan { operation_id, .. }) => operation_id.clone(),
             _ => return Err(OperationJournalError::MissingPlan(path.to_path_buf())),
         };
         validate_identifier("operation", &operation_id)?;
+        if is_reserved_initialization_identifier(&operation_id) {
+            return Err(OperationJournalError::ReservedIdentifier {
+                kind: "operation",
+                value: operation_id,
+            });
+        }
         let finished = records
             .last()
             .is_some_and(|record| matches!(record, OperationRecord::Outcome { .. }));
@@ -450,21 +480,7 @@ impl OperationJournal {
     }
 
     fn append(&mut self, record: &OperationRecord) -> Result<(), OperationJournalError> {
-        let mut encoded = serde_json::to_vec(record).map_err(|source| {
-            OperationJournalError::SerializeRecord {
-                path: self.path.clone(),
-                source,
-            }
-        })?;
-        encoded.push(b'\n');
-        self.file
-            .write_all(&encoded)
-            .and_then(|()| sync_file(&self.file))
-            .map_err(|source| OperationJournalError::Io {
-                action: "append and persist operation journal",
-                path: self.path.clone(),
-                source,
-            })
+        append_operation_record(&mut self.file, &self.path, record)
     }
 }
 
@@ -485,13 +501,14 @@ pub fn read_operation_records(
     Ok(read_parsed_operation_records(path, "read operation journal")?.records)
 }
 
-struct ParsedOperationRecords {
-    records: Vec<OperationRecord>,
-    complete_length: u64,
-    interrupted_tail: bool,
+pub(crate) struct ParsedOperationRecords {
+    pub records: Vec<OperationRecord>,
+    pub complete_length: u64,
+    pub interrupted_tail: bool,
+    pub legacy_initialization: Option<(u32, bool)>,
 }
 
-fn read_parsed_operation_records(
+pub(crate) fn read_parsed_operation_records(
     path: &Path,
     action: &'static str,
 ) -> Result<ParsedOperationRecords, OperationJournalError> {
@@ -500,6 +517,29 @@ fn read_parsed_operation_records(
         path: path.to_path_buf(),
         source,
     })?;
+    let complete_length = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    if let Some((format_version, completed)) =
+        parse_legacy_initialization(path, &bytes[..complete_length])
+    {
+        let mut records = vec![OperationRecord::Plan {
+            operation_id: INITIALIZATION_OPERATION_ID.to_owned(),
+            plan: serde_json::json!({"legacy_initialization":true,"format_version":format_version}),
+        }];
+        if completed {
+            records.push(OperationRecord::Outcome {
+                outcome: OperationOutcome::Completed,
+            });
+        }
+        return Ok(ParsedOperationRecords {
+            records,
+            complete_length: complete_length as u64,
+            interrupted_tail: complete_length < bytes.len(),
+            legacy_initialization: Some((format_version, completed)),
+        });
+    }
     let mut records = Vec::new();
     let mut start = 0;
     let mut line_number = 1;
@@ -510,6 +550,7 @@ fn read_parsed_operation_records(
             line_number += 1;
             continue;
         }
+
         records.push(serde_json::from_slice(line).map_err(|source| {
             OperationJournalError::DeserializeRecord {
                 path: path.to_path_buf(),
@@ -524,7 +565,57 @@ fn read_parsed_operation_records(
         records,
         complete_length: start as u64,
         interrupted_tail: start < bytes.len(),
+        legacy_initialization: None,
     })
+}
+
+fn parse_legacy_initialization(path: &Path, bytes: &[u8]) -> Option<(u32, bool)> {
+    if !is_initialization_journal(path) || bytes.is_empty() {
+        return None;
+    }
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty());
+    let plan = serde_json::from_slice::<serde_json::Value>(lines.next()?).ok()?;
+    let fields = plan.as_object()?;
+    if fields.len() != 3
+        || fields.get("kind")? != "plan"
+        || fields.get("operation")? != INITIALIZATION_OPERATION_ID
+    {
+        return None;
+    }
+    let format_version = fields.get("format_version")?.as_u64()?.try_into().ok()?;
+    let completed = match (lines.next(), lines.next()) {
+        (None, None) => false,
+        (Some(line), None)
+            if serde_json::from_slice::<serde_json::Value>(line).ok()
+                == Some(serde_json::json!({"kind":"outcome","outcome":"completed"})) =>
+        {
+            true
+        }
+        _ => return None,
+    };
+    Some((format_version, completed))
+}
+
+pub(crate) fn append_operation_record(
+    file: &mut File,
+    path: &Path,
+    record: &OperationRecord,
+) -> Result<(), OperationJournalError> {
+    let mut encoded =
+        serde_json::to_vec(record).map_err(|source| OperationJournalError::SerializeRecord {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    encoded.push(b'\n');
+    file.write_all(&encoded)
+        .and_then(|()| sync_file(file))
+        .map_err(|source| OperationJournalError::Io {
+            action: "append and persist operation journal",
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn ensure_lock(layout: &CatalogLayout, lock: &CatalogLock) -> Result<(), OperationJournalError> {
@@ -552,11 +643,22 @@ fn ensure_no_unfinished_journal(layout: &CatalogLayout) -> Result<(), OperationJ
         if !is_operation_journal(&path) {
             continue;
         }
+        if is_initialization_journal(&path) {
+            let parsed = read_parsed_operation_records(&path, "read initialization journal")?;
+            if parsed.records.last().is_some_and(|record| {
+                matches!(
+                    record,
+                    OperationRecord::Outcome {
+                        outcome: OperationOutcome::Completed
+                    }
+                )
+            }) {
+                continue;
+            }
+            return Err(OperationJournalError::UnfinishedOperation(path));
+        }
         if journal_tail_has_outcome(&path)? {
             continue;
-        }
-        if is_initialization_journal(&path) {
-            return Err(OperationJournalError::UnfinishedOperation(path));
         }
         let parsed = read_parsed_operation_records(&path, "read operation journal outcome")?;
         if parsed.records.is_empty() {
@@ -638,7 +740,7 @@ fn journal_tail_has_outcome(path: &Path) -> Result<bool, OperationJournalError> 
 
 fn validate_new_operation_identifier(identifier: &str) -> Result<(), OperationJournalError> {
     validate_identifier("operation", identifier)?;
-    if identifier == "initialize" || identifier.ends_with("-initialize") {
+    if is_reserved_initialization_identifier(identifier) {
         return Err(OperationJournalError::ReservedIdentifier {
             kind: "operation",
             value: identifier.to_owned(),
@@ -646,6 +748,12 @@ fn validate_new_operation_identifier(identifier: &str) -> Result<(), OperationJo
     }
     Ok(())
 }
+
+fn is_reserved_initialization_identifier(identifier: &str) -> bool {
+    identifier == INITIALIZATION_OPERATION_ID || identifier.ends_with("-initialize")
+}
+
+const INITIALIZATION_OPERATION_ID: &str = "initialize";
 
 pub(crate) fn validate_identifier(
     kind: &'static str,
@@ -665,6 +773,7 @@ pub(crate) fn validate_identifier(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[rustfmt::skip]
 pub enum Failpoint {
     JournalCreated,
     PlanPersisted,
@@ -687,6 +796,16 @@ pub enum Failpoint {
     RecoveryManifestDestinationObservedBeforePersistence,
     RecoveryStageRemovalObservedBeforePersistence,
     OutcomePersisted,
+    InitializationJournalCreated, InitializationPlanPersisted,
+    InitializationStateDirectoryIntentPersisted, InitializationStateDirectoryMutationPersisted, InitializationStateDirectoryCompleted,
+    InitializationJournalDirectoryIntentPersisted, InitializationJournalDirectoryMutationPersisted, InitializationJournalDirectoryCompleted,
+    InitializationJournalRelocationIntentPersisted, InitializationJournalRelocationMutationPersisted, InitializationJournalRelocated,
+    InitializationStagingDirectoryIntentPersisted, InitializationStagingDirectoryMutationPersisted, InitializationStagingDirectoryCompleted,
+    InitializationConfigStageIntentPersisted, InitializationConfigStageMutationPersisted, InitializationConfigStaged,
+    InitializationConfigPublicationIntentPersisted, InitializationConfigPublicationMutationPersisted, InitializationConfigPublished,
+    InitializationRecoveryDirectoryObservedBeforePersistence, InitializationRecoveryRelocationObservedBeforePersistence,
+    InitializationRecoveryConfigStageObservedBeforePersistence, InitializationRecoveryConfigObservedBeforePersistence,
+    InitializationRecoveryCleanupObservedBeforePersistence, InitializationOutcomePersisted,
 }
 
 #[derive(Debug)]

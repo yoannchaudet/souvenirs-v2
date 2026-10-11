@@ -71,7 +71,8 @@ impl CatalogService {
                 if capabilities.write_suitability == WriteSuitability::SynchronizedFolder {
                     return Err(CatalogServiceError::SynchronizedFolder(path.to_path_buf()));
                 }
-                if CatalogLayout::new(path).config_path().exists() {
+                let layout = CatalogLayout::new(path);
+                if layout.config_path().exists() && !layout.has_pending_initialization()? {
                     return Err(CatalogServiceError::AlreadyCatalog(path.to_path_buf()));
                 }
             }
@@ -92,21 +93,30 @@ impl CatalogService {
         display_name: impl AsRef<str>,
     ) -> Result<CatalogLocation, CatalogServiceError> {
         let path = path.as_ref();
-        Self::validate(path, CatalogIntent::Create)?;
         let display_name = CatalogLabel::new(display_name.as_ref())
             .map_err(|error| CatalogServiceError::InvalidName(error.to_string()))?;
-        CatalogLayout::initialize(
-            path,
-            &CatalogConfig {
-                display_name: Some(display_name.to_string()),
-                ..CatalogConfig::default()
-            },
-        )?;
+        let config = CatalogConfig {
+            display_name: Some(display_name.to_string()),
+            ..CatalogConfig::default()
+        };
+        Self::validate(path, CatalogIntent::Create)?;
+        CatalogLayout::initialize(path, &config)?;
         Ok(location(path))
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<CatalogLocation, CatalogServiceError> {
-        Self::validate(path.as_ref(), CatalogIntent::Open)
+        let path = path.as_ref();
+        if !fs::metadata(path)
+            .map_err(|source| CatalogServiceError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .is_dir()
+        {
+            return Err(CatalogServiceError::NotDirectory(path.to_path_buf()));
+        }
+        CatalogLayout::resume_initialization(path)?;
+        Self::validate(path, CatalogIntent::Open)
     }
 }
 
@@ -877,6 +887,11 @@ impl CatalogServiceError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::AlreadyCatalog(_) => "catalog_already_exists",
+            Self::Initialization(CatalogInitializationError::ConfigurationMismatch { .. }) => {
+                "catalog_configuration_mismatch"
+            }
+            Self::Initialization(CatalogInitializationError::UnsupportedFormatVersion(_))
+            | Self::UnsupportedFormat(_) => "unsupported_catalog_version",
             Self::Initialization(_) | Self::Io { .. } | Self::Storage(_) => "catalog_io",
             Self::InvalidConfig(_) => "invalid_catalog",
             Self::InvalidOperationJournal { .. } => "invalid_operation_journal",
@@ -884,7 +899,6 @@ impl CatalogServiceError {
             Self::NotCatalog(_) => "not_a_catalog",
             Self::NotDirectory(_) => "not_a_directory",
             Self::SynchronizedFolder(_) => "synchronized_folder",
-            Self::UnsupportedFormat(_) => "unsupported_catalog_version",
         }
     }
 }
@@ -893,6 +907,17 @@ impl fmt::Display for CatalogServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyCatalog(_) => formatter.write_str("This folder is already a catalog."),
+            Self::Initialization(CatalogInitializationError::ConfigurationMismatch {
+                confirmed_display_name,
+                ..
+            }) => match confirmed_display_name {
+                Some(name) => write!(
+                    formatter,
+                    "This catalog was initialized as {name:?} with different settings."
+                ),
+                None => formatter
+                    .write_str("This catalog was initialized with different settings."),
+            },
             Self::Initialization(error) => error.fmt(formatter),
             Self::Io { path, source } => {
                 write!(formatter, "Could not inspect {}: {source}", path.display())
@@ -941,9 +966,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CatalogIntent, CatalogService, CatalogServiceError, DateResolution, DestinationMode,
-        ImportPlanningError, ImportPlanningService, ImportReviewRequest,
-        OperationInspectionService,
+        CatalogInitializationError, CatalogIntent, CatalogService, CatalogServiceError,
+        DateResolution, DestinationMode, ImportPlanningError, ImportPlanningService,
+        ImportReviewRequest, OperationInspectionService,
     };
 
     #[test]
@@ -964,6 +989,17 @@ mod tests {
             CatalogService::validate(directory.path(), CatalogIntent::Create),
             Err(CatalogServiceError::AlreadyCatalog(_))
         ));
+        let error = CatalogServiceError::Initialization(
+            CatalogInitializationError::ConfigurationMismatch {
+                confirmed_display_name: Some("Family Catalog".to_owned()),
+                confirmed_config_yaml: "raw catalog configuration".to_owned(),
+            },
+        );
+        assert_eq!(error.code(), "catalog_configuration_mismatch");
+        assert_eq!(
+            error.to_string(),
+            "This catalog was initialized as \"Family Catalog\" with different settings."
+        );
     }
 
     #[test]
@@ -973,6 +1009,22 @@ mod tests {
             CatalogService::open(directory.path()),
             Err(CatalogServiceError::NotCatalog(_))
         ));
+        let file = directory.path().join("catalog");
+        fs::write(&file, []).unwrap();
+        assert_eq!(
+            CatalogService::open(file).unwrap_err().code(),
+            "not_a_directory"
+        );
+        let future = tempdir().unwrap();
+        fs::write(
+            future.path().join(".souvenirs-initialize.jsonl"),
+            b"{\"kind\":\"plan\",\"operation_id\":\"initialize\",\"plan\":{\"format_version\":3,\"config_yaml\":\"format_version: 3\\n\",\"config_sha256\":\"63cde216c8fae788bcc0892df26627eddc0b9c93bd26d67a9b6460cbf4d7f793\",\"journal_file_name\":\"future-initialize.jsonl\",\"staged_config_path\":\".souvenirs/staging/initialize-config.yml.stage\",\"future_field\":true}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            CatalogService::open(future.path()).unwrap_err().code(),
+            "unsupported_catalog_version"
+        );
     }
 
     #[test]

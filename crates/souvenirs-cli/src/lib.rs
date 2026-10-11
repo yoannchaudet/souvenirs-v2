@@ -528,6 +528,15 @@ fn catalog_initialize(catalog: &Path) -> Result<(), CliError> {
             catalog.display()
         )));
     }
+    let pending = CatalogLayout::new(catalog)
+        .has_pending_initialization()
+        .map_err(|error| CliError::conflict(error.to_string()))?;
+    if !pending && require_catalog(catalog).is_ok() {
+        return Err(CliError::conflict(format!(
+            "catalog is already initialized: {}",
+            catalog.display()
+        )));
+    }
     CatalogLayout::initialize(catalog, &CatalogConfig::default())
         .map_err(|error| CliError::conflict(error.to_string()))?;
     write_result(
@@ -540,6 +549,14 @@ fn catalog_initialize(catalog: &Path) -> Result<(), CliError> {
 }
 
 fn catalog_inspect(catalog: &Path) -> Result<(), CliError> {
+    if !catalog.is_dir() {
+        return Err(CliError::not_found(format!(
+            "initialized catalog not found: {}",
+            catalog.display()
+        )));
+    }
+    CatalogLayout::resume_initialization(catalog)
+        .map_err(|error| CliError::conflict(error.to_string()))?;
     let layout = require_catalog(catalog)?;
     let config = fs::read_to_string(layout.config_path())
         .map_err(|error| CliError::io(format!("read catalog configuration: {error}")))?;

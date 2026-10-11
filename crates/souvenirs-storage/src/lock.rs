@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -137,9 +138,55 @@ impl CatalogLock {
         layout: &CatalogLayout,
         environment: &impl LockEnvironment,
     ) -> Result<Self, LockError> {
-        let holder = current_holder(environment)?;
-        let path = layout.lock_path();
+        Self::acquire_paths(layout.lock_path(), layout.lock_takeover_path(), environment)
+    }
 
+    pub(crate) fn acquire_paths(
+        path: PathBuf,
+        takeover_path: PathBuf,
+        environment: &impl LockEnvironment,
+    ) -> Result<Self, LockError> {
+        let (lock, _takeover) =
+            Self::acquire_paths_with_takeover(path, takeover_path, environment)?;
+        Ok(lock)
+    }
+
+    pub(crate) fn acquire_paths_with_takeover(
+        path: PathBuf,
+        takeover_path: PathBuf,
+        environment: &impl LockEnvironment,
+    ) -> Result<(Self, Option<TakeoverGuard>), LockError> {
+        let holder = current_holder(environment)?;
+        match write_holder_exclusively(&path, &holder) {
+            Ok(()) => {
+                return Ok((
+                    Self {
+                        path,
+                        holder,
+                        released: false,
+                    },
+                    None,
+                ))
+            }
+            Err(LockError::Io { source, .. }) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let takeover =
+            TakeoverGuard::acquire(&takeover_path, environment).map_err(|error| match error {
+                LockError::TakeoverBusy => report_takeover_busy(&path),
+                error => error,
+            })?;
+        let lock = Self::acquire_under_takeover(path, holder, environment).inspect_err(|_| {
+            let _ = takeover.remove();
+        })?;
+        Ok((lock, Some(takeover)))
+    }
+
+    fn acquire_under_takeover(
+        path: PathBuf,
+        holder: LockHolder,
+        environment: &impl LockEnvironment,
+    ) -> Result<Self, LockError> {
         match write_holder_exclusively(&path, &holder) {
             Ok(()) => {
                 return Ok(Self {
@@ -152,12 +199,6 @@ impl CatalogLock {
             Err(error) => return Err(error),
         }
 
-        let existing = read_holder(&path)?;
-        if holder_is_live(&existing, &holder, environment)? {
-            return Err(LockError::Busy(Box::new(existing)));
-        }
-
-        let _takeover = TakeoverGuard::acquire(layout, environment)?;
         let existing = read_holder(&path)?;
         if holder_is_live(&existing, &holder, environment)? {
             return Err(LockError::Busy(Box::new(existing)));
@@ -218,6 +259,11 @@ impl CatalogLock {
         Ok(())
     }
 
+    #[cfg(feature = "test-failpoints")]
+    pub(crate) fn abandon(mut self) {
+        self.released = true;
+    }
+
     pub fn remove_existing(layout: &CatalogLayout, expected: &LockHolder) -> Result<(), LockError> {
         Self::remove_existing_with(layout, expected, &SystemLockEnvironment)
     }
@@ -227,7 +273,7 @@ impl CatalogLock {
         expected: &LockHolder,
         environment: &impl LockEnvironment,
     ) -> Result<(), LockError> {
-        let _takeover = TakeoverGuard::acquire(layout, environment)?;
+        let _takeover = TakeoverGuard::acquire(&layout.lock_takeover_path(), environment)?;
         let actual = read_holder(&layout.lock_path())?;
         if &actual != expected {
             return Err(LockError::Changed {
@@ -250,7 +296,7 @@ impl CatalogLock {
         expected_contents: &[u8],
         environment: &impl LockEnvironment,
     ) -> Result<(), LockError> {
-        let _takeover = TakeoverGuard::acquire(layout, environment)?;
+        let _takeover = TakeoverGuard::acquire(&layout.lock_takeover_path(), environment)?;
         let actual = read_lock_bytes(&layout.lock_path())?;
         if actual != expected_contents {
             return Err(LockError::CorruptChanged {
@@ -288,8 +334,9 @@ impl Drop for CatalogLock {
 }
 
 #[derive(Debug)]
-struct TakeoverGuard {
-    _file: File,
+pub(crate) struct TakeoverGuard {
+    file: File,
+    path: PathBuf,
     _local_claim: LocalTakeoverClaim,
 }
 
@@ -299,36 +346,42 @@ struct LocalTakeoverClaim {
 }
 
 impl TakeoverGuard {
-    fn acquire(
-        layout: &CatalogLayout,
+    pub(crate) fn acquire(
+        path: &Path,
         environment: &impl LockEnvironment,
     ) -> Result<Self, LockError> {
         let holder = current_holder(environment)?;
-        let path = layout.lock_takeover_path();
-        let local_claim = LocalTakeoverClaim::acquire(layout)?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|source| LockError::Io {
-                action: "open lock takeover guard",
-                path: path.clone(),
-                source,
-            })?;
-        if let Err(source) = rustix::fs::fcntl_lock(&file, FlockOperation::NonBlockingLockExclusive)
-        {
-            return Err(if source == rustix::io::Errno::WOULDBLOCK {
-                LockError::TakeoverBusy
-            } else {
-                LockError::Io {
-                    action: "acquire lock takeover guard",
-                    path,
-                    source: io::Error::from(source),
-                }
-            });
-        }
+        let path = canonical_sibling_path(path)?;
+        let local_claim = LocalTakeoverClaim::acquire(&path)?;
+        let mut file = loop {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|source| LockError::Io {
+                    action: "open lock takeover guard",
+                    path: path.clone(),
+                    source,
+                })?;
+            if let Err(source) =
+                rustix::fs::fcntl_lock(&file, FlockOperation::NonBlockingLockExclusive)
+            {
+                return Err(if source == rustix::io::Errno::WOULDBLOCK {
+                    LockError::TakeoverBusy
+                } else {
+                    LockError::Io {
+                        action: "acquire lock takeover guard",
+                        path,
+                        source: io::Error::from(source),
+                    }
+                });
+            }
+            if file_identifies_path(&file, &path)? {
+                break file;
+            }
+        };
         file.set_len(0).map_err(|source| LockError::Io {
             action: "truncate lock takeover guard",
             path: path.clone(),
@@ -337,21 +390,37 @@ impl TakeoverGuard {
         write_holder(&mut file, &path, &holder)?;
         sync_parent(&path).map_err(|source| LockError::Io {
             action: "persist lock takeover guard",
-            path,
+            path: path.clone(),
             source,
         })?;
         Ok(Self {
-            _file: file,
+            file,
+            path,
             _local_claim: local_claim,
         })
+    }
+
+    pub(crate) fn remove(&self) -> Result<(), LockError> {
+        if !file_identifies_path(&self.file, &self.path)? {
+            return Err(LockError::Io {
+                action: "remove owned lock takeover guard",
+                path: self.path.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "lock takeover path no longer identifies the owned file",
+                ),
+            });
+        }
+        remove_and_persist(&self.path)
     }
 }
 
 impl LocalTakeoverClaim {
-    fn acquire(layout: &CatalogLayout) -> Result<Self, LockError> {
-        let path = canonical_takeover_path(layout)?;
-        claim_local_takeover(&path)?;
-        Ok(Self { path })
+    fn acquire(path: &Path) -> Result<Self, LockError> {
+        claim_local_takeover(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
     }
 }
 
@@ -398,14 +467,23 @@ fn current_holder(environment: &impl LockEnvironment) -> Result<LockHolder, Lock
     })
 }
 
-fn canonical_takeover_path(layout: &CatalogLayout) -> Result<PathBuf, LockError> {
-    let state_directory =
-        fs::canonicalize(layout.state_directory()).map_err(|source| LockError::Io {
-            action: "canonicalize lock takeover directory",
-            path: layout.state_directory(),
-            source,
-        })?;
-    Ok(state_directory.join("lock.takeover"))
+fn canonical_sibling_path(path: &Path) -> Result<PathBuf, LockError> {
+    let invalid = |action, message| {
+        lock_io(
+            action,
+            path,
+            io::Error::new(io::ErrorKind::InvalidInput, message),
+        )
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("resolve lock takeover parent", "lock path has no parent"))?;
+    let parent = fs::canonicalize(parent)
+        .map_err(|source| lock_io("canonicalize lock takeover directory", parent, source))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("resolve lock takeover name", "lock path has no file name"))?;
+    Ok(parent.join(name))
 }
 
 fn local_takeovers() -> &'static Mutex<HashSet<PathBuf>> {
@@ -426,6 +504,42 @@ fn claim_local_takeover(path: &Path) -> Result<(), LockError> {
 fn release_local_takeover(path: &Path) {
     if let Ok(mut takeovers) = local_takeovers().lock() {
         takeovers.remove(path);
+    }
+}
+
+fn report_takeover_busy(path: &Path) -> LockError {
+    read_holder(path)
+        .map(|holder| LockError::Busy(Box::new(holder)))
+        .unwrap_or(LockError::TakeoverBusy)
+}
+
+fn file_identifies_path(file: &File, path: &Path) -> Result<bool, LockError> {
+    let open = file
+        .metadata()
+        .map_err(|source| lock_io("inspect open lock takeover guard", path, source))?;
+    let current = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(lock_io(
+                "inspect current lock takeover guard",
+                path,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lock takeover path is not a regular file",
+                ),
+            ))
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(lock_io("inspect current lock takeover guard", path, source)),
+    };
+    Ok(open.dev() == current.dev() && open.ino() == current.ino())
+}
+
+fn lock_io(action: &'static str, path: &Path, source: io::Error) -> LockError {
+    LockError::Io {
+        action,
+        path: path.to_path_buf(),
+        source,
     }
 }
 
@@ -946,6 +1060,7 @@ mod tests {
     #[test]
     fn unavailable_same_boot_identity_refuses_automatic_removal() {
         let (_temporary, layout) = initialized_catalog("lock-identity-unavailable");
+        let takeover = layout.root().join(".souvenirs-initialize.lock.takeover");
         let original = holder("boot-a", 41, Some("original-process"));
         write_holder(&layout, &original);
         let environment = environment(
@@ -955,10 +1070,12 @@ mod tests {
             &[(41, None), (42, Some("contender-process"))],
         );
 
-        let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
+        let error = CatalogLock::acquire_paths(layout.lock_path(), takeover.clone(), &environment)
+            .unwrap_err();
 
         assert!(matches!(error, LockError::Busy(actual) if *actual == original));
         assert!(layout.lock_path().exists());
+        assert!(!takeover.exists());
     }
 
     #[test]
@@ -991,11 +1108,19 @@ mod tests {
             "second",
             &[(41, Some("process-41")), (42, Some("process-42"))],
         );
-        let _first = TakeoverGuard::acquire(&layout, &first_environment).unwrap();
+        let _first =
+            TakeoverGuard::acquire(&layout.lock_takeover_path(), &first_environment).unwrap();
 
-        let error = TakeoverGuard::acquire(&layout, &second_environment).unwrap_err();
+        let error =
+            TakeoverGuard::acquire(&layout.lock_takeover_path(), &second_environment).unwrap_err();
 
         assert!(matches!(error, LockError::TakeoverBusy));
+        let ordinary = CatalogLock::acquire_with(&layout, &second_environment).unwrap();
+        ordinary.release().unwrap();
+        let original = holder("boot-a", 41, Some("process-41"));
+        write_holder(&layout, &original);
+        let error = CatalogLock::acquire_with(&layout, &second_environment).unwrap_err();
+        assert!(matches!(error, LockError::Busy(actual) if *actual == original));
     }
 
     #[test]

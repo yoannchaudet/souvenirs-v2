@@ -5,8 +5,9 @@ use std::fs;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, CopyExpectation, Failpoint,
-    ManifestReplacementRequest, OperationJournal, OperationJournalError, VerifiedCopyError,
+    CatalogConfig, CatalogInitializationError, CatalogLayout, CatalogLock, CopyExpectation,
+    Failpoint, ManifestReplacementRequest, OperationJournal, OperationJournalError,
+    VerifiedCopyError,
 };
 use tempfile::TempDir;
 
@@ -29,6 +30,78 @@ fn expectation(bytes: &[u8]) -> CopyExpectation {
     CopyExpectation {
         sha256: digest(bytes),
         size_bytes: bytes.len() as u64,
+    }
+}
+
+fn assert_completed_initialization(temporary: &TempDir, config: &CatalogConfig) {
+    CatalogLayout::initialize(temporary.path(), config).unwrap();
+    let root = temporary.path();
+    assert!(!root.join(".souvenirs-initialize.lock").exists());
+    assert!(!root.join(".souvenirs-initialize.lock.takeover").exists());
+}
+
+fn forge_dead_bootstrap_holder(temporary: &TempDir) {
+    let path = temporary.path().join(".souvenirs-initialize.lock");
+    let mut holder: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    holder["process_id"] = u32::MAX.into();
+    holder["process_start_id"] = "interrupted-process".into();
+    fs::write(path, serde_json::to_vec(&holder).unwrap()).unwrap();
+}
+
+fn assert_initialization_failpoint(failpoint: Failpoint) {
+    let temporary = TempDir::new().unwrap();
+    let config = CatalogConfig::default();
+    let error =
+        CatalogLayout::initialize_failing_at(temporary.path(), &config, failpoint).unwrap_err();
+    assert!(matches!(
+        error,
+        CatalogInitializationError::Failpoint(actual) if actual == failpoint
+    ));
+    forge_dead_bootstrap_holder(&temporary);
+    assert_completed_initialization(&temporary, &config);
+}
+
+#[rustfmt::skip]
+const INITIALIZATION_FAILPOINTS: &[Failpoint] = &[
+    Failpoint::InitializationJournalCreated, Failpoint::InitializationPlanPersisted, Failpoint::InitializationStateDirectoryIntentPersisted,
+    Failpoint::InitializationStateDirectoryMutationPersisted, Failpoint::InitializationStateDirectoryCompleted, Failpoint::InitializationJournalDirectoryIntentPersisted,
+    Failpoint::InitializationJournalDirectoryMutationPersisted, Failpoint::InitializationJournalDirectoryCompleted, Failpoint::InitializationJournalRelocationIntentPersisted,
+    Failpoint::InitializationJournalRelocationMutationPersisted, Failpoint::InitializationJournalRelocated, Failpoint::InitializationStagingDirectoryIntentPersisted,
+    Failpoint::InitializationStagingDirectoryMutationPersisted, Failpoint::InitializationStagingDirectoryCompleted, Failpoint::InitializationConfigStageIntentPersisted,
+    Failpoint::InitializationConfigStageMutationPersisted, Failpoint::InitializationConfigStaged, Failpoint::InitializationConfigPublicationIntentPersisted,
+    Failpoint::InitializationConfigPublicationMutationPersisted, Failpoint::InitializationConfigPublished, Failpoint::InitializationOutcomePersisted,
+];
+
+#[test]
+fn initialization_resumes_after_every_durable_boundary() {
+    for &failpoint in INITIALIZATION_FAILPOINTS {
+        assert_initialization_failpoint(failpoint);
+    }
+}
+
+#[test]
+fn initialization_recovers_observed_partial_mutations() {
+    #[rustfmt::skip]
+    const CASES: &[(Failpoint, Failpoint)] = &[
+        (Failpoint::InitializationStateDirectoryMutationPersisted, Failpoint::InitializationRecoveryDirectoryObservedBeforePersistence),
+        (Failpoint::InitializationJournalRelocationMutationPersisted, Failpoint::InitializationRecoveryRelocationObservedBeforePersistence),
+        (Failpoint::InitializationConfigStageMutationPersisted, Failpoint::InitializationRecoveryConfigStageObservedBeforePersistence),
+        (Failpoint::InitializationConfigPublicationMutationPersisted, Failpoint::InitializationRecoveryConfigObservedBeforePersistence),
+        (Failpoint::InitializationJournalCreated, Failpoint::InitializationRecoveryCleanupObservedBeforePersistence),
+    ];
+    for &(partial, recovery) in CASES {
+        let temporary = TempDir::new().unwrap();
+        let config = CatalogConfig::default();
+        for failpoint in [partial, recovery] {
+            let error = CatalogLayout::initialize_failing_at(temporary.path(), &config, failpoint)
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                CatalogInitializationError::Failpoint(actual) if actual == failpoint
+            ));
+            forge_dead_bootstrap_holder(&temporary);
+        }
+        assert_completed_initialization(&temporary, &config);
     }
 }
 
