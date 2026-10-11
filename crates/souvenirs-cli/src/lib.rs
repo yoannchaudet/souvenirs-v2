@@ -349,6 +349,7 @@ struct RecoveryResult {
 struct IntegrityResult {
     catalog: PathBuf,
     valid: bool,
+    coverage_complete: bool,
     checked_files: usize,
     checked_manifests: usize,
     findings: Vec<IntegrityFinding>,
@@ -370,6 +371,14 @@ enum IntegrityFinding {
         path: PathBuf,
         expected: String,
         actual: String,
+    },
+    UnreadableFile {
+        path: PathBuf,
+        error: String,
+    },
+    UnreadableCollection {
+        collection: PathBuf,
+        error: String,
     },
 }
 
@@ -1231,27 +1240,78 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
     let layout = require_catalog(catalog)?;
     let mut checked_files = 0_usize;
     let mut checked_manifests = 0_usize;
+    let mut coverage_complete = true;
     let mut findings = Vec::new();
     for collection in collection_directories(layout.root())? {
         let manifest_path = collection.join("SHA256SUMS");
-        if !manifest_path.is_file() {
+        let manifest_is_file = match fs::metadata(&manifest_path) {
+            Ok(metadata) => metadata.is_file(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                coverage_complete = false;
+                findings.push(IntegrityFinding::UnreadableFile {
+                    path: relative_to(layout.root(), &manifest_path)?,
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if !manifest_is_file {
             findings.push(IntegrityFinding::MissingManifest {
                 collection: relative_to(layout.root(), &collection)?,
             });
             continue;
         }
-        checked_manifests += 1;
-        let manifest = existing_manifest_lines(&manifest_path)?;
-        let files = inspect_collection_files(&collection)?;
-        for (filename, expected) in &manifest {
-            let path = collection.join(filename);
-            if !path.is_file() {
-                findings.push(IntegrityFinding::MissingFile {
-                    path: relative_to(layout.root(), &path)?,
+        let manifest = match existing_manifest_lines(&manifest_path) {
+            Ok(manifest) => manifest,
+            Err(error) if error.code == "io" => {
+                coverage_complete = false;
+                findings.push(IntegrityFinding::UnreadableFile {
+                    path: relative_to(layout.root(), &manifest_path)?,
+                    error: error.message,
                 });
                 continue;
             }
-            let (actual, _) = digest_file(&path)?;
+            Err(error) => return Err(error),
+        };
+        checked_manifests += 1;
+        for (filename, expected) in &manifest {
+            let path = collection.join(filename);
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => {
+                    findings.push(IntegrityFinding::MissingFile {
+                        path: relative_to(layout.root(), &path)?,
+                    });
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    findings.push(IntegrityFinding::MissingFile {
+                        path: relative_to(layout.root(), &path)?,
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    coverage_complete = false;
+                    findings.push(IntegrityFinding::UnreadableFile {
+                        path: relative_to(layout.root(), &path)?,
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+            }
+            let (actual, _) = match digest_file(&path) {
+                Ok(digest) => digest,
+                Err(error) if error.code == "io" => {
+                    coverage_complete = false;
+                    findings.push(IntegrityFinding::UnreadableFile {
+                        path: relative_to(layout.root(), &path)?,
+                        error: error.message,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             checked_files += 1;
             if actual.as_str() != expected {
                 findings.push(IntegrityFinding::DigestMismatch {
@@ -1261,6 +1321,18 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
                 });
             }
         }
+        let files = match inspect_collection_files(&collection) {
+            Ok(files) => files,
+            Err(error) if error.code == "io" => {
+                coverage_complete = false;
+                findings.push(IntegrityFinding::UnreadableCollection {
+                    collection: relative_to(layout.root(), &collection)?,
+                    error: error.message,
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let mut unexpected = files
             .originals
             .difference(&manifest.keys().cloned().collect())
@@ -1277,7 +1349,8 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
         "integrity.check",
         IntegrityResult {
             catalog: canonical_path(layout.root())?,
-            valid: findings.is_empty(),
+            valid: coverage_complete && findings.is_empty(),
+            coverage_complete,
             checked_files,
             checked_manifests,
             findings,
