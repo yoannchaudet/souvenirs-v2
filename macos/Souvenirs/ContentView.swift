@@ -1186,6 +1186,8 @@ private struct ImportPlanningSheet: View {
                     .accessibilityFocused($destinationFocused)
                     if model.destinationMode == .existing {
                         Button("Create New…") {
+                            keyboardFocus = .destination
+                            destinationFocused = true
                             Task { await model.useCreateDestination() }
                         }
                         .accessibilityIdentifier("import-create-new-destination")

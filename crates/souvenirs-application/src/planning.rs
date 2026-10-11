@@ -126,7 +126,7 @@ impl ResolvedDestination {
                     .any(|date| date < start_date || date > end_date)
                 {
                     return Err(ImportPlanningError::DestinationUnavailable(format!(
-                        "The selected collection covers {start_date} through {end_date}. Choose a collection that includes every import date."
+                        "The selected collection covers {start_date} through {end_date}. Correct the import dates or choose a collection that includes every date."
                     )));
                 }
                 Ok(ResolvedTarget {
