@@ -38,6 +38,14 @@ fn assert_completed_initialization(temporary: &TempDir, config: &CatalogConfig) 
     assert!(!temporary.path().join(".souvenirs-initialize.lock").exists());
 }
 
+fn forge_dead_bootstrap_holder(temporary: &TempDir) {
+    let path = temporary.path().join(".souvenirs-initialize.lock");
+    let mut holder: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    holder["process_id"] = u32::MAX.into();
+    holder["process_start_id"] = "interrupted-process".into();
+    fs::write(path, serde_json::to_vec(&holder).unwrap()).unwrap();
+}
+
 fn assert_initialization_failpoint(failpoint: Failpoint) {
     let temporary = TempDir::new().unwrap();
     let config = CatalogConfig::default();
@@ -47,18 +55,7 @@ fn assert_initialization_failpoint(failpoint: Failpoint) {
         error,
         CatalogInitializationError::Failpoint(actual) if actual == failpoint
     ));
-    if failpoint == Failpoint::InitializationOutcomePersisted {
-        let path = temporary.path().join(".souvenirs-initialize.lock");
-        let mut holder: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        holder["process_id"] = serde_json::Value::from(u32::MAX);
-        holder["process_start_id"] = serde_json::Value::from("interrupted-process");
-        fs::write(
-            path,
-            format!("{}\n", serde_json::to_string(&holder).unwrap()),
-        )
-        .unwrap();
-    }
+    forge_dead_bootstrap_holder(&temporary);
     assert_completed_initialization(&temporary, &config);
 }
 
@@ -124,6 +121,7 @@ fn initialization_recovers_observed_partial_mutations() {
                 error,
                 CatalogInitializationError::Failpoint(actual) if actual == failpoint
             ));
+            forge_dead_bootstrap_holder(&temporary);
         }
         assert_completed_initialization(&temporary, &config);
     }

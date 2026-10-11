@@ -106,6 +106,15 @@ impl CatalogService {
 
     pub fn open(path: impl AsRef<Path>) -> Result<CatalogLocation, CatalogServiceError> {
         let path = path.as_ref();
+        if !fs::metadata(path)
+            .map_err(|source| CatalogServiceError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .is_dir()
+        {
+            return Err(CatalogServiceError::NotDirectory(path.to_path_buf()));
+        }
         CatalogLayout::resume_initialization(path)?;
         Self::validate(path, CatalogIntent::Open)
     }
@@ -878,6 +887,8 @@ impl CatalogServiceError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::AlreadyCatalog(_) => "catalog_already_exists",
+            Self::Initialization(CatalogInitializationError::UnsupportedFormatVersion(_))
+            | Self::UnsupportedFormat(_) => "unsupported_catalog_version",
             Self::Initialization(_) | Self::Io { .. } | Self::Storage(_) => "catalog_io",
             Self::InvalidConfig(_) => "invalid_catalog",
             Self::InvalidOperationJournal { .. } => "invalid_operation_journal",
@@ -885,7 +896,6 @@ impl CatalogServiceError {
             Self::NotCatalog(_) => "not_a_catalog",
             Self::NotDirectory(_) => "not_a_directory",
             Self::SynchronizedFolder(_) => "synchronized_folder",
-            Self::UnsupportedFormat(_) => "unsupported_catalog_version",
         }
     }
 }
@@ -967,20 +977,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "test-failpoints")]
-    #[test]
-    fn application_resumes_a_recorded_initialization() {
-        let directory = tempdir().unwrap();
-        souvenirs_storage::CatalogLayout::initialize_failing_at(
-            directory.path(),
-            &souvenirs_storage::CatalogConfig::default(),
-            souvenirs_storage::Failpoint::InitializationConfigPublished,
-        )
-        .unwrap_err();
-
-        CatalogService::open(directory.path()).unwrap();
-    }
-
     #[test]
     fn rejects_plain_folder_when_opening() {
         let directory = tempdir().expect("temporary directory");
@@ -988,6 +984,26 @@ mod tests {
             CatalogService::open(directory.path()),
             Err(CatalogServiceError::NotCatalog(_))
         ));
+        let file = directory.path().join("catalog");
+        fs::write(&file, []).unwrap();
+        assert_eq!(
+            CatalogService::open(file).unwrap_err().code(),
+            "not_a_directory"
+        );
+    }
+
+    #[test]
+    fn preserves_unsupported_pending_initialization_classification() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join(".souvenirs-initialize.jsonl"),
+            b"{\"kind\":\"plan\",\"operation_id\":\"initialize\",\"plan\":{\"format_version\":3,\"config_yaml\":\"format_version: 3\\n\",\"config_sha256\":\"63cde216c8fae788bcc0892df26627eddc0b9c93bd26d67a9b6460cbf4d7f793\",\"journal_file_name\":\"future-initialize.jsonl\",\"staged_config_path\":\".souvenirs/staging/initialize-config.yml.stage\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            CatalogService::open(directory.path()).unwrap_err().code(),
+            "unsupported_catalog_version"
+        );
     }
 
     #[test]

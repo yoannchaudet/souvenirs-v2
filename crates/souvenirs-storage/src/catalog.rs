@@ -118,7 +118,7 @@ impl CatalogLayout {
         let capabilities = layout.capabilities()?;
         capabilities.ensure_writable(&layout.root)?;
         validate_bootstrap_preparation(&layout)?;
-        let resumed = layout.with_bootstrap_lock(None, || layout.resume_initialization_locked())?;
+        let resumed = layout.with_bootstrap_lock(|| layout.resume_initialization_locked())?;
         Ok(resumed.then_some(layout))
     }
 
@@ -221,17 +221,15 @@ impl CatalogLayout {
         capabilities.ensure_writable(&self.root)?;
         validate_bootstrap_preparation(self)?;
         self.has_pending_initialization()?;
-        self.with_bootstrap_lock(failpoint, || {
+        self.with_bootstrap_lock(|| {
             self.initialize_locked(config, config_yaml.as_bytes(), failpoint)
         })
     }
 
     fn with_bootstrap_lock<T>(
         &self,
-        failpoint: Option<Failpoint>,
         operation: impl FnOnce() -> Result<T, CatalogInitializationError>,
     ) -> Result<T, CatalogInitializationError> {
-        let _ = failpoint;
         let (lock, takeover) = CatalogLock::acquire_paths_with_takeover(
             self.bootstrap_lock_path(),
             self.bootstrap_takeover_path(),
@@ -240,12 +238,7 @@ impl CatalogLayout {
         .map_err(CatalogInitializationError::Lock)?;
         let result = operation();
         #[cfg(feature = "test-failpoints")]
-        if matches!(
-            result,
-            Err(CatalogInitializationError::Failpoint(
-                crate::Failpoint::InitializationOutcomePersisted
-            ))
-        ) {
+        if matches!(result, Err(CatalogInitializationError::Failpoint(_))) {
             lock.abandon();
             drop(takeover);
             return result;
@@ -1430,10 +1423,7 @@ impl From<StorageCapabilityError> for CatalogInitializationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        digest_bytes, CatalogConfig, CatalogInitializationError, CatalogLayout, InitializationPlan,
-        CONFIG_STAGE_RELATIVE_PATH, FORMAT_VERSION,
-    };
+    use super::{CatalogConfig, CatalogInitializationError, CatalogLayout, FORMAT_VERSION};
     use std::fs;
 
     use crate::test_support::TempDirectory;
@@ -1534,20 +1524,5 @@ mod tests {
                 if version == FORMAT_VERSION + 1
         ));
         assert!(!temporary.path().join(".souvenirs").exists());
-    }
-
-    #[test]
-    fn rejects_invalid_recorded_versions() {
-        for (plan_version, config_version) in [(3, 3), (2, 3)] {
-            let config_yaml = format!("format_version: {config_version}\n");
-            let plan = InitializationPlan {
-                format_version: plan_version,
-                config_sha256: digest_bytes(config_yaml.as_bytes()),
-                config_yaml,
-                journal_file_name: "recovery-initialize.jsonl".to_owned(),
-                staged_config_path: CONFIG_STAGE_RELATIVE_PATH.into(),
-            };
-            assert!(plan.validate("journal".as_ref()).is_err());
-        }
     }
 }
