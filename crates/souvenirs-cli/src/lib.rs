@@ -17,12 +17,13 @@ use souvenirs_domain::catalog::{
 };
 use souvenirs_domain::datetime::{resolve_datetime, DateTimeResolution};
 use souvenirs_domain::names::CatalogLabel;
+#[cfg(test)]
+use souvenirs_domain::plan::IMPORT_PLAN_SCHEMA_VERSION;
 use souvenirs_domain::plan::{
     constrain_import_plan_schema, CatalogSnapshot, ContentDigest, ImportPlan, ManifestFingerprint,
     PlanDateTime, PlanDateTimeCandidate, PlanDateTimeProvenance, PlanDocument, PlanFile,
     PlanFileRole, PlanId, PlanItem, PlanItemDisposition, PlanItemFinding, PlanStep, PlanStepKind,
     PlanTimestamp, SourceSnapshot, UnhandledContent, UnhandledContentFinding,
-    IMPORT_PLAN_SCHEMA_VERSION,
 };
 use souvenirs_domain::relationships::{
     resolve_directory_relationships, sidecar_suffix_for_item, RelationshipFinding,
@@ -41,6 +42,7 @@ use souvenirs_storage::{
 use time::{Date, Month, PrimitiveDateTime, Time};
 
 const SOURCE_SCAN_SCHEMA_VERSION: u32 = 3;
+const EMITTED_IMPORT_PLAN_SCHEMA_VERSION: u32 = 3;
 
 pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
@@ -257,7 +259,7 @@ pub enum ScannedFileKind {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredPlan {
-    #[schemars(range(min = 1, max = 3))]
+    #[schemars(range(min = 1, max = 4))]
     pub schema_version: u32,
     pub confirmed: bool,
     #[schemars(with = "String")]
@@ -266,7 +268,7 @@ pub struct StoredPlan {
 }
 
 pub fn stored_plan_schema() -> RootSchema {
-    stored_plan_schema_for_version(IMPORT_PLAN_SCHEMA_VERSION)
+    stored_plan_schema_for_version(EMITTED_IMPORT_PLAN_SCHEMA_VERSION)
         .expect("current stored plan schema version is supported")
 }
 
@@ -1007,7 +1009,7 @@ fn import_plan(
     ))
     .map_err(|error| CliError::invalid_data(error.to_string()))?;
     let plan = ImportPlan::new(PlanDocument {
-        schema_version: IMPORT_PLAN_SCHEMA_VERSION,
+        schema_version: EMITTED_IMPORT_PLAN_SCHEMA_VERSION,
         plan_id,
         created_at,
         catalog: CatalogSnapshot {
@@ -1018,6 +1020,7 @@ fn import_plan(
             source_id: scan.source_id.clone(),
             fingerprint: scan.fingerprint.clone(),
         },
+        duplicates: None,
         items,
         unhandled_content,
         steps,
@@ -1025,7 +1028,7 @@ fn import_plan(
     })
     .map_err(|error| CliError::invalid_data(error.to_string()))?;
     let stored = StoredPlan {
-        schema_version: IMPORT_PLAN_SCHEMA_VERSION,
+        schema_version: EMITTED_IMPORT_PLAN_SCHEMA_VERSION,
         confirmed,
         source_root: scan.source_root,
         import_plan: plan,
@@ -1412,7 +1415,7 @@ fn integrity_check(catalog: &Path) -> Result<(), CliError> {
 
 fn read_stored_plan(path: &Path) -> Result<StoredPlan, CliError> {
     let stored: StoredPlan = read_json(path)?;
-    if !(1..=IMPORT_PLAN_SCHEMA_VERSION).contains(&stored.schema_version) {
+    if !(1..=EMITTED_IMPORT_PLAN_SCHEMA_VERSION).contains(&stored.schema_version) {
         return Err(CliError::invalid_data(format!(
             "unsupported stored plan schema version {}",
             stored.schema_version
@@ -2371,6 +2374,7 @@ fn plan_file(file: &ScannedFile, role: PlanFileRole) -> PlanFile {
         digest: file.digest.clone(),
         size_bytes: file.size_bytes,
         role,
+        duplicate_disposition: None,
     }
 }
 
@@ -2909,6 +2913,22 @@ mod tests {
     }
 
     #[test]
+    fn cli_keeps_emitting_version_three_while_version_four_is_staged() {
+        let current = serde_json::to_value(stored_plan_schema()).unwrap();
+        let staged = serde_json::to_value(stored_plan_schema_for_version(4).unwrap()).unwrap();
+
+        assert_eq!(
+            current["properties"]["schema_version"]["minimum"],
+            serde_json::json!(3.0)
+        );
+        assert_eq!(
+            staged["properties"]["schema_version"]["minimum"],
+            serde_json::json!(4.0)
+        );
+        assert!(staged["definitions"]["PlanDocument"]["properties"]["duplicates"].is_object());
+    }
+
+    #[test]
     fn representative_saved_plans_match_the_schema_and_production_reader() {
         let schema_value: serde_json::Value = serde_json::from_slice(
             &fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/import-plan/v1.json"))
@@ -2987,7 +3007,9 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
 
         let mut unsupported = fixture.clone();
-        unsupported["schema_version"] = serde_json::json!(IMPORT_PLAN_SCHEMA_VERSION + 1);
+        unsupported["schema_version"] = serde_json::json!(EMITTED_IMPORT_PLAN_SCHEMA_VERSION + 1);
+        unsupported["import_plan"]["document"]["schema_version"] =
+            serde_json::json!(EMITTED_IMPORT_PLAN_SCHEMA_VERSION + 1);
         let unsupported_path = temporary.path().join("unsupported.json");
         fs::write(&unsupported_path, serde_json::to_vec(&unsupported).unwrap()).unwrap();
         assert!(read_stored_plan(&unsupported_path).is_err());

@@ -330,6 +330,30 @@ Relationship-resolved items report disagreements from the primary file and its o
 Relationship-unresolved items have no selected datetime candidate and use an empty disagreement array.
 Versions 1 and 2 omit the field and keep their original digest contracts.
 
+Version 4 adds a duplicate review to the plan document.
+The review records the selected catalog and source duplicate choices.
+It also records catalog matches and within-source digest groups.
+Each original records a transfer or retained duplicate disposition.
+A retained catalog duplicate names the first component-wise catalog path.
+A retained source duplicate names the selected source file.
+Sidecars use the transfer disposition.
+Execution copies a sidecar only when its item transfers at least one original.
+
+The catalog skip choice takes precedence when a digest matches the catalog and the source.
+The one-copy choice selects the earliest accepted wall-clock datetime.
+It then selects the first component-wise source path.
+The source file identifier is the final stable tie-breaker.
+
+Version 4 sorts catalog findings by source file identifier.
+It sorts each catalog path list component-wise.
+It sorts source groups by digest and source file identifiers.
+Source groups must exactly cover every repeated digest among source originals.
+The planner establishes catalog finding completeness from the catalog lookup.
+Versions 1 through 3 omit all duplicate fields and keep their original digest contracts.
+
+The CLI continues to emit version 3 plans until planning and locked drift validation support version 4.
+The committed version 4 schema defines the next producer and consumer contract.
+
 The saved-plan `confirmed` field is not part of the digest.
 Execution must reject the plan unless this field is `true`.
 
