@@ -180,6 +180,24 @@ final class ImportExecutionModelTests: XCTestCase {
         }
     }
 
+    func testUnavailableRetryKeepsPromptVisibleWhileReinspecting() async {
+        let engine = FakeImportExecutionEngine()
+        engine.inspection = unfinished(sourceAvailable: false)
+        let model = ImportExecutionCoordinator(engine: engine)
+        await model.inspect(catalog: catalog)
+        engine.blocksInspection = true
+
+        model.retryRecovery()
+        await engine.waitForInspection()
+
+        XCTAssertEqual(model.phase, .recoveryPrompt(sourceAvailable: false))
+        XCTAssertTrue(model.isRetryingRecovery)
+
+        engine.resumeInspection()
+        await waitUntil { !model.isRetryingRecovery }
+        XCTAssertEqual(model.phase, .recoveryPrompt(sourceAvailable: false))
+    }
+
     func testDeferredRecoveryBlocksStartingAnotherImport() async {
         let engine = FakeImportExecutionEngine()
         engine.inspection = unfinished(sourceAvailable: false)

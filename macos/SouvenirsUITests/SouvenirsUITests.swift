@@ -94,6 +94,7 @@ final class SouvenirsUITests: XCTestCase {
         app.buttons["choose-import-folder"].click()
 
         XCTAssertTrue(app.descendants(matching: .any)["import-review-sheet"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.sheets.count, 1)
         XCTAssertTrue(app.staticTexts["import-review-title"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["import-date-decision"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["start-import"].isEnabled)
@@ -107,6 +108,45 @@ final class SouvenirsUITests: XCTestCase {
         waitForExpectations(timeout: 3)
         app.descendants(matching: .any)["import-details"].click()
         XCTAssertTrue(app.descendants(matching: .any)["import-operation-summary"].exists)
+    }
+
+    @MainActor
+    func testImportPlanningSheetContainsFocusAndEscapeRestoresLauncher() throws {
+        let app = launch(scenario: "import-flow")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(app.staticTexts["catalog-ready"].waitForExistence(timeout: 5))
+        let launcher = app.buttons["choose-import-folder"]
+        launcher.click()
+
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["import-review-modal"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertEqual(app.sheets.count, 1)
+        XCTAssertFalse(launcher.isHittable)
+        let collectionName = app.textFields["import-collection-name"]
+        XCTAssertTrue(collectionName.waitForExistence(timeout: 5))
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: collectionName
+        )
+        waitForExpectations(timeout: 3)
+
+        app.typeKey(.escape, modifierFlags: [])
+
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["import-review-modal"]
+                .waitForNonExistence(timeout: 3)
+        )
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: launcher
+        )
+        waitForExpectations(timeout: 3)
     }
 
     @MainActor
@@ -167,6 +207,7 @@ final class SouvenirsUITests: XCTestCase {
         app.buttons["open-catalog"].click()
 
         XCTAssertTrue(app.staticTexts["recovery-title"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.sheets.count, 1)
         XCTAssertTrue(app.staticTexts["recovery-source-unavailable"].exists)
         XCTAssertTrue(app.buttons["retry-recovery"].isEnabled)
         XCTAssertFalse(app.buttons["finish-recovery"].isEnabled)
@@ -178,6 +219,40 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["retry-deferred-recovery"].exists)
         XCTAssertTrue(app.buttons["cancel-deferred-recovery"].exists)
         XCTAssertFalse(app.buttons["choose-import-folder"].isEnabled)
+    }
+
+    @MainActor
+    func testRecoveryEscapeDefersAndRestoresRetryLauncher() throws {
+        let app = launch(scenario: "import-recovery-missing")
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["recovery-modal"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertEqual(app.sheets.count, 1)
+        XCTAssertFalse(app.buttons["show-catalog-in-finder"].isHittable)
+        app.typeKey(.escape, modifierFlags: [])
+
+        let retry = app.buttons["retry-deferred-recovery"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        retry.click()
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.sheets.firstMatch.descendants(matching: .any)["recovery-modal"]
+                .waitForExistence(timeout: 5)
+        )
+        app.typeKey(.escape, modifierFlags: [])
+
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: retry
+        )
+        waitForExpectations(timeout: 3)
     }
 
     @MainActor
@@ -208,7 +283,8 @@ final class SouvenirsUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = [
             "-ApplePersistenceIgnoreState", "YES",
-            "-NSQuitAlwaysKeepsWindows", "NO"
+            "-NSQuitAlwaysKeepsWindows", "NO",
+            "-AppleKeyboardUIMode", "3"
         ]
         app.launchEnvironment["SOUVENIRS_ENGINE_EXECUTABLE"] =
             repositoryRoot.appendingPathComponent(

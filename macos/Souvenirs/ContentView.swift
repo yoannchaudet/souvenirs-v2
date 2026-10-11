@@ -2,12 +2,20 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    private enum ModalReturnFocus: Hashable {
+        case chooseImportFolder
+        case retryDeferredRecovery
+        case stopImport
+    }
+
     let engineStatus: EngineAppModel.Status
     @ObservedObject var model: CatalogWelcomeModel
     @ObservedObject var imports: ImportExecutionCoordinator
     let onRetryEngine: (() -> Void)?
     @State private var showsCreatedItems = false
-    @AccessibilityFocusState private var recoveryTitleFocused: Bool
+    @State private var modalReturnFocus: ModalReturnFocus?
+    @FocusState private var keyboardFocus: ModalReturnFocus?
+    @AccessibilityFocusState private var accessibilityFocus: ModalReturnFocus?
 
     init(
         engineStatus: EngineAppModel.Status,
@@ -32,27 +40,64 @@ struct ContentView: View {
                 catalogHome(catalog)
             }
         }
-        .accessibilityHidden(isRecoveryPrompt)
         .frame(minWidth: 586, minHeight: 386)
         .background(.ultraThinMaterial)
-        .overlay {
+        .sheet(
+            isPresented: importPlanningPresented,
+            onDismiss: restoreModalFocus
+        ) {
             if let planning = model.importPlanning {
-                ZStack {
-                    Color.black.opacity(0.22).ignoresSafeArea()
-                    ImportPlanningSheet(
-                        model: planning,
-                        onCancel: model.dismissImport,
-                        onStart: {
-                            guard let review = planning.review else { return }
-                            imports.start(review: review, catalog: planning.catalog)
-                            model.dismissImport()
-                        }
-                    )
-                    .frame(maxWidth: 620, maxHeight: 500)
-                    .padding(20)
-                }
+                ImportPlanningSheet(
+                    model: planning,
+                    onCancel: model.dismissImport,
+                    onStart: {
+                        guard let review = planning.review else { return }
+                        modalReturnFocus = .stopImport
+                        imports.start(review: review, catalog: planning.catalog)
+                        model.dismissImport()
+                    }
+                )
+                .frame(
+                    minWidth: 540,
+                    idealWidth: 620,
+                    maxWidth: 620,
+                    minHeight: 386,
+                    idealHeight: 500,
+                    maxHeight: 500
+                )
             }
-            recoveryOverlay
+        }
+        .sheet(
+            isPresented: recoveryPresented,
+            onDismiss: restoreModalFocus
+        ) {
+            if case .recoveryPrompt(let sourceAvailable) = imports.phase {
+                RecoverySheet(
+                    imports: imports,
+                    sourceAvailable: sourceAvailable,
+                    onStop: {
+                        modalReturnFocus = nil
+                        imports.stopRecoveryHere()
+                    },
+                    onDefer: {
+                        modalReturnFocus = .retryDeferredRecovery
+                        imports.deferRecovery()
+                    },
+                    onRetry: imports.retryRecovery,
+                    onFinish: {
+                        modalReturnFocus = .stopImport
+                        imports.finishRecovery()
+                    }
+                )
+                .frame(
+                    minWidth: 420,
+                    idealWidth: 465,
+                    maxWidth: 465,
+                    minHeight: 300,
+                    idealHeight: 320,
+                    maxHeight: 320
+                )
+            }
         }
         .alert(
             model.presentedErrorTitle,
@@ -68,9 +113,40 @@ struct ContentView: View {
         }
     }
 
-    private var isRecoveryPrompt: Bool {
-        if case .recoveryPrompt = imports.phase { return true }
-        return false
+    private var importPlanningPresented: Binding<Bool> {
+        Binding(
+            get: { model.importPlanning != nil },
+            set: { isPresented in
+                if !isPresented {
+                    model.dismissImport()
+                }
+            }
+        )
+    }
+
+    private var recoveryPresented: Binding<Bool> {
+        Binding(
+            get: {
+                if case .recoveryPrompt = imports.phase { return true }
+                return false
+            },
+            set: { isPresented in
+                if !isPresented, case .recoveryPrompt = imports.phase {
+                    modalReturnFocus = .retryDeferredRecovery
+                    imports.deferRecovery()
+                }
+            }
+        )
+    }
+
+    private func restoreModalFocus() {
+        guard let target = modalReturnFocus else { return }
+        modalReturnFocus = nil
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(150))
+            keyboardFocus = target
+            accessibilityFocus = target
+        }
     }
 
     private var welcome: some View {
@@ -424,6 +500,7 @@ struct ContentView: View {
                         .padding(.top, 3)
                     Button("Choose a Folder to Import…") {
                         chooseFolder { path in
+                            modalReturnFocus = .chooseImportFolder
                             model.beginImport(from: path, into: catalog)
                         }
                     }
@@ -433,6 +510,12 @@ struct ContentView: View {
                             && imports.phase == .recoveryDeferred
                     )
                     .accessibilityIdentifier("choose-import-folder")
+                    .focusable()
+                    .focused($keyboardFocus, equals: .chooseImportFolder)
+                    .accessibilityFocused(
+                        $accessibilityFocus,
+                        equals: .chooseImportFolder
+                    )
                     .padding(.top, 10)
                     Text("Memory cards appear in the sidebar when you connect them.")
                         .font(.caption)
@@ -541,6 +624,12 @@ struct ContentView: View {
                         Button("Stop…") { imports.stop() }
                             .disabled(!imports.canStop)
                             .accessibilityIdentifier("stop-import")
+                            .focusable()
+                            .focused($keyboardFocus, equals: .stopImport)
+                            .accessibilityFocused(
+                                $accessibilityFocus,
+                                equals: .stopImport
+                            )
                     }
                 }
                 .padding(16)
@@ -627,9 +716,18 @@ struct ContentView: View {
                 Spacer()
                 Button("Stop Here…") { imports.stopRecoveryHere() }
                     .accessibilityIdentifier("cancel-deferred-recovery")
-                Button("Try Again") { imports.retryRecovery() }
+                Button("Try Again") {
+                    modalReturnFocus = .retryDeferredRecovery
+                    imports.retryRecovery()
+                }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("retry-deferred-recovery")
+                    .focusable()
+                    .focused($keyboardFocus, equals: .retryDeferredRecovery)
+                    .accessibilityFocused(
+                        $accessibilityFocus,
+                        equals: .retryDeferredRecovery
+                    )
             }
         }
         .padding(12)
@@ -671,76 +769,6 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 18)
                 .frame(maxWidth: .infinity, minHeight: proxy.size.height)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var recoveryOverlay: some View {
-        if case .recoveryPrompt(let sourceAvailable) = imports.phase {
-            ZStack {
-                Color.black.opacity(0.24).ignoresSafeArea()
-                VStack(spacing: 0) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            Label(
-                                sourceAvailable
-                                    ? "Finish importing “\(imports.collectionName)”?"
-                                    : "Connect \(imports.sourceName) to finish the import",
-                                systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
-                            )
-                            .font(.title3.bold())
-                            .accessibilityIdentifier("recovery-title")
-                            .accessibilityFocused($recoveryTitleFocused)
-                            .onAppear { recoveryTitleFocused = true }
-                            Text(
-                                sourceAvailable
-                                    ? "The import stopped before it finished. Nothing was lost."
-                                    : "\(imports.completedUnits) items are safely in your catalog. The rest are still on the source."
-                            )
-                            .foregroundStyle(.secondary)
-                            Label(
-                                "\(imports.completedUnits) items are safely in your catalog.",
-                                systemImage: "checkmark"
-                            )
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
-                            if !sourceAvailable {
-                                Label(
-                                    "Reconnect \(imports.sourceName), then choose Try Again.",
-                                    systemImage: "externaldrive.badge.exclamationmark"
-                                )
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("recovery-source-unavailable")
-                            }
-                        }
-                        .padding(24)
-                    }
-                    Divider()
-                    HStack {
-                        Button("Stop Here…") { imports.stopRecoveryHere() }
-                            .accessibilityIdentifier("cancel-recovery")
-                        Spacer()
-                        Button("Not Now") { imports.deferRecovery() }
-                            .accessibilityIdentifier("defer-recovery")
-                        if !sourceAvailable {
-                            Button("Try Again") { imports.retryRecovery() }
-                                .accessibilityIdentifier("retry-recovery")
-                        }
-                        Button("Finish Import") { imports.finishRecovery() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!sourceAvailable)
-                            .accessibilityIdentifier("finish-recovery")
-                    }
-                    .padding(16)
-                }
-                .frame(maxWidth: 465, maxHeight: 320)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .shadow(color: .black.opacity(0.28), radius: 32, y: 18)
-                .padding(20)
             }
         }
     }
@@ -873,9 +901,16 @@ struct ContentView: View {
 }
 
 private struct ImportPlanningSheet: View {
+    private enum FocusTarget: Hashable {
+        case cancel
+        case collectionName
+    }
+
     @ObservedObject var model: ImportPlanningModel
     let onCancel: () -> Void
     let onStart: () -> Void
+    @FocusState private var keyboardFocus: FocusTarget?
+    @AccessibilityFocusState private var titleFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -888,6 +923,7 @@ private struct ImportPlanningSheet: View {
                     Text(model.title)
                         .font(.system(size: 22, weight: .bold))
                         .accessibilityIdentifier("import-review-title")
+                        .accessibilityFocused($titleFocused)
 
                     if let scan = model.scan {
                         destinationCard
@@ -931,6 +967,7 @@ private struct ImportPlanningSheet: View {
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("cancel-import-review")
+                    .focused($keyboardFocus, equals: .cancel)
                 Button(model.isPrepared ? "Plan Ready" : "Start Import") {
                     model.prepareExecution()
                     if model.isPrepared { onStart() }
@@ -944,9 +981,16 @@ private struct ImportPlanningSheet: View {
             .background(.regularMaterial)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.28), radius: 34, y: 18)
+        .accessibilityIdentifier("import-review-modal")
+        .onAppear {
+            keyboardFocus = model.scan == nil ? .cancel : .collectionName
+            titleFocused = true
+        }
+        .onChange(of: model.scan != nil) {
+            if $1 {
+                keyboardFocus = .collectionName
+            }
+        }
     }
 
     private var destinationCard: some View {
@@ -965,6 +1009,7 @@ private struct ImportPlanningSheet: View {
                         }
                         .onSubmit { Task { await model.refreshReview() } }
                         .accessibilityIdentifier("import-collection-name")
+                        .focused($keyboardFocus, equals: .collectionName)
                     Button(
                         model.destinationMode == .create
                             ? "Add to Existing…" : "Create New…"
@@ -1169,6 +1214,103 @@ private struct ImportPlanningSheet: View {
 
     private func bytes(_ count: UInt64) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)
+    }
+}
+
+private struct RecoverySheet: View {
+    private enum FocusTarget: Hashable {
+        case finish
+        case retry
+    }
+
+    @ObservedObject var imports: ImportExecutionCoordinator
+    let sourceAvailable: Bool
+    let onStop: () -> Void
+    let onDefer: () -> Void
+    let onRetry: () -> Void
+    let onFinish: () -> Void
+    @FocusState private var keyboardFocus: FocusTarget?
+    @AccessibilityFocusState private var titleFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Label(
+                        sourceAvailable
+                            ? "Finish importing “\(imports.collectionName)”?"
+                            : "Connect \(imports.sourceName) to finish the import",
+                        systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
+                    )
+                    .font(.title3.bold())
+                    .accessibilityIdentifier("recovery-title")
+                    .accessibilityFocused($titleFocused)
+                    Text(
+                        sourceAvailable
+                            ? "The import stopped before it finished. Nothing was lost."
+                            : "\(imports.completedUnits) items are safely in your catalog. The rest are still on the source."
+                    )
+                    .foregroundStyle(.secondary)
+                    Label(
+                        "\(imports.completedUnits) items are safely in your catalog.",
+                        systemImage: "checkmark"
+                    )
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        .background.opacity(0.7),
+                        in: RoundedRectangle(cornerRadius: 10)
+                    )
+                    if !sourceAvailable {
+                        Label(
+                            "Reconnect \(imports.sourceName), then choose Try Again.",
+                            systemImage: "externaldrive.badge.exclamationmark"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("recovery-source-unavailable")
+                    }
+                }
+                .padding(24)
+            }
+            Divider()
+            HStack {
+                Button("Stop Here…", action: onStop)
+                    .disabled(imports.isRetryingRecovery)
+                    .accessibilityIdentifier("cancel-recovery")
+                Spacer()
+                if imports.isRetryingRecovery {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking source…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("recovery-retry-progress")
+                }
+                Button("Not Now", action: onDefer)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("defer-recovery")
+                if !sourceAvailable {
+                    Button("Try Again", action: onRetry)
+                        .disabled(imports.isRetryingRecovery)
+                        .accessibilityIdentifier("retry-recovery")
+                        .focused($keyboardFocus, equals: .retry)
+                }
+                Button("Finish Import", action: onFinish)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!sourceAvailable || imports.isRetryingRecovery)
+                    .accessibilityIdentifier("finish-recovery")
+                    .focused($keyboardFocus, equals: .finish)
+            }
+            .padding(16)
+            .background(.regularMaterial)
+        }
+        .accessibilityIdentifier("recovery-modal")
+        .onAppear {
+            keyboardFocus = sourceAvailable ? .finish : .retry
+            titleFocused = true
+        }
     }
 }
 
