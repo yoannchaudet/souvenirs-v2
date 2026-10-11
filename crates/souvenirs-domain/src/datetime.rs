@@ -1,7 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use time::{Date, Duration, PrimitiveDateTime, Time, UtcOffset};
+
+use crate::source::CameraIdentity;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DateTimeSource {
@@ -133,11 +135,121 @@ pub enum ConfirmationReason {
     MissingClock,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ConfirmationRequirement {
+    AcceptCandidate,
+    ChooseLocalOrUtc,
+    SelectUtcOffset,
+    AssignClock,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ConfirmationBatchKey {
+    pub source: DateTimeSource,
+    pub requirement: ConfirmationRequirement,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingDateTime {
     pub candidate: DateTimeCandidate,
     pub reason: ConfirmationReason,
     pub disagreements: Vec<DateTimeCandidate>,
+}
+
+impl PendingDateTime {
+    pub fn batch_key(&self) -> Result<ConfirmationBatchKey, DateTimeError> {
+        let requirement = match &self.candidate.value {
+            DateTimeValue::Local(_) | DateTimeValue::AmbiguousContainer(_) => match self.reason {
+                ConfirmationReason::AmbiguousMetadata => ConfirmationRequirement::ChooseLocalOrUtc,
+                ConfirmationReason::Proposal => ConfirmationRequirement::AcceptCandidate,
+                ConfirmationReason::UtcInterpretation | ConfirmationReason::MissingClock => {
+                    return Err(DateTimeError::InvalidPendingDateTime)
+                }
+            },
+            DateTimeValue::LocalWithOffset { .. } => match self.reason {
+                ConfirmationReason::AmbiguousMetadata | ConfirmationReason::Proposal => {
+                    ConfirmationRequirement::AcceptCandidate
+                }
+                ConfirmationReason::UtcInterpretation | ConfirmationReason::MissingClock => {
+                    return Err(DateTimeError::InvalidPendingDateTime)
+                }
+            },
+            DateTimeValue::UtcWithoutLocalContext(_) => match self.reason {
+                ConfirmationReason::UtcInterpretation => ConfirmationRequirement::SelectUtcOffset,
+                ConfirmationReason::AmbiguousMetadata
+                | ConfirmationReason::Proposal
+                | ConfirmationReason::MissingClock => {
+                    return Err(DateTimeError::InvalidPendingDateTime)
+                }
+            },
+            DateTimeValue::DateOnly(_) => match self.reason {
+                ConfirmationReason::MissingClock => ConfirmationRequirement::AssignClock,
+                ConfirmationReason::AmbiguousMetadata
+                | ConfirmationReason::Proposal
+                | ConfirmationReason::UtcInterpretation => {
+                    return Err(DateTimeError::InvalidPendingDateTime)
+                }
+            },
+        };
+        Ok(ConfirmationBatchKey {
+            source: self.candidate.source,
+            requirement,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingConfirmationItem {
+    pub item_id: String,
+    pub pending: PendingDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingConfirmationBatch {
+    pub key: ConfirmationBatchKey,
+    pub items: Vec<PendingConfirmationItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedDateTimeItem {
+    pub item_id: String,
+    pub accepted: AcceptedDateTime,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct CameraCorrectionKey {
+    pub make: String,
+    pub model: String,
+    pub serial_number: String,
+}
+
+impl CameraCorrectionKey {
+    pub fn from_identity(identity: &CameraIdentity) -> Option<Self> {
+        let make = identity.make.as_ref().filter(|value| !value.is_empty())?;
+        let model = identity.model.as_ref().filter(|value| !value.is_empty())?;
+        let serial_number = identity
+            .serial_number
+            .as_ref()
+            .filter(|value| !value.is_empty())?;
+        Some(Self {
+            make: make.clone(),
+            model: model.clone(),
+            serial_number: serial_number.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CameraCorrectionItem {
+    pub item_id: String,
+    pub camera: CameraIdentity,
+    pub accepted: AcceptedDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CameraCorrectionBatch {
+    pub key: CameraCorrectionKey,
+    pub items: Vec<AcceptedDateTimeItem>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +266,110 @@ pub enum DateTimeResolution {
 pub enum ItemDateTimeDecision {
     Included(DateTimeResolution),
     Excluded { reason: Option<String> },
+}
+
+pub fn pending_confirmation_batches(
+    items: impl IntoIterator<Item = PendingConfirmationItem>,
+) -> Result<Vec<PendingConfirmationBatch>, DateTimeError> {
+    let mut item_ids = BTreeSet::new();
+    let mut batches = BTreeMap::<_, Vec<_>>::new();
+    for item in items {
+        if !item_ids.insert(item.item_id.clone()) {
+            return Err(DateTimeError::DuplicateItemId(item.item_id));
+        }
+        batches
+            .entry(item.pending.batch_key()?)
+            .or_default()
+            .push(item);
+    }
+    Ok(batches
+        .into_iter()
+        .map(|(key, mut items)| {
+            items.sort_by(|left, right| left.item_id.cmp(&right.item_id));
+            PendingConfirmationBatch { key, items }
+        })
+        .collect())
+}
+
+pub fn confirm_batch(
+    batch: PendingConfirmationBatch,
+    decision: ConfirmationDecision,
+) -> Result<Vec<AcceptedDateTimeItem>, DateTimeError> {
+    batch
+        .items
+        .into_iter()
+        .map(|item| {
+            if item.pending.batch_key()? != batch.key {
+                return Err(DateTimeError::MismatchedBatchKey(item.item_id));
+            }
+            Ok(AcceptedDateTimeItem {
+                item_id: item.item_id,
+                accepted: confirm_candidate(item.pending, decision)?,
+            })
+        })
+        .collect()
+}
+
+pub fn camera_correction_batches(
+    items: impl IntoIterator<Item = CameraCorrectionItem>,
+) -> Result<Vec<CameraCorrectionBatch>, DateTimeError> {
+    let mut item_ids = BTreeSet::new();
+    let mut batches = BTreeMap::<_, Vec<_>>::new();
+    for item in items {
+        if !item_ids.insert(item.item_id.clone()) {
+            return Err(DateTimeError::DuplicateItemId(item.item_id));
+        }
+        let Some(key) = CameraCorrectionKey::from_identity(&item.camera) else {
+            continue;
+        };
+        batches.entry(key).or_default().push(AcceptedDateTimeItem {
+            item_id: item.item_id,
+            accepted: item.accepted,
+        });
+    }
+    Ok(batches
+        .into_iter()
+        .map(|(key, mut items)| {
+            items.sort_by(|left, right| left.item_id.cmp(&right.item_id));
+            CameraCorrectionBatch { key, items }
+        })
+        .collect())
+}
+
+pub fn apply_clock_correction(
+    batch: CameraCorrectionBatch,
+    offset: Duration,
+) -> Result<Vec<AcceptedDateTimeItem>, DateTimeError> {
+    batch
+        .items
+        .into_iter()
+        .map(|item| {
+            Ok(AcceptedDateTimeItem {
+                item_id: item.item_id,
+                accepted: item.accepted.apply_clock_offset(offset)?,
+            })
+        })
+        .collect()
+}
+
+pub fn assign_datetime_batch(
+    item_ids: impl IntoIterator<Item = String>,
+    wall_clock: PrimitiveDateTime,
+) -> Result<Vec<AcceptedDateTimeItem>, DateTimeError> {
+    let mut item_ids = item_ids.into_iter().collect::<Vec<_>>();
+    item_ids.sort();
+    for pair in item_ids.windows(2) {
+        if pair[0] == pair[1] {
+            return Err(DateTimeError::DuplicateItemId(pair[0].clone()));
+        }
+    }
+    Ok(item_ids
+        .into_iter()
+        .map(|item_id| AcceptedDateTimeItem {
+            item_id,
+            accepted: AcceptedDateTime::assigned(wall_clock),
+        })
+        .collect())
 }
 
 pub fn resolve_datetime(
@@ -325,7 +541,11 @@ fn values_disagree(left: &DateTimeValue, right: &DateTimeValue) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DateTimeError {
     ClockCorrectionOutOfRange,
+    DuplicateItemId(String),
     InvalidConfirmation,
+    InvalidPendingDateTime,
+    MismatchedBatchKey(String),
+    UnknownItemId(String),
     UtcInterpretationOutOfRange,
 }
 
@@ -335,8 +555,29 @@ impl fmt::Display for DateTimeError {
             Self::ClockCorrectionOutOfRange => {
                 formatter.write_str("clock correction exceeds the supported datetime range")
             }
+            Self::DuplicateItemId(item_id) => {
+                write!(
+                    formatter,
+                    "datetime batch contains duplicate item '{item_id}'"
+                )
+            }
             Self::InvalidConfirmation => {
                 formatter.write_str("confirmation does not match the pending datetime value")
+            }
+            Self::InvalidPendingDateTime => {
+                formatter.write_str("pending datetime reason does not match its candidate value")
+            }
+            Self::MismatchedBatchKey(item_id) => {
+                write!(
+                    formatter,
+                    "datetime item '{item_id}' does not match its confirmation batch key"
+                )
+            }
+            Self::UnknownItemId(item_id) => {
+                write!(
+                    formatter,
+                    "datetime batch contains unknown item '{item_id}'"
+                )
             }
             Self::UtcInterpretationOutOfRange => {
                 formatter.write_str("UTC interpretation exceeds the supported datetime range")
@@ -361,6 +602,38 @@ mod tests {
 
     fn candidate(source: DateTimeSource, value: DateTimeValue) -> DateTimeCandidate {
         DateTimeCandidate { source, value }
+    }
+
+    fn pending_item(
+        item_id: &str,
+        source: DateTimeSource,
+        value: DateTimeValue,
+    ) -> PendingConfirmationItem {
+        let DateTimeResolution::NeedsConfirmation(pending) =
+            resolve_datetime([candidate(source, value)])
+        else {
+            panic!("test candidate should require confirmation");
+        };
+        PendingConfirmationItem {
+            item_id: item_id.into(),
+            pending,
+        }
+    }
+
+    fn camera(make: Option<&str>, model: Option<&str>, serial: Option<&str>) -> CameraIdentity {
+        CameraIdentity {
+            make: make.map(str::to_owned),
+            model: model.map(str::to_owned),
+            serial_number: serial.map(str::to_owned),
+        }
+    }
+
+    fn accepted(source: DateTimeSource, value: PrimitiveDateTime) -> AcceptedDateTime {
+        AcceptedDateTime {
+            wall_clock: value,
+            source: AcceptedDateTimeSource::Metadata(source),
+            recorded_offset: None,
+        }
     }
 
     #[test]
@@ -641,5 +914,252 @@ mod tests {
 
         assert_eq!(accepted.wall_clock, datetime(2, 0));
         assert_eq!(accepted.recorded_offset, Some(offset));
+    }
+
+    #[test]
+    fn pending_confirmations_group_by_source_and_required_interpretation() {
+        let items = vec![
+            pending_item(
+                "filename",
+                DateTimeSource::FilenamePattern,
+                DateTimeValue::Local(datetime(5, 0)),
+            ),
+            pending_item(
+                "container-local",
+                DateTimeSource::ContainerCreationTime,
+                DateTimeValue::Local(datetime(6, 0)),
+            ),
+            pending_item(
+                "container-ambiguous",
+                DateTimeSource::ContainerCreationTime,
+                DateTimeValue::AmbiguousContainer(datetime(7, 0)),
+            ),
+            pending_item(
+                "clockless",
+                DateTimeSource::FilenamePattern,
+                DateTimeValue::DateOnly(datetime(8, 0).date()),
+            ),
+        ];
+        let mut reversed = items.clone();
+        reversed.reverse();
+
+        let forward = pending_confirmation_batches(items).unwrap();
+        let reverse = pending_confirmation_batches(reversed).unwrap();
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 3);
+        assert_eq!(
+            forward[0].key,
+            ConfirmationBatchKey {
+                source: DateTimeSource::ContainerCreationTime,
+                requirement: ConfirmationRequirement::ChooseLocalOrUtc,
+            }
+        );
+        assert_eq!(
+            forward[0]
+                .items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["container-ambiguous", "container-local"]
+        );
+    }
+
+    #[test]
+    fn confirmation_batches_return_sorted_per_item_provenance() {
+        let batch = pending_confirmation_batches([
+            pending_item(
+                "b",
+                DateTimeSource::FilenamePattern,
+                DateTimeValue::Local(datetime(6, 0)),
+            ),
+            pending_item(
+                "a",
+                DateTimeSource::FilenamePattern,
+                DateTimeValue::Local(datetime(5, 0)),
+            ),
+        ])
+        .unwrap()
+        .remove(0);
+
+        let confirmed = confirm_batch(batch, ConfirmationDecision::AcceptCandidate).unwrap();
+
+        assert_eq!(
+            confirmed
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(confirmed.iter().all(|item| {
+            item.accepted.source
+                == AcceptedDateTimeSource::Confirmed(DateTimeSource::FilenamePattern)
+        }));
+    }
+
+    #[test]
+    fn camera_correction_batches_require_complete_nonempty_identities() {
+        let accepted = accepted(DateTimeSource::ExifDateTimeOriginal, datetime(5, 0));
+        let items = [
+            CameraCorrectionItem {
+                item_id: "complete".into(),
+                camera: camera(Some("Canon"), Some("R5"), Some("123")),
+                accepted: accepted.clone(),
+            },
+            CameraCorrectionItem {
+                item_id: "missing-serial".into(),
+                camera: camera(Some("Canon"), Some("R5"), None),
+                accepted: accepted.clone(),
+            },
+            CameraCorrectionItem {
+                item_id: "empty-model".into(),
+                camera: camera(Some("Canon"), Some(""), Some("456")),
+                accepted,
+            },
+        ];
+
+        let batches = camera_correction_batches(items).unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items[0].item_id, "complete");
+        assert_eq!(
+            batches[0].key,
+            CameraCorrectionKey {
+                make: "Canon".into(),
+                model: "R5".into(),
+                serial_number: "123".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn camera_corrections_are_input_order_independent_and_can_cross_dates() {
+        let before_midnight = Date::from_calendar_date(2024, Month::July, 9)
+            .unwrap()
+            .with_hms(23, 45, 0)
+            .unwrap();
+        let after_midnight = Date::from_calendar_date(2024, Month::July, 10)
+            .unwrap()
+            .with_hms(0, 15, 0)
+            .unwrap();
+        let items = vec![
+            CameraCorrectionItem {
+                item_id: "later".into(),
+                camera: camera(Some("Canon"), Some("R5"), Some("123")),
+                accepted: accepted(DateTimeSource::ExifDateTimeOriginal, after_midnight),
+            },
+            CameraCorrectionItem {
+                item_id: "earlier".into(),
+                camera: camera(Some("Canon"), Some("R5"), Some("123")),
+                accepted: accepted(DateTimeSource::ExifDateTimeOriginal, before_midnight),
+            },
+        ];
+        let mut reversed = items.clone();
+        reversed.reverse();
+
+        let forward = camera_correction_batches(items).unwrap();
+        let reverse = camera_correction_batches(reversed).unwrap();
+        assert_eq!(forward, reverse);
+
+        let corrected =
+            apply_clock_correction(forward.into_iter().next().unwrap(), Duration::hours(1))
+                .unwrap();
+        assert_eq!(
+            corrected[0].accepted.wall_clock,
+            Date::from_calendar_date(2024, Month::July, 10)
+                .unwrap()
+                .with_hms(0, 45, 0)
+                .unwrap()
+        );
+        assert!(matches!(
+            &corrected[0].accepted.source,
+            AcceptedDateTimeSource::Corrected {
+                original,
+                offset
+            } if original.as_ref()
+                == &AcceptedDateTimeSource::Metadata(DateTimeSource::ExifDateTimeOriginal)
+                && *offset == Duration::hours(1)
+        ));
+    }
+
+    #[test]
+    fn explicit_assignment_is_sorted_and_preserves_user_provenance() {
+        let assigned = assign_datetime_batch(
+            ["selected-b".to_owned(), "selected-a".to_owned()],
+            datetime(5, 900_000_000),
+        )
+        .unwrap();
+
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["selected-a", "selected-b"]
+        );
+        assert!(assigned.iter().all(|item| {
+            item.accepted.wall_clock == datetime(5, 0)
+                && item.accepted.source == AcceptedDateTimeSource::UserAssigned
+        }));
+    }
+
+    #[test]
+    fn duplicate_item_ids_are_rejected_before_batching() {
+        let duplicate = pending_item(
+            "same",
+            DateTimeSource::FilenamePattern,
+            DateTimeValue::Local(datetime(5, 0)),
+        );
+
+        assert!(matches!(
+            pending_confirmation_batches([duplicate.clone(), duplicate]),
+            Err(DateTimeError::DuplicateItemId(item_id)) if item_id == "same"
+        ));
+        assert!(matches!(
+            assign_datetime_batch(["same".to_owned(), "same".to_owned()], datetime(5, 0)),
+            Err(DateTimeError::DuplicateItemId(item_id)) if item_id == "same"
+        ));
+    }
+
+    #[test]
+    fn offset_container_values_form_explicit_acceptance_batches() {
+        let offset = UtcOffset::from_hms(2, 0, 0).unwrap();
+        let item = pending_item(
+            "offset-container",
+            DateTimeSource::ContainerCreationTime,
+            DateTimeValue::LocalWithOffset {
+                local: datetime(5, 0),
+                offset,
+            },
+        );
+
+        let batch = pending_confirmation_batches([item]).unwrap().remove(0);
+
+        assert_eq!(
+            batch.key.requirement,
+            ConfirmationRequirement::AcceptCandidate
+        );
+        let accepted = confirm_batch(batch, ConfirmationDecision::AcceptCandidate).unwrap();
+        assert_eq!(accepted[0].accepted.recorded_offset, Some(offset));
+    }
+
+    #[test]
+    fn invalid_pending_reason_and_value_pairs_are_rejected() {
+        let invalid = PendingConfirmationItem {
+            item_id: "invalid".into(),
+            pending: PendingDateTime {
+                candidate: candidate(
+                    DateTimeSource::FilenamePattern,
+                    DateTimeValue::DateOnly(datetime(5, 0).date()),
+                ),
+                reason: ConfirmationReason::Proposal,
+                disagreements: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            pending_confirmation_batches([invalid]),
+            Err(DateTimeError::InvalidPendingDateTime)
+        );
     }
 }

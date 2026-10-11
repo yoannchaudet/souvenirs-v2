@@ -2,7 +2,7 @@
 
 mod execution;
 mod planning;
-mod source_datetime;
+pub mod source_datetime;
 
 pub use execution::{
     ImportCancellation, ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest,
@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use souvenirs_domain::catalog::{year_directory, DatedCollectionRange};
 use souvenirs_domain::datetime::{
-    confirm_candidate, AcceptedDateTime, AcceptedDateTimeSource, ConfirmationDecision,
-    ConfirmationReason, DateTimeResolution, DateTimeSource,
+    confirm_batch, AcceptedDateTime, AcceptedDateTimeSource, ConfirmationDecision,
+    ConfirmationRequirement, DateTimeResolution, DateTimeSource,
 };
 use souvenirs_domain::names::CatalogLabel;
 use souvenirs_domain::relationships::{
@@ -33,7 +33,7 @@ use souvenirs_storage::{
     CatalogInitializationError, CatalogLayout, DurableTransition, OperationRecord,
     StorageCapabilities, StorageCapabilityError, WriteSuitability, FORMAT_VERSION,
 };
-use time::{Date, UtcOffset};
+use time::Date;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogIntent {
@@ -491,6 +491,34 @@ pub(crate) fn inspect_source(
         .collect::<BTreeMap<_, _>>();
     let relationships = resolve_directory_relationships(&source_files);
     let resolved = source_datetime::assemble_source_datetimes(&source_files, relationships);
+    let confirmed_by_item = if decision.is_some() {
+        let mut confirmed = BTreeMap::new();
+        for batch in source_datetime::source_confirmation_batches(&resolved.items)
+            .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?
+        {
+            let confirmation = match batch.key.requirement {
+                ConfirmationRequirement::AcceptCandidate
+                | ConfirmationRequirement::ChooseLocalOrUtc => {
+                    Some(ConfirmationDecision::AcceptCandidate)
+                }
+                ConfirmationRequirement::SelectUtcOffset => {
+                    Some(ConfirmationDecision::InterpretUtc(time::UtcOffset::UTC))
+                }
+                ConfirmationRequirement::AssignClock => None,
+            };
+            let Some(confirmation) = confirmation else {
+                continue;
+            };
+            for item in confirm_batch(batch, confirmation)
+                .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?
+            {
+                confirmed.insert(item.item_id, item.accepted);
+            }
+        }
+        confirmed
+    } else {
+        BTreeMap::new()
+    };
     let unhandled_ids = resolved
         .findings
         .iter()
@@ -529,7 +557,7 @@ pub(crate) fn inspect_source(
             DateTimeResolution::NeedsConfirmation(pending) => {
                 let source = import_date_source(pending.candidate.source);
                 if decision.is_some() {
-                    let accepted = confirm_pending(pending).ok();
+                    let accepted = confirmed_by_item.get(item.primary.as_str()).cloned();
                     let state = if accepted.is_some() {
                         ImportDateState::Accepted
                     } else {
@@ -657,20 +685,6 @@ fn unhandled_file_id(finding: &RelationshipFinding) -> Option<&SourceFileId> {
     }
 }
 
-fn confirm_pending(
-    pending: souvenirs_domain::datetime::PendingDateTime,
-) -> Result<AcceptedDateTime, souvenirs_domain::datetime::DateTimeError> {
-    let decision = match pending.reason {
-        ConfirmationReason::UtcInterpretation => ConfirmationDecision::InterpretUtc(UtcOffset::UTC),
-        ConfirmationReason::MissingClock => {
-            return Err(souvenirs_domain::datetime::DateTimeError::InvalidConfirmation)
-        }
-        ConfirmationReason::AmbiguousMetadata | ConfirmationReason::Proposal => {
-            ConfirmationDecision::AcceptCandidate
-        }
-    };
-    confirm_candidate(pending, decision)
-}
 pub(crate) fn accepted_source(source: &AcceptedDateTimeSource) -> ImportDateSource {
     match source {
         AcceptedDateTimeSource::Metadata(source) | AcceptedDateTimeSource::Confirmed(source) => {

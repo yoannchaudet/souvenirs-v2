@@ -1,24 +1,29 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use souvenirs_domain::datetime::{resolve_datetime, DateTimeResolution};
+use souvenirs_domain::datetime::{
+    camera_correction_batches, pending_confirmation_batches, resolve_datetime,
+    AcceptedDateTimeItem, CameraCorrectionBatch, CameraCorrectionItem, DateTimeError,
+    DateTimeResolution, PendingConfirmationBatch, PendingConfirmationItem,
+};
 use souvenirs_domain::relationships::{
     LogicalItem, RelationshipFinding, RelationshipResolution, RelationshipStatus,
 };
-use souvenirs_domain::source::{SourceFile, SourceFileId};
+use souvenirs_domain::source::{CameraIdentity, SourceFile, SourceFileId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SourceDateItem {
-    pub(crate) logical_item: LogicalItem,
-    pub(crate) datetime: Option<DateTimeResolution>,
+pub struct SourceDateItem {
+    pub logical_item: LogicalItem,
+    pub camera: CameraIdentity,
+    pub datetime: Option<DateTimeResolution>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SourceDateResolution {
-    pub(crate) items: Vec<SourceDateItem>,
-    pub(crate) findings: Vec<RelationshipFinding>,
+pub struct SourceDateResolution {
+    pub items: Vec<SourceDateItem>,
+    pub findings: Vec<RelationshipFinding>,
 }
 
-pub(crate) fn assemble_source_datetimes(
+pub fn assemble_source_datetimes(
     files: &[SourceFile],
     relationships: RelationshipResolution,
 ) -> SourceDateResolution {
@@ -31,6 +36,7 @@ pub(crate) fn assemble_source_datetimes(
         .into_iter()
         .map(|logical_item| SourceDateItem {
             datetime: resolve_item_datetime(&logical_item, &by_id),
+            camera: by_id[&logical_item.primary].metadata.camera.clone(),
             logical_item,
         })
         .collect();
@@ -53,11 +59,67 @@ fn resolve_item_datetime(
     })
 }
 
+pub fn source_confirmation_batches(
+    items: &[SourceDateItem],
+) -> Result<Vec<PendingConfirmationBatch>, DateTimeError> {
+    pending_confirmation_batches(items.iter().filter_map(|item| {
+        let Some(DateTimeResolution::NeedsConfirmation(pending)) = &item.datetime else {
+            return None;
+        };
+        Some(PendingConfirmationItem {
+            item_id: item.logical_item.primary.as_str().to_owned(),
+            pending: pending.clone(),
+        })
+    }))
+}
+
+pub fn source_camera_correction_batches(
+    items: &[SourceDateItem],
+    confirmed: impl IntoIterator<Item = AcceptedDateTimeItem>,
+) -> Result<Vec<CameraCorrectionBatch>, DateTimeError> {
+    let mut confirmed_by_item = BTreeMap::new();
+    for item in confirmed {
+        if confirmed_by_item
+            .insert(item.item_id.clone(), item.accepted)
+            .is_some()
+        {
+            return Err(DateTimeError::DuplicateItemId(item.item_id));
+        }
+    }
+    let known_item_ids = items
+        .iter()
+        .map(|item| item.logical_item.primary.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(item_id) = confirmed_by_item
+        .keys()
+        .find(|item_id| !known_item_ids.contains(item_id.as_str()))
+    {
+        return Err(DateTimeError::UnknownItemId(item_id.clone()));
+    }
+    camera_correction_batches(items.iter().filter_map(|item| {
+        let item_id = item.logical_item.primary.as_str();
+        let accepted = match confirmed_by_item.get(item_id) {
+            Some(accepted) => accepted,
+            None => {
+                let Some(DateTimeResolution::Accepted { accepted, .. }) = &item.datetime else {
+                    return None;
+                };
+                accepted
+            }
+        };
+        Some(CameraCorrectionItem {
+            item_id: item_id.to_owned(),
+            camera: item.camera.clone(),
+            accepted: accepted.clone(),
+        })
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use souvenirs_domain::datetime::{
-        AcceptedDateTimeSource, ConfirmationReason, DateTimeCandidate, DateTimeResolution,
-        DateTimeSource, DateTimeValue,
+        AcceptedDateTimeSource, ConfirmationReason, ConfirmationRequirement, DateTimeCandidate,
+        DateTimeResolution, DateTimeSource, DateTimeValue,
     };
     use souvenirs_domain::source::{
         CameraIdentity, OriginalRole, SidecarNamingForm, SourceFile, SourceFileId, SourceFileKind,
@@ -65,7 +127,9 @@ mod tests {
     };
     use time::macros::datetime;
 
-    use super::assemble_source_datetimes;
+    use super::{
+        assemble_source_datetimes, source_camera_correction_batches, source_confirmation_batches,
+    };
 
     #[test]
     fn resolves_candidates_only_after_sidecar_ownership() {
@@ -175,6 +239,150 @@ mod tests {
             &result.items[0].datetime,
             Some(DateTimeResolution::NeedsConfirmation(pending))
                 if pending.candidate.source == DateTimeSource::FilenamePattern
+        ));
+    }
+
+    #[test]
+    fn application_batches_pending_items_by_primary_item_id() {
+        let first = original(
+            "z-first.jpg",
+            vec![candidate(
+                DateTimeSource::FilenamePattern,
+                DateTimeValue::Local(datetime!(2024-02-03 04:05:06)),
+            )],
+        );
+        let second = original(
+            "a-second.jpg",
+            vec![candidate(
+                DateTimeSource::FilenamePattern,
+                DateTimeValue::Local(datetime!(2024-02-03 04:05:06)),
+            )],
+        );
+        let files = [first, second];
+        let relationships =
+            souvenirs_domain::relationships::resolve_directory_relationships(&files);
+        let result = assemble_source_datetimes(&files, relationships);
+        let mut reversed = result.items.clone();
+        reversed.reverse();
+
+        let forward = source_confirmation_batches(&result.items).unwrap();
+        let reverse = source_confirmation_batches(&reversed).unwrap();
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(
+            forward[0].key.requirement,
+            ConfirmationRequirement::AcceptCandidate
+        );
+        assert_eq!(
+            forward[0]
+                .items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-second.jpg", "z-first.jpg"]
+        );
+    }
+
+    #[test]
+    fn application_uses_only_the_primary_complete_camera_identity() {
+        let mut complete = original(
+            "complete.jpg",
+            vec![candidate(
+                DateTimeSource::ExifDateTimeOriginal,
+                DateTimeValue::Local(datetime!(2024-02-03 04:05:06)),
+            )],
+        );
+        complete.metadata.camera = CameraIdentity {
+            make: Some("Canon".into()),
+            model: Some("R5".into()),
+            serial_number: Some("123".into()),
+        };
+        let mut incomplete = original(
+            "incomplete.jpg",
+            vec![candidate(
+                DateTimeSource::ExifDateTimeOriginal,
+                DateTimeValue::Local(datetime!(2024-02-03 04:05:06)),
+            )],
+        );
+        incomplete.metadata.camera = CameraIdentity {
+            make: Some("Canon".into()),
+            model: Some("R5".into()),
+            serial_number: None,
+        };
+        let files = [incomplete, complete];
+        let relationships =
+            souvenirs_domain::relationships::resolve_directory_relationships(&files);
+        let result = assemble_source_datetimes(&files, relationships);
+
+        let batches = source_camera_correction_batches(&result.items, std::iter::empty()).unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items[0].item_id, "complete.jpg");
+    }
+
+    #[test]
+    fn confirmed_items_join_camera_correction_batches() {
+        let mut source = original(
+            "confirmed.jpg",
+            vec![candidate(
+                DateTimeSource::FilenamePattern,
+                DateTimeValue::Local(datetime!(2024-02-03 04:05:06)),
+            )],
+        );
+        source.metadata.camera = CameraIdentity {
+            make: Some("Canon".into()),
+            model: Some("R5".into()),
+            serial_number: Some("123".into()),
+        };
+        let files = [source];
+        let relationships =
+            souvenirs_domain::relationships::resolve_directory_relationships(&files);
+        let result = assemble_source_datetimes(&files, relationships);
+        let confirmation = souvenirs_domain::datetime::confirm_batch(
+            source_confirmation_batches(&result.items)
+                .unwrap()
+                .remove(0),
+            souvenirs_domain::datetime::ConfirmationDecision::AcceptCandidate,
+        )
+        .unwrap();
+
+        let batches = source_camera_correction_batches(&result.items, confirmation).unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items[0].item_id, "confirmed.jpg");
+        assert_eq!(
+            batches[0].items[0].accepted.source,
+            AcceptedDateTimeSource::Confirmed(DateTimeSource::FilenamePattern)
+        );
+    }
+
+    #[test]
+    fn camera_batches_reject_confirmations_for_unknown_items() {
+        let files = [original(
+            "known.jpg",
+            vec![candidate(
+                DateTimeSource::ExifDateTimeOriginal,
+                DateTimeValue::Local(datetime!(2024-02-03 04:05:06)),
+            )],
+        )];
+        let relationships =
+            souvenirs_domain::relationships::resolve_directory_relationships(&files);
+        let result = assemble_source_datetimes(&files, relationships);
+        let accepted = souvenirs_domain::datetime::AcceptedDateTime::assigned(datetime!(
+            2024-02-03 04:05:06
+        ));
+
+        assert!(matches!(
+            source_camera_correction_batches(
+                &result.items,
+                [souvenirs_domain::datetime::AcceptedDateTimeItem {
+                    item_id: "unknown.jpg".into(),
+                    accepted,
+                }],
+            ),
+            Err(souvenirs_domain::datetime::DateTimeError::UnknownItemId(item_id))
+                if item_id == "unknown.jpg"
         ));
     }
 
