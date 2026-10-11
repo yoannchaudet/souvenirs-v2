@@ -61,6 +61,13 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
         "--catalog",
         catalog.to_str().unwrap(),
     ]));
+    fs::write(
+        catalog
+            .join(".souvenirs/journal")
+            .join("._20260101-000000-import.jsonl"),
+        b"not a journal",
+    )
+    .unwrap();
 
     let inspected = json_stdout(&run(&[
         "catalog",
@@ -69,6 +76,7 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
         catalog.to_str().unwrap(),
     ]));
     assert_eq!(inspected["command"], "catalog.inspect");
+    assert_eq!(inspected["result"]["journal_count"], 1);
     assert_eq!(inspected["result"]["unfinished_operation_count"], 0);
     assert_eq!(inspected["result"]["managed_file_count"], 0);
 

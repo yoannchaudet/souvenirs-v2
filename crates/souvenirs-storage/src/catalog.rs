@@ -14,8 +14,8 @@ use crate::copy::{publish_path_exclusively, remove_apple_double_sidecar, Publish
 use crate::durability::{sync_directory, sync_file};
 use crate::lock::SystemLockEnvironment;
 use crate::operation::{
-    append_operation_record, read_parsed_operation_records, DurableTransition, Failpoint,
-    OperationOutcome, OperationRecord,
+    append_operation_record, is_operation_journal_file_name, read_parsed_operation_records,
+    DurableTransition, Failpoint, OperationOutcome, OperationRecord,
 };
 use crate::{CatalogLock, LockError, OperationJournalError};
 
@@ -687,11 +687,12 @@ fn initialization_journal_path(
                     )
                 })?
                 .path();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| !name.starts_with("._") && name.ends_with("-initialize.jsonl"))
-            {
+            if path.file_name().is_some_and(|name| {
+                is_operation_journal_file_name(name)
+                    && name
+                        .to_str()
+                        .is_some_and(|name| name.ends_with("-initialize.jsonl"))
+            }) {
                 if !regular_file_if_exists(&path)? {
                     return Err(CatalogInitializationError::PathConflict(path));
                 }
