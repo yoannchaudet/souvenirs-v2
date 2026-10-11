@@ -274,6 +274,158 @@ pub fn catalog_duplicate_findings<E>(
     Ok(findings)
 }
 
+pub fn apply_duplicate_review(
+    items: &mut [PlanItem],
+    mut catalog_duplicates: Vec<CatalogDuplicate>,
+    choices: DuplicateChoices,
+) -> Result<DuplicateReview, PlanError> {
+    for duplicate in &mut catalog_duplicates {
+        duplicate.catalog_paths.sort();
+        duplicate.catalog_paths.dedup();
+    }
+    catalog_duplicates.sort_by(|left, right| left.source_file_id.cmp(&right.source_file_id));
+
+    let mut evidence = BTreeMap::new();
+    let mut source_groups = BTreeMap::<ContentDigest, Vec<String>>::new();
+    for item in items.iter() {
+        let transfers_item = matches!(item.disposition, PlanItemDisposition::Transfer);
+        for file in &item.files {
+            if file.role == PlanFileRole::Sidecar {
+                continue;
+            }
+            evidence.insert(
+                file.source_file_id.clone(),
+                (
+                    file.source_path.clone(),
+                    item.accepted_datetime.clone(),
+                    transfers_item,
+                ),
+            );
+            source_groups
+                .entry(file.digest.clone())
+                .or_default()
+                .push(file.source_file_id.clone());
+        }
+    }
+    source_groups.retain(|_, source_file_ids| source_file_ids.len() > 1);
+    for source_file_ids in source_groups.values_mut() {
+        source_file_ids.sort();
+    }
+    let source_duplicate_groups = source_groups
+        .iter()
+        .map(|(digest, source_file_ids)| SourceDuplicateGroup {
+            digest: digest.clone(),
+            source_file_ids: source_file_ids.clone(),
+        })
+        .collect::<Vec<_>>();
+    let catalog_by_source = catalog_duplicates
+        .iter()
+        .map(|duplicate| {
+            (
+                duplicate.source_file_id.as_str(),
+                duplicate.catalog_paths.first(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let selected_by_digest = source_groups
+        .iter()
+        .map(|(digest, source_file_ids)| {
+            let selected = source_file_ids
+                .iter()
+                .filter(|source_file_id| {
+                    let (_, _, transfers_item) = &evidence[source_file_id.as_str()];
+                    *transfers_item
+                        && (choices.catalog != CatalogDuplicateChoice::Skip
+                            || !catalog_by_source.contains_key(source_file_id.as_str()))
+                })
+                .min_by_key(|source_file_id| {
+                    let (source_path, accepted_datetime, _) = &evidence[source_file_id.as_str()];
+                    (
+                        accepted_datetime.is_none(),
+                        accepted_datetime.as_ref().map_or((0, 0, 0, 0, 0), |value| {
+                            (
+                                value.year,
+                                value.ordinal,
+                                value.hour,
+                                value.minute,
+                                value.second,
+                            )
+                        }),
+                        source_path,
+                        source_file_id.as_str(),
+                    )
+                })
+                .cloned();
+            (digest.clone(), selected)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for item in items.iter_mut() {
+        let transfers_item = matches!(item.disposition, PlanItemDisposition::Transfer);
+        for file in &mut item.files {
+            file.duplicate_disposition =
+                Some(if file.role == PlanFileRole::Sidecar || !transfers_item {
+                    DuplicateDisposition::Transfer
+                } else if choices.catalog == CatalogDuplicateChoice::Skip {
+                    if let Some(Some(catalog_path)) =
+                        catalog_by_source.get(file.source_file_id.as_str())
+                    {
+                        DuplicateDisposition::RetainCatalogDuplicate {
+                            catalog_path: (*catalog_path).clone(),
+                        }
+                    } else {
+                        source_duplicate_disposition(
+                            file,
+                            choices.source,
+                            &source_groups,
+                            &selected_by_digest,
+                        )?
+                    }
+                } else {
+                    source_duplicate_disposition(
+                        file,
+                        choices.source,
+                        &source_groups,
+                        &selected_by_digest,
+                    )?
+                });
+        }
+    }
+
+    Ok(DuplicateReview {
+        choices,
+        catalog_duplicates,
+        source_duplicate_groups,
+    })
+}
+
+fn source_duplicate_disposition(
+    file: &PlanFile,
+    choice: SourceDuplicateChoice,
+    source_groups: &BTreeMap<ContentDigest, Vec<String>>,
+    selected_by_digest: &BTreeMap<ContentDigest, Option<String>>,
+) -> Result<DuplicateDisposition, PlanError> {
+    if choice != SourceDuplicateChoice::OnePerDigest || !source_groups.contains_key(&file.digest) {
+        return Ok(DuplicateDisposition::Transfer);
+    }
+    let selected = selected_by_digest
+        .get(&file.digest)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            PlanError::InvalidDuplicateReview(format!(
+                "source duplicate group for '{}' has no transferable selection",
+                file.source_file_id
+            ))
+        })?;
+    if selected == &file.source_file_id {
+        Ok(DuplicateDisposition::Transfer)
+    } else {
+        Ok(DuplicateDisposition::RetainSourceDuplicate {
+            selected_source_file_id: selected.clone(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanDateTime {
@@ -998,6 +1150,7 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
     let mut source_ids = BTreeSet::new();
     let mut source_paths = BTreeSet::new();
     let mut plan_files = BTreeMap::new();
+    let mut copyable_files = BTreeMap::new();
     let mut transferable_files = BTreeMap::new();
     let mut ambiguous_sidecar_items = BTreeSet::new();
     for item in &document.items {
@@ -1134,10 +1287,16 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
                     )
             };
             if transfers_file {
-                transferable_files.insert(
+                copyable_files.insert(
                     file.source_file_id.clone(),
                     (file.digest.clone(), file.size_bytes, file.role),
                 );
+                if document.schema_version < 4 || file.role != PlanFileRole::Sidecar {
+                    transferable_files.insert(
+                        file.source_file_id.clone(),
+                        (file.digest.clone(), file.size_bytes, file.role),
+                    );
+                }
             }
         }
         if let Some(datetime) = &item.accepted_datetime {
@@ -1232,7 +1391,7 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
                 expected_digest,
                 size_bytes,
             } => {
-                let Some((file_digest, file_size, role)) = transferable_files.get(source_file_id)
+                let Some((file_digest, file_size, role)) = copyable_files.get(source_file_id)
                 else {
                     return Err(PlanError::SourceFileNotTransferable(source_file_id.clone()));
                 };

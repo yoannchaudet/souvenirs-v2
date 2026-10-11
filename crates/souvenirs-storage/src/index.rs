@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OpenFlags};
 use souvenirs_domain::names::PortableComponent;
-use souvenirs_domain::plan::ContentDigest;
+use souvenirs_domain::plan::{ContentDigest, ManifestFingerprint};
 
 use crate::durability::{sync_directory, sync_file};
 
-const INDEX_SCHEMA_VERSION: i64 = 1;
+const INDEX_SCHEMA_VERSION: i64 = 2;
 
 pub struct CatalogIndex {
     connection: Connection,
@@ -25,6 +25,7 @@ impl CatalogIndex {
     pub fn rebuild(
         index_path: impl AsRef<Path>,
         catalog_root: impl AsRef<Path>,
+        catalog_id: &str,
     ) -> Result<Self, CatalogIndexError> {
         let index_path = index_path.as_ref();
         let catalog_root = catalog_root.as_ref();
@@ -44,7 +45,7 @@ impl CatalogIndex {
                     source,
                 })?;
             initialize_schema(&connection, &rebuild_path)?;
-            let originals = read_catalog_originals(catalog_root)?;
+            let snapshot = read_catalog_snapshot(catalog_root)?;
             let transaction =
                 connection
                     .transaction()
@@ -59,7 +60,32 @@ impl CatalogIndex {
                         path: rebuild_path.clone(),
                         source,
                     })?;
-                for original in originals {
+                transaction
+                    .execute(
+                        "INSERT INTO catalog_metadata (catalog_id) VALUES (?1)",
+                        [catalog_id],
+                    )
+                    .map_err(|source| CatalogIndexError::Sqlite {
+                        path: rebuild_path.clone(),
+                        source,
+                    })?;
+                let mut insert_manifest = transaction
+                    .prepare("INSERT INTO catalog_manifests (path, digest) VALUES (?1, ?2)")
+                    .map_err(|source| CatalogIndexError::Sqlite {
+                        path: rebuild_path.clone(),
+                        source,
+                    })?;
+                for manifest in &snapshot.manifests {
+                    let path = serde_json::to_string(&manifest.path)
+                        .map_err(CatalogIndexError::SerializePath)?;
+                    insert_manifest
+                        .execute(params![path, manifest.digest.as_str()])
+                        .map_err(|source| CatalogIndexError::Sqlite {
+                            path: rebuild_path.clone(),
+                            source,
+                        })?;
+                }
+                for original in snapshot.originals {
                     let path = serde_json::to_string(&original.path)
                         .map_err(CatalogIndexError::SerializePath)?;
                     insert
@@ -93,7 +119,7 @@ impl CatalogIndex {
                 source,
             })?;
             replace_index(&rebuild_path, index_path)?;
-            Self::open(index_path)
+            Self::open(index_path, catalog_id)
         })();
         if result.is_err() {
             let _ = remove_if_present(&rebuild_path);
@@ -101,7 +127,10 @@ impl CatalogIndex {
         result
     }
 
-    pub fn open(index_path: impl AsRef<Path>) -> Result<Self, CatalogIndexError> {
+    pub fn open(
+        index_path: impl AsRef<Path>,
+        expected_catalog_id: &str,
+    ) -> Result<Self, CatalogIndexError> {
         let index_path = index_path.as_ref();
         let connection = Connection::open_with_flags(index_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|source| CatalogIndexError::Sqlite {
@@ -120,7 +149,43 @@ impl CatalogIndex {
                 version,
             });
         }
+        let catalog_id = connection
+            .query_row("SELECT catalog_id FROM catalog_metadata", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|source| CatalogIndexError::Sqlite {
+                path: index_path.to_path_buf(),
+                source,
+            })?;
+        if catalog_id != expected_catalog_id {
+            return Err(CatalogIndexError::CatalogIdentityMismatch {
+                path: index_path.to_path_buf(),
+                expected: expected_catalog_id.to_owned(),
+                actual: catalog_id,
+            });
+        }
         Ok(Self { connection })
+    }
+
+    pub fn manifest_snapshot(&self) -> Result<Vec<ManifestFingerprint>, CatalogIndexError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path, digest FROM catalog_manifests ORDER BY path")
+            .map_err(CatalogIndexError::Query)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(CatalogIndexError::Query)?;
+        rows.map(|row| {
+            let (path, digest) = row.map_err(CatalogIndexError::Query)?;
+            Ok(ManifestFingerprint {
+                path: serde_json::from_str(&path).map_err(CatalogIndexError::DeserializePath)?,
+                digest: ContentDigest::parse(digest)
+                    .map_err(|_| CatalogIndexError::InvalidIndexDigest)?,
+            })
+        })
+        .collect()
     }
 
     pub fn paths_for_digest(
@@ -158,7 +223,14 @@ fn initialize_schema(connection: &Connection, path: &Path) -> Result<(), Catalog
         .execute_batch(
             "
             PRAGMA journal_mode = OFF;
-            PRAGMA user_version = 1;
+            PRAGMA user_version = 2;
+            CREATE TABLE catalog_metadata (
+                catalog_id TEXT NOT NULL
+            );
+            CREATE TABLE catalog_manifests (
+                path TEXT NOT NULL PRIMARY KEY,
+                digest TEXT NOT NULL
+            );
             CREATE TABLE catalog_originals (
                 digest TEXT NOT NULL,
                 path TEXT NOT NULL UNIQUE
@@ -172,7 +244,56 @@ fn initialize_schema(connection: &Connection, path: &Path) -> Result<(), Catalog
         })
 }
 
-fn read_catalog_originals(root: &Path) -> Result<Vec<IndexedOriginal>, CatalogIndexError> {
+struct CatalogSnapshot {
+    manifests: Vec<ManifestFingerprint>,
+    originals: Vec<IndexedOriginal>,
+}
+
+pub fn snapshot_catalog_manifests(
+    root: impl AsRef<Path>,
+) -> Result<Vec<ManifestFingerprint>, CatalogIndexError> {
+    let root = root.as_ref();
+    let mut manifests = Vec::new();
+    for year in sorted_directories(root, true)? {
+        let year_name = portable_entry_name(&year)?;
+        for collection in sorted_directories(&year.path(), false)? {
+            let collection_name = portable_entry_name(&collection)?;
+            let manifest_path = collection.path().join("SHA256SUMS");
+            match fs::symlink_metadata(&manifest_path) {
+                Ok(metadata) if metadata.file_type().is_file() => {}
+                Ok(_) => {
+                    return Err(CatalogIndexError::InvalidManifest {
+                        path: manifest_path,
+                        line: None,
+                        reason: "SHA256SUMS is not a regular file".to_owned(),
+                    });
+                }
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(CatalogIndexError::Io {
+                        action: "inspect catalog manifest",
+                        path: manifest_path,
+                        source,
+                    });
+                }
+            }
+            let contents = fs::read(&manifest_path).map_err(|source| CatalogIndexError::Io {
+                action: "read catalog manifest fingerprint",
+                path: manifest_path,
+                source,
+            })?;
+            manifests.push(ManifestFingerprint {
+                path: vec![year_name.clone(), collection_name, "SHA256SUMS".to_owned()],
+                digest: ContentDigest::from_bytes(&contents),
+            });
+        }
+    }
+    manifests.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(manifests)
+}
+
+fn read_catalog_snapshot(root: &Path) -> Result<CatalogSnapshot, CatalogIndexError> {
+    let manifests = snapshot_catalog_manifests(root)?;
     let mut originals = Vec::new();
     for year in sorted_directories(root, true)? {
         let year_name = portable_entry_name(&year)?;
@@ -201,7 +322,10 @@ fn read_catalog_originals(root: &Path) -> Result<Vec<IndexedOriginal>, CatalogIn
         }
     }
     originals.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(originals)
+    Ok(CatalogSnapshot {
+        manifests,
+        originals,
+    })
 }
 
 fn read_manifest(
@@ -366,7 +490,13 @@ fn invalid_manifest(path: &Path, line: usize, reason: impl Into<String>) -> Cata
 
 #[derive(Debug)]
 pub enum CatalogIndexError {
+    CatalogIdentityMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
     DeserializePath(serde_json::Error),
+    InvalidIndexDigest,
     InvalidCatalogPath(PathBuf),
     InvalidIndexPath(PathBuf),
     InvalidManifest {
@@ -395,6 +525,15 @@ pub enum CatalogIndexError {
 impl fmt::Display for CatalogIndexError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CatalogIdentityMismatch {
+                path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "catalog index {} belongs to catalog {actual}, expected {expected}",
+                path.display()
+            ),
             Self::DeserializePath(source) => {
                 write!(
                     formatter,
@@ -414,6 +553,9 @@ impl fmt::Display for CatalogIndexError {
                     "catalog index path has no filename: {}",
                     path.display()
                 )
+            }
+            Self::InvalidIndexDigest => {
+                formatter.write_str("catalog index contains an invalid manifest digest")
             }
             Self::InvalidManifest { path, line, reason } => {
                 if let Some(line) = line {
@@ -465,7 +607,9 @@ impl Error for CatalogIndexError {
             Self::Io { source, .. } => Some(source),
             Self::Query(source) => Some(source),
             Self::Sqlite { source, .. } => Some(source),
-            Self::InvalidCatalogPath(_)
+            Self::CatalogIdentityMismatch { .. }
+            | Self::InvalidCatalogPath(_)
+            | Self::InvalidIndexDigest
             | Self::InvalidIndexPath(_)
             | Self::InvalidManifest { .. }
             | Self::MissingIndexDirectory(_)
@@ -500,7 +644,8 @@ mod tests {
             &[("raw.CR3", "a".repeat(64))],
         );
 
-        let index = CatalogIndex::rebuild(cache.join("index.sqlite"), &catalog).unwrap();
+        let index =
+            CatalogIndex::rebuild(cache.join("index.sqlite"), &catalog, "catalog-a").unwrap();
 
         assert_eq!(
             index
@@ -538,7 +683,7 @@ mod tests {
             &[("photo.jpg", "a".repeat(64))],
         );
         let index_path = cache.join("index.sqlite");
-        CatalogIndex::rebuild(&index_path, &catalog).unwrap();
+        CatalogIndex::rebuild(&index_path, &catalog, "catalog-a").unwrap();
 
         let collection = catalog.join("2025/2025-01-01 First");
         fs::write(collection.join("photo.jpg"), b"contents changed").unwrap();
@@ -547,7 +692,7 @@ mod tests {
             format!("{}  photo.jpg\n", "b".repeat(64)),
         )
         .unwrap();
-        let index = CatalogIndex::rebuild(&index_path, &catalog).unwrap();
+        let index = CatalogIndex::rebuild(&index_path, &catalog, "catalog-a").unwrap();
 
         assert!(index
             .paths_for_digest(&ContentDigest::parse("a".repeat(64)).unwrap())
@@ -575,7 +720,7 @@ mod tests {
             &[("a.jpg", "a".repeat(64)), ("b.jpg", "b".repeat(64))],
         );
         let index_path = cache.join("index.sqlite");
-        CatalogIndex::rebuild(&index_path, &catalog).unwrap();
+        CatalogIndex::rebuild(&index_path, &catalog, "catalog-a").unwrap();
         fs::write(
             catalog.join("2025/2025-01-01 First/SHA256SUMS"),
             format!("{}  b.jpg\n{}  a.jpg\n", "b".repeat(64), "a".repeat(64)),
@@ -583,12 +728,12 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            CatalogIndex::rebuild(&index_path, &catalog),
+            CatalogIndex::rebuild(&index_path, &catalog, "catalog-a"),
             Err(CatalogIndexError::InvalidManifest { reason, .. })
                 if reason.contains("strict byte order")
         ));
         assert!(!cache.join("index.sqlite.rebuild").exists());
-        let index = CatalogIndex::open(&index_path).unwrap();
+        let index = CatalogIndex::open(&index_path, "catalog-a").unwrap();
         assert_eq!(
             index
                 .paths_for_digest(&ContentDigest::parse("a".repeat(64)).unwrap())
@@ -610,7 +755,8 @@ mod tests {
             "2025-01-01 First",
             &[("photo.JPG", "a".repeat(64))],
         );
-        let index = CatalogIndex::rebuild(cache.join("index.sqlite"), &catalog).unwrap();
+        let index =
+            CatalogIndex::rebuild(cache.join("index.sqlite"), &catalog, "catalog-a").unwrap();
         let items = vec![
             plan_item("source-b", "b.mov", "b".repeat(64)),
             plan_item("source-a", "a.cr3", "a".repeat(64)),
@@ -634,6 +780,49 @@ mod tests {
     #[test]
     fn bare_index_filename_uses_the_current_directory() {
         assert_eq!(index_parent(Path::new("index.sqlite")), Path::new("."));
+    }
+
+    #[test]
+    fn index_is_bound_to_catalog_identity_and_complete_manifest_snapshot() {
+        let temporary = tempfile::tempdir().unwrap();
+        let catalog = temporary.path().join("catalog");
+        let cache = temporary.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        write_collection(
+            &catalog,
+            "2025",
+            "2025-01-01 First",
+            &[("photo.jpg", "a".repeat(64))],
+        );
+        write_collection(&catalog, "2026", "2026-01-01 Empty", &[]);
+        let index_path = cache.join("index.sqlite");
+
+        let index = CatalogIndex::rebuild(&index_path, &catalog, "catalog-a").unwrap();
+
+        assert!(matches!(
+            CatalogIndex::open(&index_path, "catalog-b"),
+            Err(CatalogIndexError::CatalogIdentityMismatch { .. })
+        ));
+        assert_eq!(
+            index
+                .manifest_snapshot()
+                .unwrap()
+                .into_iter()
+                .map(|manifest| manifest.path)
+                .collect::<Vec<_>>(),
+            vec![
+                vec![
+                    "2025".to_owned(),
+                    "2025-01-01 First".to_owned(),
+                    "SHA256SUMS".to_owned(),
+                ],
+                vec![
+                    "2026".to_owned(),
+                    "2026-01-01 Empty".to_owned(),
+                    "SHA256SUMS".to_owned(),
+                ],
+            ]
+        );
     }
 
     fn plan_item(source_file_id: &str, filename: &str, digest: String) -> PlanItem {

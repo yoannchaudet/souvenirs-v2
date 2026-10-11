@@ -185,6 +185,10 @@ impl CatalogLayout {
         self.state_directory().join("staging")
     }
 
+    pub fn index_path(&self) -> PathBuf {
+        self.state_directory().join("index.sqlite")
+    }
+
     pub fn lock_path(&self) -> PathBuf {
         self.state_directory().join("lock")
     }
