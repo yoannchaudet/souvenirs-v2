@@ -43,7 +43,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsNonCanonicalFieldName() {
         assertRejected(
             """
-            {"id":"macos-handshake-1","protocol_version":3,"method":"handshake","params":{"clientVersion":"0.2.0"}}
+            {"id":"macos-handshake-1","protocol_version":4,"method":"handshake","params":{"clientVersion":"0.2.0"}}
             """,
             containing: "keys were"
         )
@@ -52,7 +52,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsUnknownEnumValue() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":3,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
+            {"kind":"event","protocol_version":4,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
             """,
             containing: "unsupported event type"
         )
@@ -61,7 +61,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsIncompatibleMessageShape() {
         assertRejected(
             """
-            {"kind":"response","id":"request-2","protocol_version":3,"status":"success","result":[]}
+            {"kind":"response","id":"request-2","protocol_version":4,"status":"success","result":[]}
             """,
             containing: "must be an object"
         )
@@ -70,7 +70,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsJSONTypeDrift() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":3,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
+            {"kind":"event","protocol_version":4,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
             """,
             containing: "must be an integer"
         )
@@ -81,7 +81,7 @@ final class ProtocolFixtureTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v3.jsonl")
+            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v4.jsonl")
     }
 
     private func assertRejected(
@@ -133,11 +133,11 @@ final class ProtocolFixtureTests: XCTestCase {
             )
             XCTAssertEqual(response.kind, "response")
             XCTAssertEqual(response.id, "macos-handshake-1")
-            XCTAssertEqual(response.protocolVersion, 3)
+            XCTAssertEqual(response.protocolVersion, 4)
             XCTAssertEqual(response.status, "success")
             XCTAssertEqual(response.result.type, "handshake")
             XCTAssertEqual(response.result.engineVersion, "0.1.0")
-            XCTAssertEqual(response.result.protocolVersion, 3)
+            XCTAssertEqual(response.result.protocolVersion, 4)
             XCTAssertEqual(response.result.compatibleClientVersion, "0.2.0")
             XCTAssertEqual(
                 response.result.capabilities,

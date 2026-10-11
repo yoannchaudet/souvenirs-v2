@@ -140,27 +140,10 @@ impl ImportExecutionService {
     pub fn prepare(
         request: ImportExecutionRequest,
     ) -> Result<PreparedImport, ImportExecutionError> {
-        let envelope: ReviewedPlanEnvelope = serde_json::from_str(&request.reviewed_plan)
-            .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
-        if envelope.schema_version != 1 {
-            return Err(ImportExecutionError::Planning(format!(
-                "unsupported reviewed plan schema version {}",
-                envelope.schema_version
-            )));
-        }
-        let payload = serde_json::to_vec(&envelope.plan)
-            .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
-        if digest_bytes(&payload) != envelope.digest {
-            return Err(ImportExecutionError::Planning(
-                "reviewed plan digest does not match its contents".to_owned(),
-            ));
-        }
-        validate_reviewed_destination_state(&envelope.plan)?;
+        let plan = decode_reviewed_plan(&request.reviewed_plan)?;
+        validate_reviewed_destination_state(&plan)?;
         let operation_id = operation_id()?;
-        Ok(PreparedImport {
-            operation_id,
-            plan: envelope.plan,
-        })
+        Ok(PreparedImport { operation_id, plan })
     }
 
     pub fn execute(
@@ -296,6 +279,30 @@ impl ImportExecutionService {
             left_on_source_count: prepared.plan.left_on_source_count,
         }))
     }
+}
+
+pub(crate) fn validate_reviewed_plan(reviewed_plan: &str) -> Result<(), ImportExecutionError> {
+    let plan = decode_reviewed_plan(reviewed_plan)?;
+    validate_reviewed_catalog_state(&plan)
+}
+
+fn decode_reviewed_plan(reviewed_plan: &str) -> Result<ExecutionPlan, ImportExecutionError> {
+    let envelope: ReviewedPlanEnvelope = serde_json::from_str(reviewed_plan)
+        .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
+    if envelope.schema_version != 1 {
+        return Err(ImportExecutionError::Planning(format!(
+            "unsupported reviewed plan schema version {}",
+            envelope.schema_version
+        )));
+    }
+    let payload = serde_json::to_vec(&envelope.plan)
+        .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
+    if digest_bytes(&payload) != envelope.digest {
+        return Err(ImportExecutionError::Planning(
+            "reviewed plan digest does not match its contents".to_owned(),
+        ));
+    }
+    Ok(envelope.plan)
 }
 
 fn cancel_execution(

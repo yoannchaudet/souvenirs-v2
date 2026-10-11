@@ -140,12 +140,39 @@ final class SouvenirsUITests: XCTestCase {
                 .value as? String,
             "As shown"
         )
-        sheet.buttons["change-date-selection"].click()
-        XCTAssertTrue(sheet.buttons["date-convert-utc"].waitForExistence(timeout: 3))
-        sheet.descendants(matching: .any)["import-details"].click()
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: sheet.buttons["start-import"]
+        )
+        waitForExpectations(timeout: 5)
+        sheet.buttons["import-details"].click()
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-operation-summary"].exists
         )
+        for identifier in [
+            "import-detail-destination",
+            "import-detail-file-0",
+            "import-detail-space",
+            "import-detail-write-probe",
+            "import-detail-portable-names",
+            "import-detail-no-replacement",
+            "import-detail-copy-sequence",
+            "import-detail-recovery"
+        ] {
+            let detail = sheet.descendants(matching: .any)[identifier]
+            for _ in 0..<3 where !detail.exists {
+                sheet.swipeUp()
+            }
+            XCTAssertTrue(
+                detail.waitForExistence(timeout: 3),
+                "\(identifier) should be exposed in the expanded import details"
+            )
+        }
+        for _ in 0..<3 {
+            sheet.swipeDown()
+        }
+        sheet.buttons["change-date-selection"].click()
+        XCTAssertTrue(sheet.buttons["date-convert-utc"].waitForExistence(timeout: 3))
     }
 
     @MainActor

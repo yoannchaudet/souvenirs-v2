@@ -589,7 +589,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
             skippedCount: dateResolution == nil ? 4 : 0,
             leftOnSourceCount: dateResolution == nil ? 6 : 2,
             operationCount: dateResolution == nil ? 10 : 14,
-            requiredSpaceBytes: 41_000_000_000,
+            preflight: .fixture,
             canStart: true,
             reviewedPlan: "reviewed-plan"
         )

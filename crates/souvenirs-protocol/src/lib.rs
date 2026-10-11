@@ -7,7 +7,7 @@ use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 // This is the oldest macOS client version supported by the engine.
 pub const MINIMUM_CLIENT_VERSION: &str = "0.2.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
@@ -383,9 +383,28 @@ pub struct ImportReviewResult {
     pub skipped_count: usize,
     pub left_on_source_count: usize,
     pub operation_count: usize,
-    pub required_space_bytes: u64,
+    pub preflight: ImportPreflightEvidence,
     pub can_start: bool,
     pub reviewed_plan: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct ImportPreflightEvidence {
+    pub representative_file_names: Vec<String>,
+    pub required_bytes: u64,
+    pub available_bytes: Option<u64>,
+    pub available_space: ImportPreflightCheck,
+    pub write_probe: ImportPreflightCheck,
+    pub portable_names: ImportPreflightCheck,
+    pub destination_conflicts: ImportPreflightCheck,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportPreflightCheck {
+    NotRun,
+    Passed,
+    Failed,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -601,7 +620,7 @@ mod tests {
 
     #[test]
     fn golden_fixture_matches_rust_types() {
-        let fixture = fixture_path("protocol-v3.jsonl");
+        let fixture = fixture_path("protocol-v4.jsonl");
         let contents = fs::read_to_string(fixture).expect("fixture should be readable");
         let values: Vec<Value> = contents
             .lines()
@@ -661,7 +680,7 @@ mod tests {
         let expected = serde_json::to_string_pretty(&protocol_schema())
             .expect("protocol schema should serialize")
             + "\n";
-        let actual = fs::read_to_string(fixture_path("../schema/v3.json"))
+        let actual = fs::read_to_string(fixture_path("../schema/v4.json"))
             .expect("committed schema should be readable");
 
         assert_eq!(actual, expected, "regenerate the committed protocol schema");

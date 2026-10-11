@@ -20,9 +20,10 @@ use souvenirs_protocol::{
     CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart, CatalogCollectionsResult,
     CatalogIntent, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
     ImportDateResolution, ImportDateSource, ImportDateSourceSummary, ImportDateState,
-    ImportDestinationMode, ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent,
-    OperationEventPayload, OperationInspectionResult, ProtocolError, Request, RequestPayload,
-    ResponseResult, StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
+    ImportDestinationMode, ImportPreflightCheck, ImportPreflightEvidence, ImportReviewResult,
+    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
+    OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
+    StartOperationParameters, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
     CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
     CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
     OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
@@ -902,7 +903,17 @@ fn import_review_response(
                 skipped_count: review.skipped_count,
                 left_on_source_count: review.left_on_source_count,
                 operation_count: review.operation_count,
-                required_space_bytes: review.required_space_bytes,
+                preflight: ImportPreflightEvidence {
+                    representative_file_names: review.preflight.representative_file_names,
+                    required_bytes: review.preflight.required_bytes,
+                    available_bytes: review.preflight.available_bytes,
+                    available_space: import_preflight_check(review.preflight.available_space),
+                    write_probe: import_preflight_check(review.preflight.write_probe),
+                    portable_names: import_preflight_check(review.preflight.portable_names),
+                    destination_conflicts: import_preflight_check(
+                        review.preflight.destination_conflicts,
+                    ),
+                },
                 can_start: review.can_start,
                 reviewed_plan: review.reviewed_plan,
             })),
@@ -911,6 +922,16 @@ fn import_review_response(
             Some(request_id),
             ProtocolError::new(error.code(), error.to_string()),
         ),
+    }
+}
+
+fn import_preflight_check(
+    check: souvenirs_application::ImportPreflightCheck,
+) -> ImportPreflightCheck {
+    match check {
+        souvenirs_application::ImportPreflightCheck::NotRun => ImportPreflightCheck::NotRun,
+        souvenirs_application::ImportPreflightCheck::Passed => ImportPreflightCheck::Passed,
+        souvenirs_application::ImportPreflightCheck::Failed => ImportPreflightCheck::Failed,
     }
 }
 
@@ -1266,6 +1287,23 @@ mod tests {
                 utc_offset_seconds: 0,
             })
             .unwrap();
+            assert_eq!(
+                review.preflight.representative_file_names,
+                ["2026-10-10 10-11-12 001.jpg"]
+            );
+            assert!(review.preflight.available_bytes.unwrap() >= review.preflight.required_bytes);
+            assert_eq!(
+                review.preflight.write_probe,
+                souvenirs_application::ImportPreflightCheck::Passed
+            );
+            assert_eq!(
+                review.preflight.portable_names,
+                souvenirs_application::ImportPreflightCheck::Passed
+            );
+            assert_eq!(
+                review.preflight.destination_conflicts,
+                souvenirs_application::ImportPreflightCheck::Passed
+            );
             let prepared = match super::Connection::default().start_operation(
                 "request-2".to_owned(),
                 super::StartOperationParameters::ImportExecute {

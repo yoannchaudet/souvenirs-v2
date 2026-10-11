@@ -391,9 +391,28 @@ pub struct ImportReview {
     pub skipped_count: usize,
     pub left_on_source_count: usize,
     pub operation_count: usize,
-    pub required_space_bytes: u64,
+    pub preflight: ImportPreflightEvidence,
     pub can_start: bool,
     pub reviewed_plan: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ImportPreflightEvidence {
+    pub representative_file_names: Vec<String>,
+    pub required_bytes: u64,
+    pub available_bytes: Option<u64>,
+    pub available_space: ImportPreflightCheck,
+    pub write_probe: ImportPreflightCheck,
+    pub portable_names: ImportPreflightCheck,
+    pub destination_conflicts: ImportPreflightCheck,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportPreflightCheck {
+    NotRun,
+    Passed,
+    Failed,
 }
 
 pub struct ImportPlanningService;
@@ -1068,6 +1087,7 @@ pub enum ImportPlanningError {
     Catalog(CatalogServiceError),
     DestinationAlreadyExists(PathBuf),
     DestinationMissing(PathBuf),
+    DestinationPreflight(String),
     InvalidCollection(String),
     InvalidDate(String),
     InvalidMetadata(String),
@@ -1088,6 +1108,7 @@ impl ImportPlanningError {
             Self::Catalog(error) => error.code(),
             Self::DestinationAlreadyExists(_) => "destination_exists",
             Self::DestinationMissing(_) => "destination_missing",
+            Self::DestinationPreflight(_) => "destination_preflight_failed",
             Self::InvalidCollection(_) => "invalid_collection",
             Self::InvalidDate(_) => "invalid_date",
             Self::InvalidMetadata(_) => "invalid_metadata",
@@ -1115,6 +1136,12 @@ impl fmt::Display for ImportPlanningError {
                 "No collection exists at {}. Choose a new collection.",
                 path.display()
             ),
+            Self::DestinationPreflight(message) => {
+                write!(
+                    formatter,
+                    "The destination could not complete review checks: {message}"
+                )
+            }
             Self::InvalidCollection(message) => {
                 write!(formatter, "Choose a different collection name: {message}")
             }
@@ -1302,7 +1329,7 @@ mod tests {
     use super::{
         CatalogInitializationError, CatalogIntent, CatalogService, CatalogServiceError,
         DateResolution, DestinationMode, ImportPlanningError, ImportPlanningService,
-        ImportReviewRequest, OperationInspectionService,
+        ImportPreflightCheck, ImportReviewRequest, OperationInspectionService,
     };
 
     #[test]
@@ -1640,6 +1667,11 @@ mod tests {
         .unwrap();
         assert!(!unresolved.can_start);
         assert!(unresolved.reviewed_plan.is_none());
+        assert_eq!(unresolved.preflight.available_bytes, None);
+        assert_eq!(
+            unresolved.preflight.write_probe,
+            ImportPreflightCheck::NotRun
+        );
         let resolved = ImportPlanningService::review(ImportReviewRequest {
             catalog_path: catalog.clone(),
             source_path: source.clone(),
@@ -1653,6 +1685,33 @@ mod tests {
         assert!(resolved.can_start);
         let reviewed: serde_json::Value =
             serde_json::from_str(resolved.reviewed_plan.as_deref().unwrap()).unwrap();
+        let expected_names = reviewed["plan"]["copies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|copy| {
+                copy["destination"]
+                    .as_str()
+                    .and_then(|path| path.rsplit('/').next())
+                    .map(str::to_owned)
+            })
+            .take(3)
+            .collect::<Vec<_>>();
+        assert_eq!(resolved.preflight.representative_file_names, expected_names);
+        assert!(resolved.preflight.available_bytes.unwrap() >= resolved.preflight.required_bytes);
+        assert_eq!(
+            resolved.preflight.available_space,
+            ImportPreflightCheck::Passed
+        );
+        assert_eq!(resolved.preflight.write_probe, ImportPreflightCheck::Passed);
+        assert_eq!(
+            resolved.preflight.portable_names,
+            ImportPreflightCheck::Passed
+        );
+        assert_eq!(
+            resolved.preflight.destination_conflicts,
+            ImportPreflightCheck::Passed
+        );
         assert_eq!(reviewed["plan"]["copies"][0]["role"], "primary");
         assert_eq!(
             reviewed["plan"]["copies"][0]["accepted_datetime"],
