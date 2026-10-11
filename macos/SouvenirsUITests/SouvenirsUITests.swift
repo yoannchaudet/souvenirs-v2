@@ -142,7 +142,7 @@ final class SouvenirsUITests: XCTestCase {
         )
         sheet.buttons["change-date-selection"].click()
         XCTAssertTrue(sheet.buttons["date-convert-utc"].waitForExistence(timeout: 3))
-        sheet.buttons["Details: destination and checks"].click()
+        sheet.buttons["import-details"].click()
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-operation-summary"].exists
         )
