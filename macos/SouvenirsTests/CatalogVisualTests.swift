@@ -13,7 +13,7 @@ final class CatalogVisualTests: XCTestCase {
             recents: [
                 RecentCatalog(
                     path: "/Volumes/photos/Family Catalog",
-                    name: "Family Catalog",
+                    name: "Family Archive",
                     volumeName: "photos-nas.local"
                 )
             ]
@@ -229,7 +229,7 @@ final class CatalogVisualTests: XCTestCase {
     func testCaptureImportExecutionAndRecoveryScreens() async throws {
         let catalog = RecentCatalog(
             path: "/Volumes/photos/Family Catalog",
-            name: "Family Catalog",
+            name: "Family Archive",
             volumeName: "photos-nas.local"
         )
         let modelEngine = VisualCatalogEngine()
@@ -613,7 +613,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
         .init(
             path: path,
             volumeName: "photos-nas.local",
-            displayName: "Family Catalog",
+            displayName: "Family Archive",
             detail: "Catalog format 2"
         )
     }

@@ -86,14 +86,14 @@ final class CatalogWelcomeModel: ObservableObject {
     }
 
     @Published private(set) var route: Route = .welcome
-    @Published var catalogName = "Family Catalog"
+    @Published var catalogName = "Family Archive"
     @Published private(set) var selectedPath: String?
     @Published private(set) var validation: Validation = .none
     @Published private(set) var isWorking = false
     @Published private(set) var recents: [RecentCatalog]
     @Published private(set) var importPlanning: ImportPlanningModel?
     @Published var presentedError: String?
-    @Published private(set) var presentedErrorTitle = "Souvenirs couldn’t open this catalog"
+    @Published private(set) var presentedErrorTitle = "Souvenirs couldn’t open this archive"
 
     private let engine: CatalogEngineClient
     private let defaults: UserDefaults
@@ -164,7 +164,7 @@ final class CatalogWelcomeModel: ObservableObject {
             )
             showCatalog(location, name: catalogName)
         } catch {
-            presentedErrorTitle = "Souvenirs couldn’t create this catalog"
+            presentedErrorTitle = "Souvenirs couldn’t create this archive"
             presentedError = userMessage(for: error)
         }
     }
@@ -181,7 +181,7 @@ final class CatalogWelcomeModel: ObservableObject {
                     ?? URL(fileURLWithPath: path).lastPathComponent
             )
         } catch {
-            presentedErrorTitle = "Souvenirs couldn’t open this catalog"
+            presentedErrorTitle = "Souvenirs couldn’t open this archive"
             presentedError = userMessage(for: error)
         }
     }
@@ -228,10 +228,10 @@ final class CatalogWelcomeModel: ObservableObject {
     }
 
     private func userMessage(for error: Error) -> String {
-        if case EngineSupervisor.SupervisorError.protocolError(_, let message) = error {
-            return message
+        if case EngineSupervisor.SupervisorError.protocolError(let code, let message) = error {
+            return archiveUserMessage(code: code, message: message)
         }
-        return error.localizedDescription
+        return archiveUserMessage(code: "", message: error.localizedDescription)
     }
 }
 
@@ -448,10 +448,10 @@ final class ImportPlanningModel: ObservableObject {
     }
 
     private func userMessage(for error: Error) -> String {
-        if case EngineSupervisor.SupervisorError.protocolError(_, let message) = error {
-            return message
+        if case EngineSupervisor.SupervisorError.protocolError(let code, let message) = error {
+            return archiveUserMessage(code: code, message: message)
         }
-        return error.localizedDescription
+        return archiveUserMessage(code: "", message: error.localizedDescription)
     }
 
     private func protocolErrorCode(for error: Error) -> String? {
@@ -459,5 +459,41 @@ final class ImportPlanningModel: ObservableObject {
             return nil
         }
         return code
+    }
+}
+
+func archiveUserMessage(code: String, message: String) -> String {
+    guard code.contains("catalog") || message.localizedCaseInsensitiveContains("catalog") else {
+        return message
+    }
+
+    return [
+        ("This folder is already a catalog", "This folder is already an archive"),
+        ("This catalog was initialized", "This archive was initialized"),
+        ("The catalog configuration", "The archive configuration"),
+        ("This folder is not a Souvenirs catalog", "This folder is not a Souvenirs archive"),
+        ("This synchronized folder cannot hold a catalog", "This synchronized folder cannot hold an archive"),
+        ("This catalog uses format", "This archive uses format"),
+        ("The catalog changed after review", "The archive changed after review"),
+        ("catalog mutations", "archive changes"),
+        ("catalog is busy", "archive is busy"),
+        ("catalog lock changed", "archive lock changed"),
+        ("catalog lock contents changed", "archive lock contents changed"),
+        ("failed to validate catalog lock", "failed to validate archive lock"),
+        ("catalog initialization", "archive initialization"),
+        ("invalid catalog extension", "invalid archive extension"),
+        ("unsupported catalog format", "unsupported archive format"),
+        ("catalog root is not a directory", "archive root is not a directory"),
+        ("catalog path escapes", "archive path escapes"),
+        ("catalog path must be", "archive path must be"),
+        ("catalog path is reserved", "archive path is reserved"),
+        ("catalog index", "archive index"),
+        ("query catalog index", "query archive index"),
+        ("serialize catalog index path", "serialize archive index path"),
+        ("operation journal belongs to a different catalog", "operation journal belongs to a different archive"),
+        ("active lock for this catalog", "active lock for this archive"),
+        ("response result type is not catalog", "response result type is not archive")
+    ].reduce(message) { result, replacement in
+        result.replacingOccurrences(of: replacement.0, with: replacement.1)
     }
 }

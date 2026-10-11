@@ -27,9 +27,9 @@ final class RealEngineSmokeTests: XCTestCase {
 
         let location = try await supervisor.createCatalog(
             path: fixture.catalog.path,
-            displayName: "Smoke Catalog"
+            displayName: "Smoke Archive"
         )
-        XCTAssertEqual(location.displayName, "Smoke Catalog")
+        XCTAssertEqual(location.displayName, "Smoke Archive")
         let review = try await plannedImport(
             supervisor: supervisor,
             fixture: fixture,
@@ -81,7 +81,7 @@ final class RealEngineSmokeTests: XCTestCase {
         _ = try await supervisor.handshake()
         _ = try await supervisor.createCatalog(
             path: fixture.catalog.path,
-            displayName: "Cancellation Catalog"
+            displayName: "Cancellation Archive"
         )
         let review = try await plannedImport(
             supervisor: supervisor,
@@ -150,7 +150,7 @@ final class RealEngineSmokeTests: XCTestCase {
         _ = try await supervisor.handshake()
         _ = try await supervisor.createCatalog(
             path: fixture.catalog.path,
-            displayName: "Source Recovery Catalog"
+            displayName: "Source Recovery Archive"
         )
         let review = try await plannedImport(
             supervisor: supervisor,
@@ -242,7 +242,7 @@ final class RealEngineSmokeTests: XCTestCase {
         _ = try await supervisor.handshake()
         _ = try await supervisor.createCatalog(
             path: fixture.catalog.path,
-            displayName: "Compound Catalog"
+            displayName: "Compound Archive"
         )
         let review = try await plannedImport(
             supervisor: supervisor,
@@ -282,7 +282,7 @@ final class RealEngineSmokeTests: XCTestCase {
         _ = try await supervisor.handshake()
         _ = try await supervisor.createCatalog(
             path: fixture.catalog.path,
-            displayName: "Recovery Catalog"
+            displayName: "Recovery Archive"
         )
         let review = try await plannedImport(
             supervisor: supervisor,

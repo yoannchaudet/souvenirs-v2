@@ -214,7 +214,7 @@ struct ContentView: View {
                         equals: .createCatalog
                     )
                     welcomeAction(
-                        title: "Open an Existing Catalog…",
+                        title: "Open an Existing Archive…",
                         subtitle: "Including a backup copy",
                         systemImage: "folder",
                         prominent: false,
@@ -242,7 +242,7 @@ struct ContentView: View {
                     .padding(.bottom, 2)
 
                 if model.recents.isEmpty {
-                    Text("Catalogs you open will appear here.")
+                    Text("Archives you open will appear here.")
                         .font(.callout)
                         .foregroundStyle(.tertiary)
                         .padding(.top, 8)
@@ -396,7 +396,7 @@ struct ContentView: View {
                         .frame(width: 84, height: 66)
                         .background(.background, in: RoundedRectangle(cornerRadius: 12))
                         .shadow(color: .black.opacity(0.09), radius: 14, y: 7)
-                    Text("Your catalog is ready")
+                    Text("Your archive is ready")
                         .font(.title2.bold())
                         .padding(.top, 18)
                         .accessibilityIdentifier("catalog-ready")
@@ -480,7 +480,7 @@ struct ContentView: View {
             activityMessage(
                 icon: "stop.circle.fill",
                 title: "Import stopped",
-                message: "\(copiedCount) verified items remain in your catalog. Nothing on the source was changed.",
+                message: "\(copiedCount) verified items remain in your archive. Nothing on the source was changed.",
                 tint: .secondary,
                 identifier: "import-cancelled",
                 actionTitle: "Done",
@@ -717,7 +717,7 @@ struct ContentView: View {
     private var catalogActionsUnavailableNotice: some View {
         if let description = engineStatus.catalogActionsUnavailableDescription {
             VStack(alignment: .leading, spacing: 7) {
-                Label("Catalog actions unavailable", systemImage: "exclamationmark.triangle")
+                Label("Archive actions unavailable", systemImage: "exclamationmark.triangle")
                     .font(.caption.weight(.medium))
                 Text(description)
                     .font(.caption)
@@ -731,7 +731,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.yellow.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
             .accessibilityElement(children: .contain)
-            .accessibilityLabel("Catalog actions unavailable")
+            .accessibilityLabel("Archive actions unavailable")
             .accessibilityValue(description)
             .accessibilityIdentifier("catalog-actions-unavailable")
         }
@@ -1718,10 +1718,10 @@ private struct RecoverySheet: View {
 
     private var recoveryCountSummary: String {
         let safe = "\(itemCount(imports.completedUnits)) "
-            + "\(imports.completedUnits == 1 ? "is" : "are") safely in your catalog."
+            + "\(imports.completedUnits == 1 ? "is" : "are") safely in your archive."
         if imports.remainingUnits == 0 {
             return "\(safe) 0 items remain to copy from \(imports.sourceName). "
-                + "Recovery still needs to finish the catalog record."
+                + "Recovery still needs to finish the archive record."
         }
         return "\(safe) \(itemCount(imports.remainingUnits)) "
             + "\(imports.remainingUnits == 1 ? "remains" : "remain") "
@@ -1738,7 +1738,7 @@ private struct RecoverySheet: View {
             recents: [
                 RecentCatalog(
                     path: "/Volumes/photos/Family Catalog",
-                    name: "Family Catalog",
+                    name: "Family Archive",
                     volumeName: "photos-nas.local"
                 )
             ]
@@ -1754,7 +1754,7 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
         .init(
             path: path,
             volumeName: "photos-nas.local",
-            displayName: "Family Catalog",
+            displayName: "Family Archive",
             detail: "Catalog format 2"
         )
     }
@@ -1775,7 +1775,7 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
         .init(
             path: path,
             volumeName: "photos-nas.local",
-            displayName: "Family Catalog",
+            displayName: "Family Archive",
             detail: "Catalog format 2"
         )
     }

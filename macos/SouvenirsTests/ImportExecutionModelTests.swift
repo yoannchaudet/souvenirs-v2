@@ -277,7 +277,7 @@ final class ImportExecutionModelTests: XCTestCase {
     private var catalog: RecentCatalog {
         RecentCatalog(
             path: "/Volumes/photos/Family Catalog",
-            name: "Family Catalog",
+            name: "Family Archive",
             volumeName: "photos-nas.local"
         )
     }

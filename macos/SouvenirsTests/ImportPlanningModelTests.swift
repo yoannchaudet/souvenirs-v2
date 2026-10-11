@@ -190,7 +190,7 @@ final class ImportPlanningModelTests: XCTestCase {
             engine: engine,
             catalog: RecentCatalog(
                 path: "/Volumes/photos/Family Catalog",
-                name: "Family Catalog",
+                name: "Family Archive",
                 volumeName: "photos-nas.local"
             ),
             sourcePath: "/Volumes/EOS_DIGITAL"

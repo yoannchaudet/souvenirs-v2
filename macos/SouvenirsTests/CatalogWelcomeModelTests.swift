@@ -44,7 +44,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
             .catalog(
                 RecentCatalog(
                     path: "/Volumes/photos/Family",
-                    name: "Family Catalog",
+                    name: "Family Archive",
                     volumeName: "photos-nas.local"
                 )
             )
@@ -87,7 +87,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
         await model.createCatalog()
 
         XCTAssertEqual(model.route, .create)
-        XCTAssertEqual(model.presentedErrorTitle, "Souvenirs couldn’t create this catalog")
+        XCTAssertEqual(model.presentedErrorTitle, "Souvenirs couldn’t create this archive")
         XCTAssertEqual(model.presentedError, "The archive could not be created.")
         XCTAssertTrue(model.canCreate)
     }
@@ -146,7 +146,10 @@ final class CatalogWelcomeModelTests: XCTestCase {
 
     func testOpenErrorAndRecentRemoval() async {
         let engine = FakeCatalogEngine()
-        engine.error = TestError(message: "Not a catalog.")
+        engine.error = EngineSupervisor.SupervisorError.protocolError(
+            code: "not_a_catalog",
+            message: "This folder is not a Souvenirs catalog."
+        )
         let recent = RecentCatalog(
             path: "/Volumes/photos/Family",
             name: "Family",
@@ -160,7 +163,8 @@ final class CatalogWelcomeModelTests: XCTestCase {
 
         await model.openCatalog(at: recent.path, name: recent.name)
         XCTAssertEqual(model.route, .welcome)
-        XCTAssertEqual(model.presentedError, "Not a catalog.")
+        XCTAssertEqual(model.presentedErrorTitle, "Souvenirs couldn’t open this archive")
+        XCTAssertEqual(model.presentedError, "This folder is not a Souvenirs archive.")
 
         model.removeRecent(path: recent.path)
         XCTAssertTrue(model.recents.isEmpty)
@@ -179,6 +183,16 @@ final class CatalogWelcomeModelTests: XCTestCase {
         await model.openCatalog(at: second.path, name: second.name)
 
         XCTAssertEqual(model.recents.map(\.path), ["/two", "/one"])
+    }
+
+    func testCatalogProtocolErrorsUseArchiveTerminologyWithoutChangingPaths() {
+        XCTAssertEqual(
+            archiveUserMessage(
+                code: "catalog_io",
+                message: "Could not inspect /Volumes/photos/media catalog/2026: catalog is busy."
+            ),
+            "Could not inspect /Volumes/photos/media catalog/2026: archive is busy."
+        )
     }
 
     private func isolatedDefaults() -> UserDefaults {
@@ -231,7 +245,7 @@ private final class FakeCatalogEngine: CatalogEngineClient {
         return .init(
             path: path,
             volumeName: "photos-nas.local",
-            displayName: "Family Catalog",
+            displayName: "Family Archive",
             detail: "Catalog format 2"
         )
     }
