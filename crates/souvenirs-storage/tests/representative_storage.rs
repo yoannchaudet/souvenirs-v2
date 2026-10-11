@@ -82,6 +82,7 @@ fn interruption_recovery_preserves_bytes_manifest_and_terminal_outcome() {
             &journal_path,
             RecoveryRequest {
                 mode: RecoveryMode::Resume,
+                retained_duplicates: Vec::new(),
                 directories: vec![RecoveryDirectory {
                     step_id: "directory".into(),
                     path: "2026".into(),

@@ -40,7 +40,7 @@ use souvenirs_storage::{
     CatalogLayout, CatalogLock, CatalogPathError, ManifestReplacementRequest, OperationJournal,
     OperationOutcome, OperationRecord, PortableDestinationObserver, RecoveryCopy,
     RecoveryDirectory, RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest,
-    FORMAT_VERSION,
+    RetainedDuplicate, RetainedDuplicateDisposition, FORMAT_VERSION,
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
@@ -374,6 +374,9 @@ struct ExecutionResult {
     operation_id: String,
     outcome: &'static str,
     completed_steps: usize,
+    copied_count: usize,
+    skipped_count: usize,
+    left_on_source_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -381,6 +384,8 @@ struct OperationStatusResult {
     operation_id: String,
     state: &'static str,
     transition_count: usize,
+    copied_count: usize,
+    skipped_count: usize,
     journal: PathBuf,
 }
 
@@ -388,6 +393,9 @@ struct OperationStatusResult {
 struct RecoveryResult {
     operation_id: String,
     outcome: &'static str,
+    copied_count: usize,
+    skipped_count: usize,
+    left_on_source_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -435,6 +443,12 @@ struct ProgressEvent {
     sequence: u32,
     event: &'static str,
     step: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copied_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_skipped_count: Option<usize>,
 }
 
 struct ValidatedProgressPath(Option<PathBuf>);
@@ -1248,6 +1262,19 @@ fn import_execute(
             total_count,
         )
         .map_err(|error| CliError::operation(error.to_string()))?;
+    let retained_duplicates = retained_duplicates(&stored.import_plan);
+    for (index, retained) in retained_duplicates.iter().enumerate() {
+        journal
+            .record_retained_duplicate(&layout, &lock, retained)
+            .map_err(|error| CliError::operation(error.to_string()))?;
+        progress.write_counts(
+            "retained",
+            None,
+            Some(0),
+            Some(index + 1),
+            Some(retained_duplicates.len()),
+        )?;
+    }
 
     let mut completed_steps = 0_usize;
     for step in &stored.import_plan.document().steps {
@@ -1323,7 +1350,23 @@ fn import_execute(
         .map_err(|error| CliError::operation(error.to_string()))?;
     lock.release()
         .map_err(|error| CliError::operation(format!("release catalog lock: {error}")))?;
-    progress.write("completed", None)?;
+    let counts = execution_counts(
+        &stored.import_plan,
+        stored
+            .import_plan
+            .document()
+            .steps
+            .iter()
+            .filter(|step| matches!(step.action, PlanStepKind::CopyFile { .. }))
+            .count(),
+    );
+    progress.write_counts(
+        "completed",
+        None,
+        Some(counts.copied_count),
+        Some(counts.skipped_count),
+        Some(counts.skipped_count),
+    )?;
 
     write_result(
         "import.execute",
@@ -1331,6 +1374,9 @@ fn import_execute(
             operation_id,
             outcome: "completed",
             completed_steps,
+            copied_count: counts.copied_count,
+            skipped_count: counts.skipped_count,
+            left_on_source_count: counts.left_on_source_count,
         },
     )
 }
@@ -1370,12 +1416,16 @@ fn operation_status(catalog: &Path, operation_id: &str) -> Result<(), CliError> 
         .iter()
         .filter(|record| matches!(record, OperationRecord::Transition { .. }))
         .count();
+    let copied_count = published_copy_count(&records);
+    let skipped_count = retained_record_count(&records);
     write_result(
         "operation.status",
         OperationStatusResult {
             operation_id: operation_id.to_owned(),
             state,
             transition_count,
+            copied_count,
+            skipped_count,
             journal,
         },
     )
@@ -1411,13 +1461,50 @@ fn operation_recover(
     let outcome = layout
         .recover_operation(&lock, journal_path, request)
         .map_err(|error| CliError::operation(error.to_string()))?;
+    let final_records = find_operation_journal(&layout, operation_id)
+        .ok()
+        .map(|(_, records)| records);
     lock.release()
         .map_err(|error| CliError::operation(format!("release catalog lock: {error}")))?;
     let outcome_name = match outcome {
         RecoveryOutcome::Completed => "completed",
         RecoveryOutcome::Cancelled => "cancelled",
     };
-    progress.write(outcome_name, None)?;
+    let fallback_copied_count = match outcome {
+        RecoveryOutcome::Completed => stored
+            .import_plan
+            .document()
+            .steps
+            .iter()
+            .filter(|step| matches!(step.action, PlanStepKind::CopyFile { .. }))
+            .count(),
+        RecoveryOutcome::Cancelled => published_copy_count(&records),
+    };
+    let counts = execution_counts(
+        &stored.import_plan,
+        final_records
+            .as_deref()
+            .map_or(fallback_copied_count, published_copy_count),
+    );
+    let skipped_count = final_records
+        .as_deref()
+        .map_or(counts.skipped_count, retained_record_count);
+    if skipped_count > 0 {
+        progress.write_counts(
+            "retained",
+            None,
+            Some(counts.copied_count),
+            Some(skipped_count),
+            Some(skipped_count),
+        )?;
+    }
+    progress.write_counts(
+        outcome_name,
+        None,
+        Some(counts.copied_count),
+        Some(skipped_count),
+        Some(skipped_count),
+    )?;
     write_result(
         match mode {
             RecoveryChoice::Resume => "operation.recover",
@@ -1426,6 +1513,9 @@ fn operation_recover(
         RecoveryResult {
             operation_id: operation_id.to_owned(),
             outcome: outcome_name,
+            copied_count: counts.copied_count,
+            skipped_count,
+            left_on_source_count: counts.left_on_source_count,
         },
     )
 }
@@ -1802,6 +1892,7 @@ fn recovery_request(
             RecoveryChoice::Resume => RecoveryMode::Resume,
             RecoveryChoice::Cancel => RecoveryMode::CancelRemainingCopies,
         },
+        retained_duplicates: retained_duplicates(&stored.import_plan),
         ..RecoveryRequest::default()
     };
     for step in &stored.import_plan.document().steps {
@@ -1857,6 +1948,76 @@ fn recovery_request(
         }
     }
     Ok(request)
+}
+
+fn retained_duplicates(plan: &ImportPlan) -> Vec<RetainedDuplicate> {
+    plan.document()
+        .items
+        .iter()
+        .flat_map(|item| &item.files)
+        .filter_map(|file| {
+            let disposition = match file.duplicate_disposition.as_ref()? {
+                DuplicateDisposition::Transfer => return None,
+                DuplicateDisposition::RetainCatalogDuplicate { catalog_path } => {
+                    RetainedDuplicateDisposition::CatalogDuplicate {
+                        catalog_path: catalog_path.clone(),
+                    }
+                }
+                DuplicateDisposition::RetainSourceDuplicate {
+                    selected_source_file_id,
+                } => RetainedDuplicateDisposition::SourceDuplicate {
+                    selected_source_file_id: selected_source_file_id.clone(),
+                },
+            };
+            Some(RetainedDuplicate {
+                source_file_id: file.source_file_id.clone(),
+                disposition,
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionCounts {
+    copied_count: usize,
+    skipped_count: usize,
+    left_on_source_count: usize,
+}
+
+fn execution_counts(plan: &ImportPlan, copied_count: usize) -> ExecutionCounts {
+    let source_file_count = plan
+        .document()
+        .items
+        .iter()
+        .map(|item| item.files.len())
+        .sum::<usize>()
+        + plan.document().unhandled_content.len();
+    ExecutionCounts {
+        copied_count,
+        skipped_count: retained_duplicates(plan).len(),
+        left_on_source_count: source_file_count.saturating_sub(copied_count),
+    }
+}
+
+fn published_copy_count(records: &[OperationRecord]) -> usize {
+    records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                OperationRecord::Transition {
+                    transition: souvenirs_storage::DurableTransition::CopyPublished { .. }
+                }
+            )
+        })
+        .count()
+}
+
+fn retained_record_count(records: &[OperationRecord]) -> usize {
+    records
+        .iter()
+        .filter(|record| matches!(record, OperationRecord::Retained { .. }))
+        .count()
 }
 
 fn manifest_contents_for_recovery(
@@ -2192,6 +2353,17 @@ impl ProgressWriter {
     }
 
     fn write(&mut self, event: &'static str, step: Option<u32>) -> Result<(), CliError> {
+        self.write_counts(event, step, None, None, None)
+    }
+
+    fn write_counts(
+        &mut self,
+        event: &'static str,
+        step: Option<u32>,
+        copied_count: Option<usize>,
+        skipped_count: Option<usize>,
+        total_skipped_count: Option<usize>,
+    ) -> Result<(), CliError> {
         let Some(file) = &mut self.file else {
             return Ok(());
         };
@@ -2207,6 +2379,9 @@ impl ProgressWriter {
                 sequence: self.sequence,
                 event,
                 step,
+                copied_count,
+                skipped_count,
+                total_skipped_count,
             },
         )
         .map_err(|error| CliError::io(format!("write progress event: {error}")))?;
@@ -2233,6 +2408,9 @@ impl Drop for ProgressWriter {
                 sequence: self.sequence,
                 event: "failed",
                 step: None,
+                copied_count: None,
+                skipped_count: None,
+                total_skipped_count: None,
             },
         );
         let _ = file.write_all(b"\n");

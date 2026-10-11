@@ -26,7 +26,8 @@ pub use manifest::{ManifestReplacement, ManifestReplacementError, ManifestReplac
 pub use operation::Failpoint;
 pub use operation::{
     is_operation_journal_file_name, read_operation_records, DurableTransition, OperationJournal,
-    OperationJournalError, OperationOutcome, OperationRecord,
+    OperationJournalError, OperationOutcome, OperationRecord, RetainedDuplicate,
+    RetainedDuplicateDisposition,
 };
 pub use recovery::{
     CancellableRecoveryOutcome, RecoveryCheckpoint, RecoveryCopy, RecoveryDirectory, RecoveryError,

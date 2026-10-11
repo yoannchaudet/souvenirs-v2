@@ -10,10 +10,11 @@ use sha2::{Digest as _, Sha256};
 use crate::copy::{publish_exclusively, remove_apple_double_sidecar, PublishError};
 use crate::durability::{sync_directory, sync_file};
 use crate::manifest::verify_previous_manifest;
-use crate::operation::validate_identifier;
+use crate::operation::{validate_identifier, validate_retained_duplicate};
 use crate::{
     CatalogLayout, CatalogLock, CopyExpectation, DurableTransition, ManifestReplacementRequest,
-    OperationJournal, OperationJournalError, OperationOutcome, OperationRecord,
+    OperationJournal, OperationJournalError, OperationOutcome, OperationRecord, RetainedDuplicate,
+    RetainedDuplicateDisposition,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -49,6 +50,7 @@ pub struct RecoveryManifest {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecoveryRequest {
     pub mode: RecoveryMode,
+    pub retained_duplicates: Vec<RetainedDuplicate>,
     pub directories: Vec<RecoveryDirectory>,
     pub copies: Vec<RecoveryCopy>,
     pub manifests: Vec<RecoveryManifest>,
@@ -147,6 +149,16 @@ impl CatalogLayout {
 
         validate_requests(&request)?;
         let manifests = validate_manifest_requests(&request.manifests)?;
+        if recover_retained_duplicates(
+            self,
+            lock,
+            &mut journal,
+            &records,
+            &request.retained_duplicates,
+            interrupt,
+        )? {
+            return Ok(CancellableRecoveryOutcome::Interrupted);
+        }
         recover_directories(self, lock, &mut journal, &records, &request.directories)?;
         if interrupt(RecoveryCheckpoint::DurableBoundary)
             || recover_copies(
@@ -183,6 +195,53 @@ impl CatalogLayout {
             || interrupt(RecoveryCheckpoint::CompletionBoundary)
         {
             return Ok(CancellableRecoveryOutcome::Interrupted);
+        }
+
+        fn recover_retained_duplicates(
+            layout: &CatalogLayout,
+            lock: &CatalogLock,
+            journal: &mut OperationJournal,
+            records: &[OperationRecord],
+            requests: &[RetainedDuplicate],
+            interrupt: &mut impl FnMut(RecoveryCheckpoint) -> bool,
+        ) -> Result<bool, RecoveryError> {
+            let mut recorded = BTreeMap::<String, RetainedDuplicateDisposition>::new();
+            for record in records {
+                let OperationRecord::Retained {
+                    source_file_id,
+                    disposition,
+                } = record
+                else {
+                    continue;
+                };
+                match recorded.insert(source_file_id.clone(), disposition.clone()) {
+                    Some(previous) if previous != *disposition => {
+                        return Err(RecoveryError::RetainedDuplicateMismatch(
+                            source_file_id.clone(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+
+            for request in requests {
+                if interrupt(RecoveryCheckpoint::DurableBoundary) {
+                    return Ok(true);
+                }
+                if let Some(disposition) = recorded.get(&request.source_file_id) {
+                    if disposition != &request.disposition {
+                        return Err(RecoveryError::RetainedDuplicateMismatch(
+                            request.source_file_id.clone(),
+                        ));
+                    }
+                    continue;
+                }
+                journal
+                    .record_retained_duplicate(layout, lock, request)
+                    .map_err(RecoveryError::Journal)?;
+                recorded.insert(request.source_file_id.clone(), request.disposition.clone());
+            }
+            Ok(false)
         }
 
         let outcome = match request.mode {
@@ -1051,6 +1110,15 @@ fn validate_manifest_requests(
 }
 
 fn validate_requests(request: &RecoveryRequest) -> Result<(), RecoveryError> {
+    let mut retained_source_file_ids = BTreeSet::new();
+    for retained in &request.retained_duplicates {
+        validate_retained_duplicate(retained).map_err(RecoveryError::Journal)?;
+        if !retained_source_file_ids.insert(retained.source_file_id.clone()) {
+            return Err(RecoveryError::DuplicateRetainedDuplicate(
+                retained.source_file_id.clone(),
+            ));
+        }
+    }
     let mut step_ids = BTreeSet::new();
     for directory in &request.directories {
         validate_identifier("step", &directory.step_id).map_err(RecoveryError::Journal)?;
@@ -1350,6 +1418,7 @@ pub enum RecoveryError {
         actual: Option<String>,
     },
     DuplicateManifest(PathBuf),
+    DuplicateRetainedDuplicate(String),
     DuplicateStep(String),
     ExpectedContentMismatch {
         step: String,
@@ -1374,6 +1443,7 @@ pub enum RecoveryError {
     Path(crate::CatalogPathError),
     PathConflict(PathBuf),
     RequestMismatch(String),
+    RetainedDuplicateMismatch(String),
     SourceUnavailable(PathBuf),
     UnverifiedDestination(PathBuf),
     VerifiedStageMissing(PathBuf),
@@ -1400,6 +1470,10 @@ impl fmt::Display for RecoveryError {
             Self::DuplicateManifest(path) => {
                 write!(formatter, "duplicate recovery manifest: {}", path.display())
             }
+            Self::DuplicateRetainedDuplicate(source_file_id) => write!(
+                formatter,
+                "duplicate retained source file identifier: {source_file_id:?}"
+            ),
             Self::DuplicateStep(step) => {
                 write!(formatter, "duplicate recovery step identifier: {step:?}")
             }
@@ -1471,6 +1545,10 @@ impl fmt::Display for RecoveryError {
             Self::RequestMismatch(step) => write!(
                 formatter,
                 "recovery request does not match journaled step {step:?}"
+            ),
+            Self::RetainedDuplicateMismatch(source_file_id) => write!(
+                formatter,
+                "recovery retained duplicate does not match journaled source file {source_file_id:?}"
             ),
             Self::SourceUnavailable(path) => {
                 write!(formatter, "copy source is unavailable: {}", path.display())

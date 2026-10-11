@@ -92,6 +92,14 @@ The plan line records:
 - Explicit exclusions and reported duplicates.
 - Expected digests where known.
 
+An automation CLI import appends one retained record for each planned duplicate that stays at the source.
+The record contains the source file identifier and the exact planned duplicate reference.
+Recovery compares existing retained records with the confirmed plan.
+Recovery appends each missing matching record once.
+Recovery stops when an existing retained record conflicts with the confirmed plan.
+Cancellation also preserves every planned retained record.
+Consumers must read the terminal outcome before they interpret retained records as completed import history.
+
 A journal without an outcome is unfinished.
 An unfinished journal blocks other mutations until recovery records an outcome.
 Completed journals are optional history and can be archived or deleted.

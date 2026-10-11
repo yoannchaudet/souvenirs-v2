@@ -11,6 +11,7 @@ use souvenirs_storage::{
     DurableTransition, Failpoint, ManifestReplacementRequest, OperationJournal,
     OperationJournalError, OperationRecord, RecoveryCheckpoint, RecoveryCopy, RecoveryDirectory,
     RecoveryError, RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest,
+    RetainedDuplicate, RetainedDuplicateDisposition,
 };
 use tempfile::TempDir;
 
@@ -70,6 +71,112 @@ fn assert_no_outcome(records: &[OperationRecord]) {
     assert!(!records
         .iter()
         .any(|record| matches!(record, OperationRecord::Outcome { .. })));
+}
+
+#[test]
+fn recovery_replays_retained_duplicates_idempotently() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let mut journal =
+        OperationJournal::create(&layout, &lock, "retained", &json!({"confirmed": true})).unwrap();
+    let journal_path = journal.path().to_path_buf();
+    let retained = vec![
+        RetainedDuplicate {
+            source_file_id: "catalog-duplicate".to_owned(),
+            disposition: RetainedDuplicateDisposition::CatalogDuplicate {
+                catalog_path: vec![
+                    "2024".to_owned(),
+                    "2024-01-01 Existing".to_owned(),
+                    "original.jpg".to_owned(),
+                ],
+            },
+        },
+        RetainedDuplicate {
+            source_file_id: "source-duplicate".to_owned(),
+            disposition: RetainedDuplicateDisposition::SourceDuplicate {
+                selected_source_file_id: "selected-source".to_owned(),
+            },
+        },
+    ];
+    journal
+        .record_retained_duplicate(&layout, &lock, &retained[0])
+        .unwrap();
+    drop(journal);
+
+    let request = RecoveryRequest {
+        retained_duplicates: retained.clone(),
+        ..RecoveryRequest::default()
+    };
+    assert_eq!(
+        layout
+            .recover_operation(&lock, &journal_path, request)
+            .unwrap(),
+        RecoveryOutcome::Completed
+    );
+
+    let records = operation_records(&journal_path);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, OperationRecord::Retained { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    OperationRecord::Retained { source_file_id, .. }
+                        if source_file_id == "catalog-duplicate"
+                )
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn recovery_rejects_duplicate_and_conflicting_retained_requests() {
+    let (_temporary, layout, lock) = initialized_catalog();
+    let retained = RetainedDuplicate {
+        source_file_id: "source/identifier".to_owned(),
+        disposition: RetainedDuplicateDisposition::SourceDuplicate {
+            selected_source_file_id: "selected/identifier".to_owned(),
+        },
+    };
+    let mut journal =
+        OperationJournal::create(&layout, &lock, "retained-conflict", &json!({})).unwrap();
+    journal
+        .record_retained_duplicate(&layout, &lock, &retained)
+        .unwrap();
+    let journal_path = journal.path().to_path_buf();
+    drop(journal);
+
+    let duplicate = RecoveryRequest {
+        retained_duplicates: vec![retained.clone(), retained.clone()],
+        ..RecoveryRequest::default()
+    };
+    assert!(matches!(
+        layout.recover_operation(&lock, &journal_path, duplicate),
+        Err(RecoveryError::DuplicateRetainedDuplicate(source_file_id))
+            if source_file_id == retained.source_file_id
+    ));
+
+    let conflicting = RecoveryRequest {
+        retained_duplicates: vec![RetainedDuplicate {
+            source_file_id: retained.source_file_id.clone(),
+            disposition: RetainedDuplicateDisposition::CatalogDuplicate {
+                catalog_path: vec!["2024".to_owned(), "different.jpg".to_owned()],
+            },
+        }],
+        ..RecoveryRequest::default()
+    };
+    assert!(matches!(
+        layout.recover_operation(&lock, &journal_path, conflicting),
+        Err(RecoveryError::RetainedDuplicateMismatch(source_file_id))
+            if source_file_id == retained.source_file_id
+    ));
 }
 
 struct Scenario {
@@ -211,6 +318,7 @@ impl Scenario {
     fn request(&self) -> RecoveryRequest {
         RecoveryRequest {
             mode: RecoveryMode::Resume,
+            retained_duplicates: Vec::new(),
             directories: vec![RecoveryDirectory {
                 step_id: "directory".into(),
                 path: "2026".into(),
@@ -694,6 +802,7 @@ fn observed_absent_owned_stage_is_persisted_before_removal_completion() {
     fs::write(&unrelated_stage, b"keep").unwrap();
     let request = RecoveryRequest {
         mode: RecoveryMode::CancelRemainingCopies,
+        retained_duplicates: Vec::new(),
         copies: vec![RecoveryCopy {
             step_id: "copy".into(),
             source: "unavailable".into(),
@@ -787,6 +896,7 @@ fn cleanup_tracks_the_latest_lifecycle_for_a_reused_owned_stage_path() {
     );
     let request = RecoveryRequest {
         mode: RecoveryMode::CancelRemainingCopies,
+        retained_duplicates: Vec::new(),
         copies: vec![RecoveryCopy {
             step_id: "copy".into(),
             source: "unavailable".into(),
@@ -880,6 +990,7 @@ fn cancellation_publishes_verified_stages_updates_manifest_and_removes_only_owne
             &path,
             RecoveryRequest {
                 mode: RecoveryMode::CancelRemainingCopies,
+                retained_duplicates: Vec::new(),
                 directories: vec![RecoveryDirectory {
                     step_id: "directory".into(),
                     path: "2026".into(),
@@ -975,6 +1086,7 @@ fn cancellation_removes_a_verified_stage_that_differs_from_the_confirmed_plan() 
             &path,
             RecoveryRequest {
                 mode: RecoveryMode::CancelRemainingCopies,
+                retained_duplicates: Vec::new(),
                 directories: vec![],
                 copies: vec![RecoveryCopy {
                     step_id: "copy".into(),
@@ -1029,6 +1141,7 @@ fn recovery_never_overwrites_an_occupied_destination() {
             path,
             RecoveryRequest {
                 mode: RecoveryMode::Resume,
+                retained_duplicates: Vec::new(),
                 directories: vec![RecoveryDirectory {
                     step_id: "directory".into(),
                     path: "2026".into(),
@@ -1076,6 +1189,7 @@ fn recovery_preserves_journal_order_for_nested_directories_and_copy_publication(
             &path,
             RecoveryRequest {
                 mode: RecoveryMode::Resume,
+                retained_duplicates: Vec::new(),
                 directories: vec![
                     RecoveryDirectory {
                         step_id: "z-parent".into(),
@@ -1139,6 +1253,7 @@ fn recovery_preserves_journal_order_for_nested_directories_and_copy_publication(
             &path,
             RecoveryRequest {
                 mode: RecoveryMode::Resume,
+                retained_duplicates: Vec::new(),
                 directories: vec![],
                 copies: vec![
                     RecoveryCopy {
@@ -1208,6 +1323,7 @@ fn staging_cleanup_recovers_after_each_cleanup_failpoint() {
         drop(journal);
         let request = RecoveryRequest {
             mode: RecoveryMode::CancelRemainingCopies,
+            retained_duplicates: Vec::new(),
             directories: vec![RecoveryDirectory {
                 step_id: "directory".into(),
                 path: "2026".into(),
@@ -1290,6 +1406,7 @@ fn cancellation_replaces_a_stale_planned_manifest_with_published_files_only() {
                 path,
                 RecoveryRequest {
                     mode: RecoveryMode::CancelRemainingCopies,
+                    retained_duplicates: Vec::new(),
                     directories: vec![RecoveryDirectory {
                         step_id: "directory".into(),
                         path: "2026".into(),

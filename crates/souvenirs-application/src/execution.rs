@@ -734,6 +734,7 @@ fn recovery_request(
 ) -> RecoveryRequest {
     RecoveryRequest {
         mode,
+        retained_duplicates: Vec::new(),
         directories: plan
             .directories
             .iter()
