@@ -158,12 +158,13 @@ Matching labels or dates never select or merge a collection automatically.
 For a new dated collection, the plan proposes a range covering every resolved datetime.
 The user accepts it or supplies a wider range.
 
-For an existing dated collection, dates inside the range need no change.
-Outside dates require a range extension, a datetime correction, or exclusion.
-An earlier start date can move the folder to another year without renaming any file.
+For an existing dated collection, every accepted date must be inside the current range.
+The user corrects outside dates or selects another collection before import.
+Import does not extend the range of an existing dated collection.
 
-For an ongoing collection, items route to annual parts by accepted year.
-Missing annual parts are created.
+One import into an ongoing collection must use one accepted year.
+Items route to the annual part for that year.
+Import creates the annual part when it is missing.
 Creating or renaming an ongoing collection checks its label across all years.
 
 ## Organization changes

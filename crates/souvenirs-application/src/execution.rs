@@ -1368,7 +1368,10 @@ mod tests {
         ImportExecutionResult, ImportExecutionService, ImportRecoveryMode, ImportRecoveryService,
         RecoveryOutcome,
     };
-    use crate::{CatalogService, DateResolution, DestinationMode, OperationInspectionService};
+    use crate::{
+        CatalogService, DateResolution, DestinationMode, ExistingCollectionIdentity,
+        ImportDestination, OperationInspectionService,
+    };
     use souvenirs_storage::{
         read_operation_records, CatalogLayout, CatalogLock, DurableTransition, OperationJournal,
         OperationOutcome, OperationRecord,
@@ -2334,9 +2337,17 @@ mod tests {
             let review = crate::ImportPlanningService::review(crate::ImportReviewRequest {
                 catalog_path: self.catalog.clone(),
                 source_path: self.source.clone(),
-                collection_name: "Recovery Import".to_owned(),
-                destination_mode,
-                accepted_date: "2026-10-10".to_owned(),
+                destination: match destination_mode {
+                    DestinationMode::Create => ImportDestination::Create {
+                        collection_name: "Recovery Import".to_owned(),
+                    },
+                    DestinationMode::Existing => ImportDestination::Existing {
+                        identity: ExistingCollectionIdentity::Dated {
+                            year: "2026".to_owned(),
+                            directory: "2026-10-10 Recovery Import".to_owned(),
+                        },
+                    },
+                },
                 date_resolution: Some(DateResolution::AsShown),
                 utc_offset_seconds: 0,
             })

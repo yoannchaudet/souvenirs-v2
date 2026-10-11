@@ -10,8 +10,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use souvenirs_application::{
     CatalogCollection as ApplicationCollection, CatalogIntent as ApplicationIntent, CatalogService,
-    DateResolution, DestinationMode, ImportCancellation, ImportDateSource as ApplicationDateSource,
-    ImportDateState as ApplicationDateState, ImportExecutionRequest, ImportExecutionResult,
+    DateResolution, ExistingCollectionIdentity, ImportCancellation,
+    ImportDateSource as ApplicationDateSource, ImportDateState as ApplicationDateState,
+    ImportDestination as ApplicationDestination, ImportExecutionRequest, ImportExecutionResult,
     ImportExecutionService, ImportPlanningService, ImportRecoveryMode, ImportRecoveryService,
     ImportReviewRequest, OperationInspectionService, OperationProgress, PreparedImport,
     RecoveryOutcome,
@@ -20,7 +21,7 @@ use souvenirs_protocol::{
     CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart, CatalogCollectionsResult,
     CatalogIntent, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
     ImportDateResolution, ImportDateSource, ImportDateSourceSummary, ImportDateState,
-    ImportDestinationMode, ImportPreflightCheck, ImportPreflightEvidence, ImportReviewResult,
+    ImportDestination, ImportPreflightCheck, ImportPreflightEvidence, ImportReviewResult,
     ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
     OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
     StartOperationParameters, UnfinishedOperationActivityTime, UnfinishedOperationActivityTimeKind,
@@ -401,12 +402,7 @@ impl Connection {
                 ImportPlanningService::review(ImportReviewRequest {
                     catalog_path: parameters.catalog_path.into(),
                     source_path: parameters.source_path.into(),
-                    collection_name: parameters.collection_name,
-                    destination_mode: match parameters.destination_mode {
-                        ImportDestinationMode::Create => DestinationMode::Create,
-                        ImportDestinationMode::Existing => DestinationMode::Existing,
-                    },
-                    accepted_date: parameters.accepted_date,
+                    destination: application_destination(parameters.destination),
                     date_resolution: parameters.date_resolution.map(
                         |resolution| match resolution {
                             ImportDateResolution::AsShown => DateResolution::AsShown,
@@ -584,6 +580,42 @@ fn protocol_identity(
                 key: key.as_str().to_owned(),
             }
         }
+    }
+}
+
+fn application_destination(destination: ImportDestination) -> ApplicationDestination {
+    match destination {
+        ImportDestination::Create { collection_name } => {
+            ApplicationDestination::Create { collection_name }
+        }
+        ImportDestination::Existing { identity } => ApplicationDestination::Existing {
+            identity: match identity {
+                CatalogCollectionIdentity::Dated { year, directory } => {
+                    ExistingCollectionIdentity::Dated { year, directory }
+                }
+                CatalogCollectionIdentity::Ongoing { key } => {
+                    ExistingCollectionIdentity::Ongoing { key }
+                }
+            },
+        },
+    }
+}
+
+fn protocol_destination(destination: ApplicationDestination) -> ImportDestination {
+    match destination {
+        ApplicationDestination::Create { collection_name } => {
+            ImportDestination::Create { collection_name }
+        }
+        ApplicationDestination::Existing { identity } => ImportDestination::Existing {
+            identity: match identity {
+                ExistingCollectionIdentity::Dated { year, directory } => {
+                    CatalogCollectionIdentity::Dated { year, directory }
+                }
+                ExistingCollectionIdentity::Ongoing { key } => {
+                    CatalogCollectionIdentity::Ongoing { key }
+                }
+            },
+        },
     }
 }
 
@@ -910,10 +942,7 @@ fn import_review_response(
             ResponseResult::ImportReview(Box::new(ImportReviewResult {
                 scan: import_scan_result(review.scan),
                 collection_name: review.collection_name,
-                destination_mode: match review.destination_mode {
-                    DestinationMode::Create => ImportDestinationMode::Create,
-                    DestinationMode::Existing => ImportDestinationMode::Existing,
-                },
+                destination: protocol_destination(review.destination),
                 destination_path: review.destination_path.to_string_lossy().into_owned(),
                 accepted_date: review.accepted_date,
                 date_resolution: review.date_resolution.map(|resolution| match resolution {
@@ -1025,8 +1054,9 @@ mod tests {
 
     use serde_json::{json, Value};
     use souvenirs_application::{
-        CatalogService, DateResolution, DestinationMode, ImportCancellation,
-        ImportExecutionRequest, ImportExecutionService, ImportPlanningService, ImportReviewRequest,
+        CatalogService, DateResolution, ExistingCollectionIdentity, ImportCancellation,
+        ImportDestination as ApplicationDestination, ImportExecutionRequest,
+        ImportExecutionService, ImportPlanningService, ImportReviewRequest,
     };
     use souvenirs_protocol::PROTOCOL_VERSION;
 
@@ -1302,9 +1332,12 @@ mod tests {
             let review = ImportPlanningService::review(ImportReviewRequest {
                 catalog_path: catalog,
                 source_path: source.clone(),
-                collection_name: "Import".to_owned(),
-                destination_mode: DestinationMode::Existing,
-                accepted_date: "2026-10-10".to_owned(),
+                destination: ApplicationDestination::Existing {
+                    identity: ExistingCollectionIdentity::Dated {
+                        year: "2026".to_owned(),
+                        directory: "2026-10-10 Import".to_owned(),
+                    },
+                },
                 date_resolution: Some(DateResolution::AsShown),
                 utc_offset_seconds: 0,
             })
@@ -1468,9 +1501,9 @@ mod tests {
         let review = ImportPlanningService::review(ImportReviewRequest {
             catalog_path: catalog.clone(),
             source_path: source.clone(),
-            collection_name: "Recovery".to_owned(),
-            destination_mode: DestinationMode::Create,
-            accepted_date: "2026-10-10".to_owned(),
+            destination: ApplicationDestination::Create {
+                collection_name: "Recovery".to_owned(),
+            },
             date_resolution: Some(DateResolution::AsShown),
             utc_offset_seconds: 0,
         })

@@ -307,8 +307,25 @@ fn read_directory(path: &Path) -> Result<fs::ReadDir, CatalogServiceError> {
     })
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ExistingCollectionIdentity {
+    Dated { year: String, directory: String },
+    Ongoing { key: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ImportDestination {
+    Create {
+        collection_name: String,
+    },
+    Existing {
+        identity: ExistingCollectionIdentity,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DestinationMode {
     Create,
     Existing,
@@ -371,9 +388,7 @@ pub struct ImportDateSourceSummary {
 pub struct ImportReviewRequest {
     pub catalog_path: PathBuf,
     pub source_path: PathBuf,
-    pub collection_name: String,
-    pub destination_mode: DestinationMode,
-    pub accepted_date: String,
+    pub destination: ImportDestination,
     pub date_resolution: Option<DateResolution>,
     pub utc_offset_seconds: i32,
 }
@@ -382,7 +397,7 @@ pub struct ImportReviewRequest {
 pub struct ImportReview {
     pub scan: ImportScanSummary,
     pub collection_name: String,
-    pub destination_mode: DestinationMode,
+    pub destination: ImportDestination,
     pub destination_path: PathBuf,
     pub accepted_date: String,
     pub date_resolution: Option<DateResolution>,
@@ -1158,7 +1173,7 @@ fn title_case_source_name(value: &str) -> String {
 pub enum ImportPlanningError {
     Catalog(CatalogServiceError),
     DestinationAlreadyExists(PathBuf),
-    DestinationMissing(PathBuf),
+    DestinationUnavailable(String),
     DestinationPreflight(String),
     InvalidCollection(String),
     InvalidDate(String),
@@ -1179,7 +1194,7 @@ impl ImportPlanningError {
         match self {
             Self::Catalog(error) => error.code(),
             Self::DestinationAlreadyExists(_) => "destination_exists",
-            Self::DestinationMissing(_) => "destination_missing",
+            Self::DestinationUnavailable(_) => "destination_unavailable",
             Self::DestinationPreflight(_) => "destination_preflight_failed",
             Self::InvalidCollection(_) => "invalid_collection",
             Self::InvalidDate(_) => "invalid_date",
@@ -1203,11 +1218,7 @@ impl fmt::Display for ImportPlanningError {
                 "A collection already exists at {}. Choose Add to Existing.",
                 path.display()
             ),
-            Self::DestinationMissing(path) => write!(
-                formatter,
-                "No collection exists at {}. Choose a new collection.",
-                path.display()
-            ),
+            Self::DestinationUnavailable(message) => formatter.write_str(message),
             Self::DestinationPreflight(message) => {
                 write!(
                     formatter,
@@ -1400,8 +1411,10 @@ mod tests {
 
     use super::{
         CatalogInitializationError, CatalogIntent, CatalogService, CatalogServiceError,
-        DateResolution, DestinationMode, ImportPlanningError, ImportPlanningService,
-        ImportPreflightCheck, ImportReviewRequest, OperationInspectionService,
+        DateResolution, ExistingCollectionIdentity, ImportCancellation, ImportDestination,
+        ImportExecutionRequest, ImportExecutionResult, ImportExecutionService, ImportPlanningError,
+        ImportPlanningService, ImportPreflightCheck, ImportReviewRequest,
+        OperationInspectionService,
     };
 
     #[test]
@@ -1847,9 +1860,9 @@ mod tests {
         let unresolved = ImportPlanningService::review(ImportReviewRequest {
             catalog_path: catalog.clone(),
             source_path: source.clone(),
-            collection_name: "Dolomites".to_owned(),
-            destination_mode: DestinationMode::Create,
-            accepted_date: "2026-10-10".to_owned(),
+            destination: ImportDestination::Create {
+                collection_name: "Dolomites".to_owned(),
+            },
             date_resolution: None,
             utc_offset_seconds: 0,
         })
@@ -1864,9 +1877,9 @@ mod tests {
         let resolved = ImportPlanningService::review(ImportReviewRequest {
             catalog_path: catalog.clone(),
             source_path: source.clone(),
-            collection_name: "Dolomites".to_owned(),
-            destination_mode: DestinationMode::Create,
-            accepted_date: "2026-10-10".to_owned(),
+            destination: ImportDestination::Create {
+                collection_name: "Dolomites".to_owned(),
+            },
             date_resolution: Some(DateResolution::AsShown),
             utc_offset_seconds: 0,
         })
@@ -1945,9 +1958,9 @@ mod tests {
             ImportPlanningService::review(ImportReviewRequest {
                 catalog_path: catalog.clone(),
                 source_path: source.clone(),
-                collection_name: "Dolomites".to_owned(),
-                destination_mode: DestinationMode::Create,
-                accepted_date: "2026-10-10".to_owned(),
+                destination: ImportDestination::Create {
+                    collection_name: "Dolomites".to_owned(),
+                },
                 date_resolution: Some(DateResolution::AsShown),
                 utc_offset_seconds: 0,
             }),
@@ -1956,14 +1969,150 @@ mod tests {
         let converted = ImportPlanningService::review(ImportReviewRequest {
             catalog_path: catalog,
             source_path: source,
-            collection_name: "UTC Dolomites".to_owned(),
-            destination_mode: DestinationMode::Create,
-            accepted_date: String::new(),
+            destination: ImportDestination::Create {
+                collection_name: "UTC Dolomites".to_owned(),
+            },
             date_resolution: Some(DateResolution::ConvertFromUtc),
             utc_offset_seconds: 7_200,
         })
         .unwrap();
         assert!(converted.can_start);
         assert!(converted.reviewed_plan.is_some());
+    }
+
+    #[test]
+    fn reviews_exact_dated_and_ongoing_destinations() {
+        let temporary = tempdir().expect("temporary directory");
+        let catalog = temporary.path().join("catalog");
+        let dated_source = temporary.path().join("dated-source");
+        let ongoing_source = temporary.path().join("ongoing-source");
+        for path in [&catalog, &dated_source, &ongoing_source] {
+            fs::create_dir(path).unwrap();
+        }
+        CatalogService::create(&catalog, "Family").unwrap();
+        fs::create_dir_all(catalog.join("2019/2019-07-14 +6d Brittany")).unwrap();
+        fs::create_dir_all(catalog.join("2019/z Kids")).unwrap();
+        fs::write(dated_source.join("IMG_20190715_101112.jpg"), b"dated").unwrap();
+        fs::write(ongoing_source.join("IMG_20190716_101112.jpg"), b"ongoing").unwrap();
+
+        let dated = ImportPlanningService::review(ImportReviewRequest {
+            catalog_path: catalog.clone(),
+            source_path: dated_source,
+            destination: ImportDestination::Existing {
+                identity: ExistingCollectionIdentity::Dated {
+                    year: "2019".to_owned(),
+                    directory: "2019-07-14 +6d Brittany".to_owned(),
+                },
+            },
+            date_resolution: Some(DateResolution::AsShown),
+            utc_offset_seconds: 0,
+        })
+        .unwrap();
+        assert_eq!(dated.collection_name, "Brittany");
+        assert!(dated
+            .destination_path
+            .ends_with("2019/2019-07-14 +6d Brittany"));
+
+        let ongoing = ImportPlanningService::review(ImportReviewRequest {
+            catalog_path: catalog,
+            source_path: ongoing_source,
+            destination: ImportDestination::Existing {
+                identity: ExistingCollectionIdentity::Ongoing {
+                    key: "kids".to_owned(),
+                },
+            },
+            date_resolution: Some(DateResolution::AsShown),
+            utc_offset_seconds: 0,
+        })
+        .unwrap();
+        assert_eq!(ongoing.collection_name, "Kids");
+        assert!(ongoing.destination_path.ends_with("2019/z Kids"));
+    }
+
+    #[test]
+    fn creates_one_missing_ongoing_annual_part() {
+        let temporary = tempdir().expect("temporary directory");
+        let catalog = temporary.path().join("catalog");
+        let source = temporary.path().join("source");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir(&source).unwrap();
+        CatalogService::create(&catalog, "Family").unwrap();
+        fs::create_dir_all(catalog.join("2019/z Kids")).unwrap();
+        fs::write(source.join("IMG_20261010_101112.jpg"), b"ongoing").unwrap();
+
+        let review = ImportPlanningService::review(ImportReviewRequest {
+            catalog_path: catalog.clone(),
+            source_path: source,
+            destination: ImportDestination::Existing {
+                identity: ExistingCollectionIdentity::Ongoing {
+                    key: "kids".to_owned(),
+                },
+            },
+            date_resolution: Some(DateResolution::AsShown),
+            utc_offset_seconds: 0,
+        })
+        .unwrap();
+        assert!(review.destination_path.ends_with("2026/z Kids"));
+
+        let prepared = ImportExecutionService::prepare(ImportExecutionRequest {
+            reviewed_plan: review.reviewed_plan.unwrap(),
+        })
+        .unwrap();
+        let result =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                .unwrap();
+        assert!(matches!(result, ImportExecutionResult::Completed(_)));
+        assert!(catalog.join("2026/z Kids/SHA256SUMS").is_file());
+    }
+
+    #[test]
+    fn rejects_unavailable_or_incompatible_existing_destinations() {
+        let temporary = tempdir().expect("temporary directory");
+        let catalog = temporary.path().join("catalog");
+        let source = temporary.path().join("source");
+        fs::create_dir(&catalog).unwrap();
+        fs::create_dir(&source).unwrap();
+        CatalogService::create(&catalog, "Family").unwrap();
+        fs::create_dir_all(catalog.join("2019/2019-07-14 +6d Brittany")).unwrap();
+        fs::create_dir_all(catalog.join("2019/z Kids")).unwrap();
+        fs::write(source.join("IMG_20261010_101112.jpg"), b"one").unwrap();
+
+        let review = |destination| {
+            ImportPlanningService::review(ImportReviewRequest {
+                catalog_path: catalog.clone(),
+                source_path: source.clone(),
+                destination,
+                date_resolution: Some(DateResolution::AsShown),
+                utc_offset_seconds: 0,
+            })
+        };
+
+        for destination in [
+            ImportDestination::Existing {
+                identity: ExistingCollectionIdentity::Dated {
+                    year: "2019".to_owned(),
+                    directory: "2019-07-14 +6d Brittany".to_owned(),
+                },
+            },
+            ImportDestination::Existing {
+                identity: ExistingCollectionIdentity::Dated {
+                    year: "2019".to_owned(),
+                    directory: "2019-01-01 Missing".to_owned(),
+                },
+            },
+        ] {
+            let error = review(destination).unwrap_err();
+            assert_eq!(error.code(), "destination_unavailable");
+        }
+
+        fs::write(source.join("IMG_20251010_101112.jpg"), b"two").unwrap();
+        let error = review(ImportDestination::Existing {
+            identity: ExistingCollectionIdentity::Ongoing {
+                key: "kids".to_owned(),
+            },
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), "destination_unavailable");
+        assert!(error.to_string().contains("one year at a time"));
     }
 }

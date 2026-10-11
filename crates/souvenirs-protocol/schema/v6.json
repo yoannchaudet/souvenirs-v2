@@ -486,11 +486,44 @@
         "needs_confirmation"
       ]
     },
-    "ImportDestinationMode": {
-      "type": "string",
-      "enum": [
-        "create",
-        "existing"
+    "ImportDestination": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "collection_name",
+            "kind"
+          ],
+          "properties": {
+            "collection_name": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "create"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "identity",
+            "kind"
+          ],
+          "properties": {
+            "identity": {
+              "$ref": "#/definitions/CatalogCollectionIdentity"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "existing"
+              ]
+            }
+          }
+        }
       ]
     },
     "ImportPreflightCheck": {
@@ -548,20 +581,12 @@
     "ImportReviewParameters": {
       "type": "object",
       "required": [
-        "accepted_date",
         "catalog_path",
-        "collection_name",
-        "destination_mode",
+        "destination",
         "source_path"
       ],
       "properties": {
-        "accepted_date": {
-          "type": "string"
-        },
         "catalog_path": {
-          "type": "string"
-        },
-        "collection_name": {
           "type": "string"
         },
         "date_resolution": {
@@ -574,8 +599,8 @@
             }
           ]
         },
-        "destination_mode": {
-          "$ref": "#/definitions/ImportDestinationMode"
+        "destination": {
+          "$ref": "#/definitions/ImportDestination"
         },
         "source_path": {
           "type": "string"
@@ -1143,7 +1168,7 @@
             "accepted_date",
             "can_start",
             "collection_name",
-            "destination_mode",
+            "destination",
             "destination_path",
             "left_on_source_count",
             "operation_count",
@@ -1174,8 +1199,8 @@
                 }
               ]
             },
-            "destination_mode": {
-              "$ref": "#/definitions/ImportDestinationMode"
+            "destination": {
+              "$ref": "#/definitions/ImportDestination"
             },
             "destination_path": {
               "type": "string"

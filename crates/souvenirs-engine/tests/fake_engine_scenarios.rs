@@ -67,6 +67,82 @@ fn catalog_flow_serves_collection_query_capability() {
 }
 
 #[test]
+fn import_flow_reviews_exact_existing_identity() {
+    let destination = json!({
+        "kind": "existing",
+        "identity": {
+            "kind": "dated",
+            "year": "2019",
+            "directory": "2019-07-14 +6d Brittany"
+        }
+    });
+    let output = run(
+        "import-flow",
+        &[
+            handshake(),
+            request(
+                "request-2",
+                "catalog.collections",
+                json!({"path": "/catalog"}),
+            ),
+            request(
+                "request-3",
+                "import.review",
+                json!({
+                    "catalog_path": "/catalog",
+                    "source_path": "/source",
+                    "destination": destination,
+                    "date_resolution": "as_shown",
+                    "utc_offset_seconds": 0
+                }),
+            ),
+        ],
+    );
+
+    assert!(output.status.success());
+    let messages = messages(&output);
+    assert_eq!(messages[1]["result"]["type"], "catalog_collections");
+    assert_eq!(messages[2]["result"]["destination"], destination);
+    assert_eq!(
+        messages[2]["result"]["destination_path"],
+        "/catalog/2019/2019-07-14 +6d Brittany"
+    );
+}
+
+#[test]
+fn unavailable_import_destination_returns_structured_error() {
+    let output = run(
+        "import-destination-unavailable",
+        &[
+            handshake(),
+            request(
+                "request-2",
+                "import.review",
+                json!({
+                    "catalog_path": "/catalog",
+                    "source_path": "/source",
+                    "destination": {
+                        "kind": "existing",
+                        "identity": {
+                            "kind": "ongoing",
+                            "key": "kids"
+                        }
+                    },
+                    "date_resolution": null,
+                    "utc_offset_seconds": 0
+                }),
+            ),
+        ],
+    );
+
+    assert!(output.status.success());
+    assert_eq!(
+        messages(&output)[1]["error"]["code"],
+        "destination_unavailable"
+    );
+}
+
+#[test]
 fn successful_operation_emits_ordered_terminal_events() {
     let output = run("successful-operation", &[handshake(), start_request()]);
 
