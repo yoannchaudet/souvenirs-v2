@@ -1027,10 +1027,13 @@ private struct ImportPlanningSheet: View {
                                     "Scans the same source again without closing this sheet."
                                 )
                                 .accessibilityIdentifier("retry-import-scan")
+                                .focusable()
                                 .focused($keyboardFocus, equals: .retry)
                                 .accessibilityFocused($recoveryFocused, equals: .retry)
-                                .onAppear {
+                                .task {
                                     requestedRecoveryFocus = nil
+                                    await Task.yield()
+                                    guard model.canRetryScan else { return }
                                     keyboardFocus = .retry
                                     recoveryFocused = .retry
                                 }
