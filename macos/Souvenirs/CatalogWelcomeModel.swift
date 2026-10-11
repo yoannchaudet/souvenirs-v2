@@ -137,6 +137,7 @@ final class CatalogWelcomeModel: ObservableObject {
         route = .welcome
         selectedPath = nil
         validation = .none
+        presentedError = nil
     }
 
     func chooseCreateLocation(_ path: String) async {

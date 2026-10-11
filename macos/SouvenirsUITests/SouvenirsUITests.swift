@@ -11,8 +11,30 @@ final class SouvenirsUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["engine-status"].waitForExistence(timeout: 5))
-        app.buttons["create-catalog"].click()
-        XCTAssertTrue(app.textFields["catalog-name"].waitForExistence(timeout: 2))
+        let launcher = app.buttons["create-catalog"]
+        launcher.click()
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].exists)
+        let name = app.textFields["catalog-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 2))
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: name
+        )
+        waitForExpectations(timeout: 3)
+
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].exists)
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: launcher
+        )
+        waitForExpectations(timeout: 3)
+
+        launcher.click()
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 2))
 
         app.buttons["choose-catalog-location"].click()
         XCTAssertTrue(
@@ -63,6 +85,7 @@ final class SouvenirsUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
         app.buttons["create-catalog"].click()
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 2))
         app.buttons["choose-catalog-location"].click()
 
         XCTAssertTrue(

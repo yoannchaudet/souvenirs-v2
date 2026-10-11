@@ -78,24 +78,28 @@ final class CatalogVisualTests: XCTestCase {
 
         model.beginCreate()
         try capture(
-            ContentView(
-                engineStatus: .ready(engineVersion: "0.1.0"),
+            CatalogCreationSheet(
                 model: model,
-                imports: imports
+                onChooseLocation: {},
+                onCancel: {},
+                onCreate: {}
             ),
-            size: NSSize(width: 920, height: 620),
-            name: "catalog-create-empty"
+            size: NSSize(width: 540, height: 500),
+            name: "catalog-create-empty",
+            assertsHeightFits: true
         )
 
         await model.chooseCreateLocation("/Volumes/photos/Family Catalog")
         try capture(
-            ContentView(
-                engineStatus: .ready(engineVersion: "0.1.0"),
+            CatalogCreationSheet(
                 model: model,
-                imports: imports
+                onChooseLocation: {},
+                onCancel: {},
+                onCreate: {}
             ),
-            size: NSSize(width: 920, height: 620),
-            name: "catalog-create"
+            size: NSSize(width: 540, height: 500),
+            name: "catalog-create",
+            assertsHeightFits: true
         )
 
         engine.validationError = EngineSupervisor.SupervisorError.protocolError(
@@ -104,22 +108,15 @@ final class CatalogVisualTests: XCTestCase {
         )
         await model.chooseCreateLocation("/Volumes/READ_ONLY/Family Catalog")
         try capture(
-            ContentView(
-                engineStatus: .ready(engineVersion: "0.1.0"),
+            CatalogCreationSheet(
                 model: model,
-                imports: imports
+                onChooseLocation: {},
+                onCancel: {},
+                onCreate: {}
             ),
-            size: NSSize(width: 920, height: 620),
-            name: "catalog-create-invalid"
-        )
-        try capture(
-            ContentView(
-                engineStatus: .ready(engineVersion: "0.1.0"),
-                model: model,
-                imports: imports
-            ),
-            size: NSSize(width: 586, height: 386),
-            name: "catalog-create-invalid-small"
+            size: NSSize(width: 540, height: 500),
+            name: "catalog-create-invalid",
+            assertsHeightFits: true
         )
 
         engine.validationError = nil

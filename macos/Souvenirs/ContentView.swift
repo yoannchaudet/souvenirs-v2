@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     private enum ModalReturnFocus: Hashable {
+        case createCatalog
         case chooseImportFolder
         case retryDeferredRecovery
         case stopImport
@@ -12,7 +13,6 @@ struct ContentView: View {
     @ObservedObject var model: CatalogWelcomeModel
     @ObservedObject var imports: ImportExecutionCoordinator
     let onRetryEngine: (() -> Void)?
-    @State private var showsCreatedItems = false
     @State private var modalReturnFocus: ModalReturnFocus?
     @FocusState private var keyboardFocus: ModalReturnFocus?
     @AccessibilityFocusState private var accessibilityFocus: ModalReturnFocus?
@@ -32,16 +32,32 @@ struct ContentView: View {
     var body: some View {
         Group {
             switch model.route {
-            case .welcome:
+            case .welcome, .create:
                 welcome
-            case .create:
-                createCatalog
             case .catalog(let catalog):
                 catalogHome(catalog)
             }
         }
         .frame(minWidth: 586, minHeight: 386)
         .background(.ultraThinMaterial)
+        .sheet(
+            isPresented: createCatalogPresented,
+            onDismiss: restoreModalFocus
+        ) {
+            CatalogCreationSheet(
+                model: model,
+                onChooseLocation: {
+                    chooseFolder { path in
+                        Task { await model.chooseCreateLocation(path) }
+                    }
+                },
+                onCancel: model.cancelCreate,
+                onCreate: {
+                    Task { await model.createCatalog() }
+                }
+            )
+            .frame(width: 540, height: 500)
+        }
         .sheet(
             isPresented: importPlanningPresented,
             onDismiss: restoreModalFocus
@@ -88,7 +104,11 @@ struct ContentView: View {
         .alert(
             model.presentedErrorTitle,
             isPresented: Binding(
-                get: { model.presentedError != nil },
+                get: {
+                    guard model.presentedError != nil else { return false }
+                    if case .create = model.route { return false }
+                    return true
+                },
                 set: { if !$0 { model.presentedError = nil } }
             )
         ) {
@@ -97,6 +117,20 @@ struct ContentView: View {
         } message: {
             Text(model.presentedError ?? "")
         }
+    }
+
+    private var createCatalogPresented: Binding<Bool> {
+        Binding(
+            get: {
+                if case .create = model.route { return true }
+                return false
+            },
+            set: { isPresented in
+                if !isPresented, case .create = model.route {
+                    model.cancelCreate()
+                }
+            }
+        )
     }
 
     private var importPlanningPresented: Binding<Bool> {
@@ -128,6 +162,9 @@ struct ContentView: View {
     private func restoreModalFocus() {
         guard let target = modalReturnFocus else { return }
         modalReturnFocus = nil
+        if target == .createCatalog, model.route != .welcome {
+            return
+        }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(150))
             keyboardFocus = target
@@ -160,15 +197,22 @@ struct ContentView: View {
 
                 VStack(spacing: 8) {
                     welcomeAction(
-                        title: "Create a New Catalog…",
+                        title: "Create a New Archive…",
                         subtitle: "Pick a folder on a drive or network share",
                         systemImage: "plus",
                         prominent: true,
                         identifier: "create-catalog"
                     ) {
                         guard engineStatus.catalogActionsAvailable else { return }
+                        modalReturnFocus = .createCatalog
                         model.beginCreate()
                     }
+                    .focusable()
+                    .focused($keyboardFocus, equals: .createCatalog)
+                    .accessibilityFocused(
+                        $accessibilityFocus,
+                        equals: .createCatalog
+                    )
                     welcomeAction(
                         title: "Open an Existing Catalog…",
                         subtitle: "Including a backup copy",
@@ -252,129 +296,6 @@ struct ContentView: View {
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.48))
         }
         .frame(minWidth: 586, minHeight: 386)
-    }
-
-    private var createCatalog: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 15) {
-                    Text("New Catalog")
-                        .font(.title2.bold())
-                    Text("Choose where your photos will live. You can open this folder in Finder at any time.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Name").font(.caption)
-                        TextField("Catalog name", text: $model.catalogName)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityIdentifier("catalog-name")
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Location").font(.caption)
-                        HStack(spacing: 8) {
-                            HStack(spacing: 9) {
-                                Image(systemName: "externaldrive")
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(locationTitle)
-                                        .fontWeight(.medium)
-                                        .lineLimit(1)
-                                    Text(locationSubtitle)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                                Spacer()
-                            }
-                            .padding(.horizontal, 11)
-                            .frame(height: 48)
-                            .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 9)
-                                    .stroke(.separator.opacity(0.65))
-                            }
-
-                            Button("Choose…") {
-                                chooseFolder { path in
-                                    Task { await model.chooseCreateLocation(path) }
-                                }
-                            }
-                            .accessibilityIdentifier("choose-catalog-location")
-                        }
-                        validationLine
-                    }
-
-                    if case .invalid(let message) = model.validation {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("This location can’t be used")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Label(message, systemImage: "exclamationmark.circle")
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.red.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(.red.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [3]))
-                        }
-                        .accessibilityIdentifier("catalog-location-error")
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Button {
-                            showsCreatedItems.toggle()
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2)
-                                    .rotationEffect(.degrees(showsCreatedItems ? 90 : 0))
-                                Text("What will be created")
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("created-items-disclosure")
-                        .accessibilityValue(showsCreatedItems ? "Expanded" : "Collapsed")
-
-                        if showsCreatedItems {
-                            Text(".souvenirs.yml and a small .souvenirs folder. Your photos are added later, by import.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 4)
-                            .accessibilityIdentifier("created-items-description")
-                        }
-                    }
-                    .padding(12)
-                    .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
-                }
-                .padding(24)
-                .frame(maxWidth: 520)
-                .frame(maxWidth: .infinity, alignment: .top)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            Divider()
-            HStack {
-                Spacer()
-                Button("Cancel") { model.cancelCreate() }
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityIdentifier("cancel-create-catalog")
-                Button("Create Catalog") {
-                    Task { await model.createCatalog() }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!model.canCreate)
-                .accessibilityIdentifier("confirm-create-catalog")
-            }
-            .padding(16)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial)
     }
 
     private func catalogHome(_ catalog: RecentCatalog) -> some View {
@@ -820,36 +741,6 @@ struct ContentView: View {
         engineStatus.catalogActionsUnavailableDescription ?? ""
     }
 
-    @ViewBuilder
-    private var validationLine: some View {
-        switch model.validation {
-        case .none:
-            EmptyView()
-        case .checking:
-            Label("Checking this location…", systemImage: "ellipsis.circle")
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("catalog-location-checking")
-        case .valid:
-            Label("This location works. Other Macs can open it too, one at a time.", systemImage: "checkmark")
-                .foregroundStyle(.green)
-                .accessibilityIdentifier("catalog-location-valid")
-        case .invalid:
-            EmptyView()
-        }
-    }
-
-    private var locationTitle: String {
-        model.selectedPath.map { URL(fileURLWithPath: $0).lastPathComponent }
-            ?? "Choose a folder"
-    }
-
-    private var locationSubtitle: String {
-        switch model.validation {
-        case .valid(let volumeName): return volumeName
-        default: return model.selectedPath ?? "Local or network drive"
-        }
-    }
-
     private var engineBadge: some View {
         Group {
             switch engineStatus {
@@ -882,6 +773,185 @@ struct ContentView: View {
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
             onSelection(url.path)
+        }
+    }
+}
+
+struct CatalogCreationSheet: View {
+    private enum FocusTarget: Hashable {
+        case name
+    }
+
+    @ObservedObject var model: CatalogWelcomeModel
+    let onChooseLocation: () -> Void
+    let onCancel: () -> Void
+    let onCreate: () -> Void
+    @State private var showsCreatedItems = false
+    @FocusState private var keyboardFocus: FocusTarget?
+    @AccessibilityFocusState private var titleFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 15) {
+                    Text("New Archive")
+                        .font(.title2.bold())
+                        .accessibilityIdentifier("catalog-create-title")
+                        .accessibilityFocused($titleFocused)
+                    Text("Choose where your photos will live. You can open this folder in Finder at any time.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Name").font(.caption)
+                        TextField("Archive name", text: $model.catalogName)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("catalog-name")
+                            .focused($keyboardFocus, equals: .name)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Location").font(.caption)
+                        HStack(spacing: 8) {
+                            HStack(spacing: 9) {
+                                Image(systemName: "externaldrive")
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(locationTitle)
+                                        .fontWeight(.medium)
+                                        .lineLimit(1)
+                                    Text(locationSubtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 11)
+                            .frame(height: 48)
+                            .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 9)
+                                    .stroke(.separator.opacity(0.65))
+                            }
+
+                            Button("Choose…", action: onChooseLocation)
+                                .accessibilityIdentifier("choose-catalog-location")
+                        }
+                        validationLine
+                    }
+
+                    if case .invalid(let message) = model.validation {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("This location can’t be used")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Label(message, systemImage: "exclamationmark.circle")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.red.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(.red.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [3]))
+                        }
+                        .accessibilityIdentifier("catalog-location-error")
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button {
+                            showsCreatedItems.toggle()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2)
+                                    .rotationEffect(.degrees(showsCreatedItems ? 90 : 0))
+                                Text("What will be created")
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("created-items-disclosure")
+                        .accessibilityValue(showsCreatedItems ? "Expanded" : "Collapsed")
+
+                        if showsCreatedItems {
+                            Text(".souvenirs.yml and a small .souvenirs folder. Your photos are added later, by import.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 4)
+                                .accessibilityIdentifier("created-items-description")
+                        }
+                    }
+                    .padding(12)
+                    .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .padding(24)
+            }
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("cancel-create-catalog")
+                Button("Create Archive", action: onCreate)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.canCreate)
+                    .accessibilityIdentifier("confirm-create-catalog")
+            }
+            .padding(16)
+            .background(.regularMaterial)
+        }
+        .onAppear {
+            keyboardFocus = .name
+            titleFocused = true
+        }
+        .alert(
+            model.presentedErrorTitle,
+            isPresented: Binding(
+                get: { model.presentedError != nil },
+                set: { if !$0 { model.presentedError = nil } }
+            )
+        ) {
+            Button("OK") { model.presentedError = nil }
+                .accessibilityIdentifier("catalog-error-dismiss")
+        } message: {
+            Text(model.presentedError ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var validationLine: some View {
+        switch model.validation {
+        case .none:
+            EmptyView()
+        case .checking:
+            Label("Checking this location…", systemImage: "ellipsis.circle")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("catalog-location-checking")
+        case .valid:
+            Label(
+                "This location works. Other Macs can open it too, one at a time.",
+                systemImage: "checkmark"
+            )
+            .foregroundStyle(.green)
+            .accessibilityIdentifier("catalog-location-valid")
+        case .invalid:
+            EmptyView()
+        }
+    }
+
+    private var locationTitle: String {
+        model.selectedPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+            ?? "Choose a folder"
+    }
+
+    private var locationSubtitle: String {
+        switch model.validation {
+        case .valid(let volumeName): return volumeName
+        default: return model.selectedPath ?? "Local or network drive"
         }
     }
 }
