@@ -5,6 +5,7 @@ mod catalog;
 mod catalog_path;
 mod copy;
 mod durability;
+mod index;
 mod lock;
 mod manifest;
 mod operation;
@@ -18,6 +19,7 @@ pub use catalog_path::{
     validate_directory, CatalogPathError, OutputPathObservation, PortableDestinationObserver,
 };
 pub use copy::{is_source_unavailable_error, CopyExpectation, VerifiedCopy, VerifiedCopyError};
+pub use index::{CatalogIndex, CatalogIndexError};
 pub use lock::{CatalogLock, LockEnvironment, LockError, LockHolder, SystemLockEnvironment};
 pub use manifest::{ManifestReplacement, ManifestReplacementError, ManifestReplacementRequest};
 #[cfg(feature = "test-failpoints")]
