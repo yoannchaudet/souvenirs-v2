@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_storage::{
-    read_operation_records, CatalogLayout, CatalogLock, CatalogPathError, CopyExpectation,
-    ManifestReplacementRequest, OperationJournal, OperationRecord, PortableDestinationObserver,
-    RecoveryCopy, RecoveryDirectory, RecoveryManifest, RecoveryMode, RecoveryRequest,
+    is_source_unavailable_error, read_operation_records, CatalogLayout, CatalogLock,
+    CatalogPathError, CopyExpectation, ManifestReplacementRequest, OperationJournal,
+    OperationRecord, PortableDestinationObserver, RecoveryCopy, RecoveryDirectory, RecoveryError,
+    RecoveryManifest, RecoveryMode, RecoveryRequest, VerifiedCopyError,
 };
 use time::Date;
 
@@ -153,7 +154,6 @@ impl ImportExecutionService {
                 "reviewed plan digest does not match its contents".to_owned(),
             ));
         }
-        validate_reviewed_plan(&envelope.plan)?;
         let operation_id = operation_id()?;
         Ok(PreparedImport {
             operation_id,
@@ -184,6 +184,28 @@ impl ImportExecutionService {
                 prepared.plan.copies.len(),
             )
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+        progress(OperationProgress {
+            completed_units: 0,
+            total_units: prepared.plan.copies.len() as u64,
+            message: "Checking the source…".to_owned(),
+        });
+        match validate_reviewed_source_state(&prepared.plan, cancellation) {
+            Ok(SourceValidation::Valid) => {}
+            Ok(SourceValidation::Cancelled) => {
+                return cancel_preflight(&prepared, &layout, lock, &mut journal);
+            }
+            Err(error) => {
+                if matches!(error, ImportExecutionError::SourceUnavailable(_)) {
+                    return Err(error);
+                }
+                journal
+                    .cancel(&layout, &lock)
+                    .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+                lock.release()
+                    .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+                return Err(error);
+            }
+        }
 
         for directory in prepared
             .plan
@@ -194,6 +216,24 @@ impl ImportExecutionService {
             journal
                 .create_destination_directory(&layout, &lock, &directory.step_id, &directory.path)
                 .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+        }
+
+        fn cancel_preflight(
+            prepared: &PreparedImport,
+            layout: &CatalogLayout,
+            lock: CatalogLock,
+            journal: &mut OperationJournal,
+        ) -> Result<ImportExecutionResult, ImportExecutionError> {
+            journal
+                .cancel(layout, &lock)
+                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+            lock.release()
+                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+            Ok(ImportExecutionResult::Cancelled(ImportExecutionOutcome {
+                copied_count: 0,
+                skipped_count: 0,
+                left_on_source_count: prepared.plan.left_on_source_count,
+            }))
         }
 
         let total_units = prepared.plan.copies.len() as u64;
@@ -214,7 +254,7 @@ impl ImportExecutionService {
                         size_bytes: copy.size_bytes,
                     },
                 )
-                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+                .map_err(import_verified_copy_error)?;
             copied_count = index + 1;
             progress(OperationProgress {
                 completed_units: copied_count as u64,
@@ -388,15 +428,24 @@ pub(crate) fn encode_reviewed_plan(
 }
 const MANIFEST_CHANGED: &str =
     "The destination manifest changed after review. Review the import again.";
-fn validate_reviewed_plan(plan: &ExecutionPlan) -> Result<(), ImportExecutionError> {
-    CatalogService::open(&plan.catalog_path)
-        .map_err(|error| ImportExecutionError::Catalog(error.to_string()))?;
-    if source_snapshot(&plan.source_path)? != plan.source_snapshot {
+enum SourceValidation {
+    Valid,
+    Cancelled,
+}
+
+fn validate_reviewed_source_state(
+    plan: &ExecutionPlan,
+    cancellation: &ImportCancellation,
+) -> Result<SourceValidation, ImportExecutionError> {
+    let Some(snapshot) = source_snapshot(&plan.source_path, cancellation)? else {
+        return Ok(SourceValidation::Cancelled);
+    };
+    if snapshot != plan.source_snapshot {
         return Err(ImportExecutionError::Conflict(
             "The source changed after review. Review the import again.".to_owned(),
         ));
     }
-    validate_reviewed_catalog_state(plan)
+    Ok(SourceValidation::Valid)
 }
 
 fn validate_reviewed_catalog_state(plan: &ExecutionPlan) -> Result<(), ImportExecutionError> {
@@ -469,29 +518,40 @@ fn destination_observation_error(path: &Path, error: CatalogPathError) -> Import
     }
 }
 
-fn source_snapshot(root: &Path) -> Result<Vec<SourceSnapshotEntry>, ImportExecutionError> {
+fn source_snapshot(
+    root: &Path,
+    cancellation: &ImportCancellation,
+) -> Result<Option<Vec<SourceSnapshotEntry>>, ImportExecutionError> {
     if !root.is_dir() {
-        return Err(ImportExecutionError::InvalidSource(root.to_path_buf()));
+        return Err(ImportExecutionError::SourceUnavailable(root.to_path_buf()));
     }
     let mut paths = Vec::new();
-    crate::collect_source_files(root, &mut paths)
-        .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
+    crate::collect_source_files(root, &mut paths).map_err(|error| match error {
+        crate::ImportPlanningError::Io { path, source } if is_source_unavailable_error(&source) => {
+            ImportExecutionError::SourceUnavailable(path)
+        }
+        crate::ImportPlanningError::Io { path, source } => {
+            ImportExecutionError::Io { path, source }
+        }
+        other => ImportExecutionError::Planning(other.to_string()),
+    })?;
     paths.sort();
-    paths
-        .into_iter()
-        .map(|path| {
-            let relative = path
-                .strip_prefix(root)
-                .expect("collected source remains below root")
-                .to_path_buf();
-            let (sha256, size_bytes) = digest_file(&path)?;
-            Ok(SourceSnapshotEntry {
-                path: relative,
-                size_bytes,
-                sha256,
-            })
-        })
-        .collect()
+    let mut snapshot = Vec::with_capacity(paths.len());
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .expect("collected source remains below root")
+            .to_path_buf();
+        let Some((sha256, size_bytes)) = digest_source_file(&path, cancellation)? else {
+            return Ok(None);
+        };
+        snapshot.push(SourceSnapshotEntry {
+            path: relative,
+            size_bytes,
+            sha256,
+        });
+    }
+    Ok(Some(snapshot))
 }
 pub struct ImportRecoveryService;
 
@@ -550,7 +610,7 @@ impl ImportRecoveryService {
         };
         let outcome = layout
             .recover_operation(&lock, journal_path, request)
-            .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+            .map_err(import_recovery_error)?;
         lock.release()
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
         let copied_count = match outcome {
@@ -664,6 +724,7 @@ pub enum ImportExecutionError {
     NoSupportedMedia,
     OperationNotFound(String),
     Planning(String),
+    SourceUnavailable(PathBuf),
     Storage(String),
 }
 
@@ -676,7 +737,7 @@ impl ImportExecutionError {
             Self::DecisionRequired => "decision_required",
             Self::InvalidCollection(_) => "invalid_collection",
             Self::InvalidDate(_) => "invalid_date",
-            Self::InvalidSource(_) => "source_unavailable",
+            Self::InvalidSource(_) | Self::SourceUnavailable(_) => "source_unavailable",
             Self::Io { .. } => "source_io",
             Self::NoSupportedMedia => "no_supported_media",
             Self::OperationNotFound(_) => "operation_not_found",
@@ -696,7 +757,7 @@ impl fmt::Display for ImportExecutionError {
             | Self::Planning(message)
             | Self::Storage(message) => formatter.write_str(message),
             Self::DecisionRequired => formatter.write_str("The import still requires a decision."),
-            Self::InvalidSource(path) => {
+            Self::InvalidSource(path) | Self::SourceUnavailable(path) => {
                 write!(formatter, "The source is unavailable: {}", path.display())
             }
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
@@ -816,7 +877,7 @@ fn validate_recovery_sources(
                 continue;
             }
         }
-        let (digest, size_bytes) = digest_file(&copy.source)?;
+        let (digest, size_bytes) = digest_recovery_source_file(&copy.source)?;
         if digest != copy.digest || size_bytes != copy.size_bytes {
             return Err(ImportExecutionError::Storage(format!(
                 "source changed after operation preparation: {}",
@@ -983,6 +1044,71 @@ pub(crate) fn digest_file(path: &Path) -> Result<(String, u64), ImportExecutionE
     Ok((format!("{:x}", hasher.finalize()), size))
 }
 
+fn digest_source_file(
+    path: &Path,
+    cancellation: &ImportCancellation,
+) -> Result<Option<(String, u64)>, ImportExecutionError> {
+    let mut file = File::open(path).map_err(|source| {
+        if is_source_unavailable_error(&source) {
+            ImportExecutionError::SourceUnavailable(path.to_path_buf())
+        } else {
+            ImportExecutionError::Io {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    let mut size = 0_u64;
+    loop {
+        if cancellation.is_requested() {
+            return Ok(None);
+        }
+        let count = file.read(&mut buffer).map_err(|source| {
+            if is_source_unavailable_error(&source) {
+                ImportExecutionError::SourceUnavailable(path.to_path_buf())
+            } else {
+                ImportExecutionError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            }
+        })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        size += count as u64;
+    }
+    Ok(Some((format!("{:x}", hasher.finalize()), size)))
+}
+
+fn digest_recovery_source_file(path: &Path) -> Result<(String, u64), ImportExecutionError> {
+    digest_file(path).map_err(|error| match error {
+        ImportExecutionError::Io { path, source } if is_source_unavailable_error(&source) => {
+            ImportExecutionError::SourceUnavailable(path)
+        }
+        other => other,
+    })
+}
+
+fn import_verified_copy_error(error: VerifiedCopyError) -> ImportExecutionError {
+    match error {
+        VerifiedCopyError::SourceUnavailable { path, .. } => {
+            ImportExecutionError::SourceUnavailable(path)
+        }
+        other => ImportExecutionError::Storage(other.to_string()),
+    }
+}
+
+fn import_recovery_error(error: RecoveryError) -> ImportExecutionError {
+    match error {
+        RecoveryError::SourceUnavailable(path) => ImportExecutionError::SourceUnavailable(path),
+        other => ImportExecutionError::Storage(other.to_string()),
+    }
+}
+
 pub(crate) fn digest_bytes(contents: &[u8]) -> String {
     format!("{:x}", Sha256::digest(contents))
 }
@@ -1008,10 +1134,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CopyExpectation, ImportCancellation, ImportExecutionRequest, ImportExecutionResult,
-        ImportExecutionService, ImportRecoveryMode, ImportRecoveryService, RecoveryOutcome,
+        is_source_unavailable_error, CopyExpectation, ImportCancellation, ImportExecutionRequest,
+        ImportExecutionResult, ImportExecutionService, ImportRecoveryMode, ImportRecoveryService,
+        RecoveryOutcome,
     };
-    use crate::{CatalogService, DateResolution, DestinationMode};
+    use crate::{CatalogService, DateResolution, DestinationMode, OperationInspectionService};
     use souvenirs_storage::{
         read_operation_records, CatalogLayout, CatalogLock, DurableTransition, OperationJournal,
         OperationOutcome, OperationRecord,
@@ -1031,6 +1158,20 @@ mod tests {
             journal_file.write_all(b"\n").unwrap();
         }
         journal_file.sync_all().unwrap();
+    }
+
+    fn journal_records(fixture: &Fixture, operation_id: &str) -> Vec<OperationRecord> {
+        let journal = fs::read_dir(CatalogLayout::new(&fixture.catalog).journal_directory())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(operation_id))
+            })
+            .unwrap();
+        read_operation_records(&journal).unwrap()
     }
 
     #[test]
@@ -1054,7 +1195,7 @@ mod tests {
                 .iter()
                 .map(|event| event.completed_units)
                 .collect::<Vec<_>>(),
-            [1, 2]
+            [0, 1, 2]
         );
         let collection = fixture
             .catalog
@@ -1081,8 +1222,10 @@ mod tests {
         let cancellation = ImportCancellation::default();
         let progress_cancellation = cancellation.clone();
 
-        let result = ImportExecutionService::execute(prepared, &cancellation, |_| {
-            assert!(progress_cancellation.request());
+        let result = ImportExecutionService::execute(prepared, &cancellation, |progress| {
+            if progress.completed_units == 1 {
+                assert!(progress_cancellation.request());
+            }
         })
         .unwrap();
 
@@ -1121,6 +1264,34 @@ mod tests {
             .unwrap();
         assert_eq!(
             read_operation_records(&journal).unwrap().last(),
+            Some(&OperationRecord::Outcome {
+                outcome: OperationOutcome::Cancelled,
+            })
+        );
+    }
+
+    #[test]
+    fn cancellation_during_source_preflight_records_zero_progress() {
+        let fixture = fixture();
+        let prepared = prep(&fixture, DestinationMode::Create);
+        let operation_id = prepared.operation_id().to_owned();
+        let cancellation = ImportCancellation::default();
+        let progress_cancellation = cancellation.clone();
+
+        let result = ImportExecutionService::execute(prepared, &cancellation, |progress| {
+            if progress.completed_units == 0 {
+                assert_eq!(progress.message, "Checking the source…");
+                assert!(progress_cancellation.request());
+            }
+        })
+        .unwrap();
+
+        let ImportExecutionResult::Cancelled(outcome) = result else {
+            panic!("execution should be cancelled");
+        };
+        assert_eq!(outcome.copied_count, 0);
+        assert_eq!(
+            journal_records(&fixture, &operation_id).last(),
             Some(&OperationRecord::Outcome {
                 outcome: OperationOutcome::Cancelled,
             })
@@ -1256,35 +1427,22 @@ mod tests {
             ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
                 .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("does not match the confirmed plan"));
+        assert_eq!(error.code(), "operation_conflict");
+        assert!(error.to_string().contains("source changed after review"));
         assert!(!sidecar_destination.exists());
-        let resume_error = ImportRecoveryService::recover(
-            &fixture.catalog,
-            &operation_id,
-            ImportRecoveryMode::Resume,
-            |_| {},
-        )
-        .unwrap_err();
-        assert!(resume_error.to_string().contains("source changed"));
-        let (outcome, result) = ImportRecoveryService::recover(
-            &fixture.catalog,
-            &operation_id,
-            ImportRecoveryMode::Cancel,
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(outcome, RecoveryOutcome::Cancelled);
-        assert_eq!(result.copied_count, 2);
-        let manifest = fs::read_to_string(
-            fixture
-                .catalog
-                .join("2026/2026-10-10 Recovery Import/SHA256SUMS"),
-        )
-        .unwrap();
-        assert_eq!(manifest.lines().count(), 2);
-        assert!(!manifest.contains(".xmp"));
+        assert!(OperationInspectionService::unfinished(&fixture.catalog)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            journal_records(&fixture, &operation_id).last(),
+            Some(&OperationRecord::Outcome {
+                outcome: OperationOutcome::Cancelled,
+            })
+        );
+        assert!(!fixture
+            .catalog
+            .join("2026/2026-10-10 Recovery Import/SHA256SUMS")
+            .exists());
     }
 
     #[test]
@@ -1320,12 +1478,13 @@ mod tests {
         let prepared = prep(&fixture, DestinationMode::Create);
         let destination = fixture.catalog.join(&prepared.plan.copies[1].destination);
 
-        let error = ImportExecutionService::execute(prepared, |progress| {
-            if progress.completed_units == 1 {
-                fs::write(&destination, b"late conflict").unwrap();
-            }
-        })
-        .unwrap_err();
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |progress| {
+                if progress.completed_units == 1 {
+                    fs::write(&destination, b"late conflict").unwrap();
+                }
+            })
+            .unwrap_err();
 
         assert!(error.to_string().contains("occupied destination"));
         assert_eq!(fs::read(destination).unwrap(), b"late conflict");
@@ -1468,35 +1627,19 @@ mod tests {
             ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
                 .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("does not match the confirmed plan"));
+        assert_eq!(error.code(), "operation_conflict");
+        assert!(error.to_string().contains("source changed after review"));
         assert!(!destination.exists());
-        let resume_error = ImportRecoveryService::recover(
-            &fixture.catalog,
-            &operation_id,
-            ImportRecoveryMode::Resume,
-            |_| {},
-        )
-        .unwrap_err();
-        assert!(resume_error.to_string().contains("source changed"));
+        assert!(OperationInspectionService::unfinished(&fixture.catalog)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            journal_records(&fixture, &operation_id).last(),
+            Some(&OperationRecord::Outcome {
+                outcome: OperationOutcome::Cancelled,
+            })
+        );
         assert!(!destination.exists());
-        let (outcome, result) = ImportRecoveryService::recover(
-            &fixture.catalog,
-            &operation_id,
-            ImportRecoveryMode::Cancel,
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(outcome, RecoveryOutcome::Cancelled);
-        assert_eq!(result.copied_count, 0);
-        assert!(!destination.exists());
-        let manifest = fixture
-            .catalog
-            .join("2026")
-            .join("2026-10-10 Recovery Import")
-            .join("SHA256SUMS");
-        assert_eq!(fs::read_to_string(manifest).unwrap(), "");
         assert!(
             fs::read_dir(CatalogLayout::new(&fixture.catalog).staging_directory())
                 .unwrap()
@@ -1777,7 +1920,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_plan_rejects_source_drift_before_journaling() {
+    fn execution_rejects_source_drift_and_finishes_empty_journal() {
         for change in ["add", "remove", "change"] {
             let fixture = fixture();
             let path = fixture.source.join("IMG_20261010_101113.jpg");
@@ -1790,10 +1933,77 @@ mod tests {
                 "remove" => fs::remove_file(path).unwrap(),
                 _ => fs::write(path, b"changed").unwrap(),
             }
-            let error = ImportExecutionService::prepare(request).unwrap_err();
+            let prepared = ImportExecutionService::prepare(request).unwrap();
+            let operation_id = prepared.operation_id().to_owned();
+            let error =
+                ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                    .unwrap_err();
             assert_eq!(error.code(), "operation_conflict");
-            assert_eq!(import_journal_count(&fixture), 0);
+            assert_eq!(import_journal_count(&fixture), 1);
+            assert_eq!(
+                journal_records(&fixture, &operation_id).last(),
+                Some(&OperationRecord::Outcome {
+                    outcome: OperationOutcome::Cancelled,
+                })
+            );
         }
+    }
+
+    #[test]
+    fn source_loss_during_preflight_preserves_zero_progress_operation() {
+        let fixture = fixture();
+        let prepared = prep(&fixture, DestinationMode::Create);
+        let operation_id = prepared.operation_id().to_owned();
+        let detached = fixture.source.parent().unwrap().join("detached-source");
+        fs::rename(&fixture.source, &detached).unwrap();
+
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                .unwrap_err();
+
+        assert_eq!(error.code(), "source_unavailable");
+        let unfinished = OperationInspectionService::unfinished(&fixture.catalog)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unfinished.operation_id, operation_id);
+        assert_eq!(unfinished.copied_count, 0);
+        assert!(!unfinished.source_available);
+    }
+
+    #[test]
+    fn source_loss_after_published_copy_preserves_durable_progress() {
+        let fixture = fixture();
+        let prepared = prep(&fixture, DestinationMode::Create);
+        let operation_id = prepared.operation_id().to_owned();
+        let detached = fixture.source.parent().unwrap().join("detached-source");
+
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |progress| {
+                if progress.completed_units == 1 {
+                    fs::rename(&fixture.source, &detached).unwrap();
+                }
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code(), "source_unavailable");
+        let unfinished = OperationInspectionService::unfinished(&fixture.catalog)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unfinished.operation_id, operation_id);
+        assert_eq!(unfinished.copied_count, 1);
+        assert!(!unfinished.source_available);
+    }
+
+    #[test]
+    fn unrelated_io_errors_are_not_source_unavailable() {
+        assert!(!is_source_unavailable_error(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        )));
+        assert!(!is_source_unavailable_error(&std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "I/O failure",
+        )));
     }
 
     #[test]
@@ -1807,7 +2017,9 @@ mod tests {
             .join("2026-10-10 RECOVERY IMPORT");
         fs::create_dir(&occupied).unwrap();
 
-        let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                .unwrap_err();
 
         assert_eq!(error.code(), "operation_conflict");
         assert_eq!(import_journal_count(&fixture), 0);

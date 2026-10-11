@@ -68,9 +68,9 @@ final class ImportExecutionCoordinator: ObservableObject {
         case idle
         case running
         case recoveryPrompt(sourceAvailable: Bool)
+        case recoveryDeferred
         case recovering
         case stopping
-        case sourceUnavailable
         case completed(ImportOutcome)
         case cancelled(copiedCount: Int)
         case failed(String)
@@ -110,6 +110,7 @@ final class ImportExecutionCoordinator: ObservableObject {
         review: EngineSupervisor.ImportReview,
         catalog: RecentCatalog
     ) {
+        guard phase != .recoveryDeferred else { return }
         operationTask?.cancel()
         inspectionGeneration += 1
         operationID = nil
@@ -147,12 +148,7 @@ final class ImportExecutionCoordinator: ObservableObject {
             )
             guard phase == .idle, generation == inspectionGeneration else { return }
             guard let unfinished else { return }
-            recovery = unfinished
-            self.catalog = catalog
-            sourceName = unfinished.sourceName
-            collectionName = unfinished.collectionName
-            completedUnits = UInt64(unfinished.copiedCount)
-            totalUnits = UInt64(max(unfinished.totalCount, 1))
+            apply(unfinished: unfinished, catalog: catalog)
             phase = .recoveryPrompt(sourceAvailable: unfinished.sourceAvailable)
         } catch {
             guard phase == .idle, generation == inspectionGeneration else { return }
@@ -162,19 +158,32 @@ final class ImportExecutionCoordinator: ObservableObject {
     }
 
     func finishRecovery() {
-        guard recovery != nil else { return }
+        guard recovery?.sourceAvailable == true else { return }
+        beginRecovery()
+    }
+
+    func retryRecovery() {
+        guard let recovery, let catalog else { return }
         phase = .recovering
-        progressMessage = "Checking copied files…"
+        progressMessage = "Checking for \(sourceName)…"
         operationTask = Task {
             do {
-                guard let recovery else { return }
-                guard let catalog else { return }
-                let operationID = try await engine.recoverOperation(
-                    catalogPath: catalog.path,
-                    operationID: recovery.operationID
-                )
-                self.operationID = operationID
-                try await consume(operationID: operationID, recovering: true)
+                guard let unfinished = try await engine.inspectUnfinishedOperation(
+                    catalogPath: catalog.path
+                ) else {
+                    phase = .failed("The unfinished import could not be found.")
+                    return
+                }
+                guard unfinished.operationID == recovery.operationID else {
+                    phase = .failed("A different unfinished import was found.")
+                    return
+                }
+                apply(unfinished: unfinished, catalog: catalog)
+                guard unfinished.sourceAvailable else {
+                    phase = .recoveryPrompt(sourceAvailable: false)
+                    return
+                }
+                try await recover(unfinished, catalog: catalog)
             } catch {
                 guard !Task.isCancelled else { return }
                 phase = failurePhase(error)
@@ -183,7 +192,8 @@ final class ImportExecutionCoordinator: ObservableObject {
     }
 
     func deferRecovery() {
-        dismissOutcome()
+        guard recovery != nil else { return }
+        phase = .recoveryDeferred
     }
 
     func stop() {
@@ -248,8 +258,11 @@ final class ImportExecutionCoordinator: ObservableObject {
                     phase = .failed("The engine returned an invalid completion result.")
                 }
             case .failed(let code, let message):
-                phase = code == "source_unavailable"
-                    ? .sourceUnavailable : .failed(message)
+                if code == "source_unavailable" {
+                    await routeSourceUnavailable(operationID: operationID)
+                } else {
+                    phase = .failed(message)
+                }
             case .cancelled(let copiedCount):
                 completedUnits = UInt64(copiedCount)
                 phase = .cancelled(copiedCount: copiedCount)
@@ -258,6 +271,64 @@ final class ImportExecutionCoordinator: ObservableObject {
         if phase == .running || phase == .recovering || phase == .stopping {
             phase = .failed("The engine stopped sending updates.")
         }
+    }
+
+    private func beginRecovery() {
+        guard let recovery, let catalog else { return }
+        phase = .recovering
+        progressMessage = "Checking copied files…"
+        operationTask = Task {
+            do {
+                try await recover(recovery, catalog: catalog)
+            } catch {
+                guard !Task.isCancelled else { return }
+                phase = failurePhase(error)
+            }
+        }
+    }
+
+    private func recover(
+        _ recovery: EngineSupervisor.UnfinishedOperation,
+        catalog: RecentCatalog
+    ) async throws {
+        let operationID = try await engine.recoverOperation(
+            catalogPath: catalog.path,
+            operationID: recovery.operationID
+        )
+        self.operationID = operationID
+        try await consume(operationID: operationID, recovering: true)
+    }
+
+    private func routeSourceUnavailable(operationID: String) async {
+        guard let catalog else {
+            phase = .failed("The source became unavailable, but the catalog is no longer open.")
+            return
+        }
+        do {
+            guard let unfinished = try await engine.inspectUnfinishedOperation(
+                catalogPath: catalog.path
+            ), unfinished.operationID == operationID else {
+                phase = .failed("The source became unavailable, but the unfinished import could not be found.")
+                return
+            }
+            apply(unfinished: unfinished, catalog: catalog)
+            phase = .recoveryPrompt(sourceAvailable: unfinished.sourceAvailable)
+        } catch {
+            phase = .failed(userMessage(for: error))
+        }
+    }
+
+    private func apply(
+        unfinished: EngineSupervisor.UnfinishedOperation,
+        catalog: RecentCatalog
+    ) {
+        recovery = unfinished
+        self.catalog = catalog
+        operationID = unfinished.operationID
+        sourceName = unfinished.sourceName
+        collectionName = unfinished.collectionName
+        completedUnits = UInt64(unfinished.copiedCount)
+        totalUnits = UInt64(max(unfinished.totalCount, 1))
     }
 
     private func decodeOutcome(_ data: Data) throws -> ImportOutcome {
@@ -283,7 +354,7 @@ final class ImportExecutionCoordinator: ObservableObject {
     private func failurePhase(_ error: Error) -> Phase {
         if case EngineSupervisor.SupervisorError.protocolError(let code, _) = error,
            code == "source_unavailable" {
-            return .sourceUnavailable
+            return .failed("The source is unavailable. Reconnect it, then choose the source again.")
         }
         return .failed(userMessage(for: error))
     }

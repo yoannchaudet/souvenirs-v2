@@ -80,6 +80,7 @@ final class ImportExecutionModelTests: XCTestCase {
 
     func testSourceFailureRoutesToReconnectState() async {
         let engine = FakeImportExecutionEngine()
+        engine.inspection = unfinished(sourceAvailable: false)
         let model = ImportExecutionCoordinator(engine: engine)
 
         model.start(review: review, catalog: catalog)
@@ -87,6 +88,15 @@ final class ImportExecutionModelTests: XCTestCase {
         engine.send(.init(
             operationID: "operation-1",
             sequence: 0,
+            payload: .progress(
+                completedUnits: 3,
+                totalUnits: 12,
+                message: "Copying…"
+            )
+        ))
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 1,
             payload: .failed(
                 code: "source_unavailable",
                 message: "The source was disconnected."
@@ -94,7 +104,10 @@ final class ImportExecutionModelTests: XCTestCase {
         ))
         engine.finish()
 
-        await waitUntil { model.phase == .sourceUnavailable }
+        await waitUntil { model.phase == .recoveryPrompt(sourceAvailable: false) }
+        XCTAssertEqual(model.operationID, "operation-1")
+        XCTAssertEqual(model.completedUnits, 7)
+        XCTAssertEqual(model.totalUnits, 12)
     }
 
     func testUnfinishedOperationRoutesBySourceAvailability() async {
@@ -128,6 +141,57 @@ final class ImportExecutionModelTests: XCTestCase {
         ))
         engine.finish()
         await waitUntil { model.phase == .cancelled(copiedCount: 7) }
+    }
+
+    func testUnavailableRetryReinspectsAndRecoversSameOperation() async {
+        let engine = FakeImportExecutionEngine()
+        engine.inspection = unfinished(sourceAvailable: false)
+        let model = ImportExecutionCoordinator(engine: engine)
+        await model.inspect(catalog: catalog)
+
+        model.deferRecovery()
+        XCTAssertEqual(model.phase, .recoveryDeferred)
+
+        model.retryRecovery()
+        await waitUntil { model.phase == .recoveryPrompt(sourceAvailable: false) }
+        XCTAssertEqual(engine.recoveryStartCount, 0)
+
+        engine.inspection = unfinished(sourceAvailable: true)
+        model.retryRecovery()
+        await engine.waitForStream()
+        XCTAssertEqual(model.phase, .recovering)
+        XCTAssertEqual(engine.recoveryStartCount, 1)
+        XCTAssertEqual(model.operationID, "operation-1")
+
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 0,
+            payload: .completed(
+                result: Data(
+                    #"{"copied_count":12,"skipped_count":0,"left_on_source_count":0}"#.utf8
+                )
+            )
+        ))
+        engine.finish()
+        await waitUntil {
+            model.phase == .completed(
+                ImportOutcome(copiedCount: 12, skippedCount: 0, leftOnSourceCount: 0)
+            )
+        }
+    }
+
+    func testDeferredRecoveryBlocksStartingAnotherImport() async {
+        let engine = FakeImportExecutionEngine()
+        engine.inspection = unfinished(sourceAvailable: false)
+        let model = ImportExecutionCoordinator(engine: engine)
+        await model.inspect(catalog: catalog)
+        model.deferRecovery()
+
+        model.start(review: review, catalog: catalog)
+
+        XCTAssertEqual(model.phase, .recoveryDeferred)
+        XCTAssertEqual(engine.importStartCount, 0)
+        XCTAssertEqual(model.operationID, "operation-1")
     }
 
     func testStoppingRecoveryWaitsForEngineAcknowledgement() async {
@@ -266,6 +330,7 @@ private final class FakeImportExecutionEngine: ImportExecutionEngine {
     var inspection: EngineSupervisor.UnfinishedOperation?
     var inspectionError: Error?
     var blocksInspection = false
+    var importStartCount = 0
     var recoveryStartCount = 0
     var cancelledOperationIDs: [String] = []
     private var inspectionContinuation: CheckedContinuation<Void, Never>?
@@ -273,7 +338,8 @@ private final class FakeImportExecutionEngine: ImportExecutionEngine {
         AsyncThrowingStream<EngineSupervisor.OperationEvent, any Error>.Continuation?
 
     func startImportExecution(reviewedPlan: String) async throws -> String {
-        "operation-1"
+        importStartCount += 1
+        return "operation-1"
     }
 
     func inspectUnfinishedOperation(
@@ -328,6 +394,8 @@ private final class FakeImportExecutionEngine: ImportExecutionEngine {
     }
 
     func finish() {
-        continuation?.finish()
+        let activeContinuation = continuation
+        continuation = nil
+        activeContinuation?.finish()
     }
 }

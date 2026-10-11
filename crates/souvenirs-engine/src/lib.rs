@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Duration;
@@ -113,6 +114,8 @@ pub fn run_engine_with_options(
                         let worker_cancellation = cancellation.clone();
                         let worker_output = Arc::clone(&output);
                         let worker_operation_id = operation_id.clone();
+                        let terminal_ready = Arc::new(AtomicBool::new(false));
+                        let worker_terminal_ready = Arc::clone(&terminal_ready);
                         let handle = scope.spawn(move || {
                             let mut sequence = 1_u64;
                             let result = ImportExecutionService::execute(
@@ -131,6 +134,7 @@ pub fn run_engine_with_options(
                                 },
                             );
                             worker_cancellation.finish();
+                            worker_terminal_ready.store(true, Ordering::Release);
                             let _ = write_execution_result(
                                 &worker_output,
                                 &worker_operation_id,
@@ -141,6 +145,7 @@ pub fn run_engine_with_options(
                         active = Some(ActiveOperation {
                             operation_id,
                             cancellation,
+                            terminal_ready,
                             handle,
                         });
                     }
@@ -210,6 +215,7 @@ pub fn run_engine_with_options(
 struct ActiveOperation<'scope> {
     operation_id: String,
     cancellation: ImportCancellation,
+    terminal_ready: Arc<AtomicBool>,
     handle: ScopedJoinHandle<'scope, ()>,
 }
 
@@ -217,10 +223,9 @@ fn reap_active(
     active: &mut Option<ActiveOperation<'_>>,
     connection: &mut Connection,
 ) -> io::Result<()> {
-    if active
-        .as_ref()
-        .is_some_and(|operation| operation.handle.is_finished())
-    {
+    if active.as_ref().is_some_and(|operation| {
+        operation.handle.is_finished() || operation.terminal_ready.load(Ordering::Acquire)
+    }) {
         finish_active(
             active.take().expect("active operation should exist"),
             connection,
@@ -853,14 +858,55 @@ fn request_id(line: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::{fs, io::Cursor};
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        sync::Arc,
+        time::Duration,
+    };
 
     use serde_json::{json, Value};
     use souvenirs_application::{
-        CatalogService, DateResolution, DestinationMode, ImportPlanningService, ImportReviewRequest,
+        CatalogService, DateResolution, DestinationMode, ImportCancellation,
+        ImportExecutionService, ImportPlanningService, ImportReviewRequest,
     };
     use souvenirs_protocol::PROTOCOL_VERSION;
 
     use super::run_engine;
+
+    #[test]
+    fn reaps_worker_when_terminal_is_ready_before_thread_exit() {
+        std::thread::scope(|scope| {
+            let terminal_ready = Arc::new(AtomicBool::new(false));
+            let worker_terminal_ready = Arc::clone(&terminal_ready);
+            let handle = scope.spawn(move || {
+                worker_terminal_ready.store(true, Ordering::Release);
+                std::thread::sleep(Duration::from_millis(20));
+            });
+            let mut active = Some(super::ActiveOperation {
+                operation_id: "operation-1".to_owned(),
+                cancellation: ImportCancellation::default(),
+                terminal_ready,
+                handle,
+            });
+            let mut connection = super::Connection::default();
+            connection
+                .operation_catalogs
+                .insert("operation-1".to_owned(), "/catalog".to_owned());
+            while !active
+                .as_ref()
+                .unwrap()
+                .terminal_ready
+                .load(Ordering::Acquire)
+            {
+                std::thread::yield_now();
+            }
+
+            super::reap_active(&mut active, &mut connection).unwrap();
+
+            assert!(active.is_none());
+            assert!(!connection.operation_catalogs.contains_key("operation-1"));
+        });
+    }
 
     #[test]
     fn handshake_returns_process_contract() {
@@ -1116,16 +1162,19 @@ mod tests {
                 "symlink" => symlink(&source, &collection).unwrap(),
                 _ => {}
             }
-            let response = match super::Connection::default().start_operation(
+            let prepared = match super::Connection::default().start_operation(
                 "request-2".to_owned(),
                 super::StartOperationParameters::ImportExecute {
                     reviewed_plan: review.reviewed_plan.clone().unwrap(),
                 },
             ) {
-                super::EngineAction::Message(message) => serde_json::to_value(message).unwrap(),
-                _ => panic!("operation was accepted"),
+                super::EngineAction::Execute { prepared, .. } => prepared,
+                _ => panic!("operation was not prepared"),
             };
-            assert_eq!(response["error"]["code"], "operation_conflict");
+            let error =
+                ImportExecutionService::execute(*prepared, &ImportCancellation::default(), |_| {})
+                    .unwrap_err();
+            assert_eq!(error.code(), "operation_conflict");
             assert_eq!(fs::read_dir(&journal).unwrap().count(), 1);
         }
     }
