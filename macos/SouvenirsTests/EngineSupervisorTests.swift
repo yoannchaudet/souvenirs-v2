@@ -20,12 +20,12 @@ final class EngineSupervisorTests: XCTestCase {
             """
             trap 'exit 99' TERM
             IFS= read -r request || exit 2
-            expected='{"id":"macos-handshake-1","method":"handshake","params":{"client_version":"0.2.0"},"protocol_version":1}'
+            expected='{"id":"macos-handshake-1","method":"handshake","params":{"client_version":"0.2.0"},"protocol_version":2}'
             if [ "$request" != "$expected" ]; then
                 echo "unexpected request: $request" >&2
                 exit 3
             fi
-            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":["operation.cancel"]}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":2,"compatible_client_version":"0.2.0","capabilities":["operation.cancel"]}}'
             while IFS= read -r _; do :; done
             """
         )
@@ -38,7 +38,7 @@ final class EngineSupervisorTests: XCTestCase {
             handshake,
             .init(
                 engineVersion: "0.2.0",
-                protocolVersion: 1,
+                protocolVersion: 2,
                 compatibleClientVersion: "0.2.0",
                 capabilities: ["operation.cancel"]
             )
@@ -55,7 +55,7 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeHandshakeFixture(
             response:
                 """
-                {"kind":"response","id":null,"protocol_version":1,"status":"error","error":{"code":"invalid_request","message":"request could not be decoded"}}
+                {"kind":"response","id":null,"protocol_version":2,"status":"error","error":{"code":"invalid_request","message":"request could not be decoded"}}
                 """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
@@ -77,7 +77,27 @@ final class EngineSupervisorTests: XCTestCase {
         try await supervisor.stop()
     }
 
-    func testHandshakeRejectsIncompatibleResponseVersion() async throws {
+    func testHandshakeRejectsPreviousProtocolVersion() async throws {
+        let executable = try makeHandshakeFixture(
+            response:
+                """
+                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":[]}}
+                """
+        )
+        let supervisor = EngineSupervisor(executableURL: executable)
+        _ = try await supervisor.start()
+
+        do {
+            _ = try await supervisor.handshake()
+            XCTFail("Expected the incompatible protocol to be reported")
+        } catch let error as EngineSupervisor.SupervisorError {
+            XCTAssertEqual(error, .incompatibleProtocol(expected: 2, actual: 1))
+        }
+
+        try await supervisor.stop()
+    }
+
+    func testHandshakeRejectsPreviousVersionReportedByCurrentEnvelope() async throws {
         let executable = try makeHandshakeFixture(
             response:
                 """
@@ -91,7 +111,7 @@ final class EngineSupervisorTests: XCTestCase {
             _ = try await supervisor.handshake()
             XCTFail("Expected the incompatible protocol to be reported")
         } catch let error as EngineSupervisor.SupervisorError {
-            XCTAssertEqual(error, .incompatibleProtocol(expected: 1, actual: 2))
+            XCTAssertEqual(error, .incompatibleProtocol(expected: 2, actual: 1))
         }
 
         try await supervisor.stop()
@@ -101,7 +121,7 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeHandshakeFixture(
             response:
                 """
-                {"id":"macos-handshake-1","protocol_version":2,"future_result":{}}
+                {"id":"macos-handshake-1","protocol_version":3,"future_result":{}}
                 """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
@@ -111,7 +131,7 @@ final class EngineSupervisorTests: XCTestCase {
             _ = try await supervisor.handshake()
             XCTFail("Expected the incompatible protocol to be reported")
         } catch let error as EngineSupervisor.SupervisorError {
-            XCTAssertEqual(error, .incompatibleProtocol(expected: 1, actual: 2))
+            XCTAssertEqual(error, .incompatibleProtocol(expected: 2, actual: 3))
         }
 
         try await supervisor.stop()
@@ -121,7 +141,7 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeHandshakeFixture(
             response:
                 """
-                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.0.10","capabilities":[]}}
+                {"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":2,"compatible_client_version":"0.0.10","capabilities":[]}}
                 """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
@@ -137,7 +157,7 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeHandshakeFixture(
             response:
                 """
-                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":[]}}
+                {"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":2,"compatible_client_version":"0.2.0","capabilities":[]}}
                 """
         )
         let supervisor = EngineSupervisor(
@@ -166,7 +186,7 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeHandshakeFixture(
             response:
                 """
-                {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.01.0","capabilities":[]}}
+                {"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":2,"compatible_client_version":"0.01.0","capabilities":[]}}
                 """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
@@ -234,10 +254,10 @@ final class EngineSupervisorTests: XCTestCase {
         let executable = try makeExecutable(
             """
             IFS= read -r _ || exit 2
-            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":1,"compatible_client_version":"0.2.0","capabilities":["import.scan"]}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.2.0","protocol_version":2,"compatible_client_version":"0.2.0","capabilities":["import.scan"]}}'
             IFS= read -r request || exit 3
             id=$(printf '%s' "$request" | sed -E 's/.*"id":"([^"]+)".*/\\1/')
-            printf '%s\\n' '{"kind":"response","id":"'"$id"'","protocol_version":1,"status":"success","result":{"type":"import_scan","source_path":"/source","source_name":"source","file_count":1,"media_count":1,"photo_count":1,"video_count":0,"unsupported_count":0,"uncertain_time_count":0,"total_bytes":3,"suggested_collection_name":"Source","suggested_accepted_date":null,"suggested_range_end":null,"pending_item_count":0,"unresolved_item_count":1,"datetime_sources":[]}}'; while IFS= read -r _; do :; done
+            printf '%s\\n' '{"kind":"response","id":"'"$id"'","protocol_version":2,"status":"success","result":{"type":"import_scan","source_path":"/source","source_name":"source","file_count":1,"media_count":1,"photo_count":1,"video_count":0,"unsupported_count":0,"uncertain_time_count":0,"total_bytes":3,"suggested_collection_name":"Source","suggested_accepted_date":null,"suggested_range_end":null,"pending_item_count":0,"unresolved_item_count":1,"datetime_sources":[]}}'; while IFS= read -r _; do :; done
             """
         )
         let supervisor = EngineSupervisor(executableURL: executable)
@@ -300,8 +320,8 @@ final class EngineSupervisorTests: XCTestCase {
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r first || exit 3
             IFS= read -r second || exit 4
-            printf '%s\\n' '{"kind":"response","id":"macos-2","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-second"}}'
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-first"}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-2","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-second"}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-first"}}'
             while IFS= read -r _; do :; done
             """
         )
@@ -336,10 +356,10 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":1,"event":"progress","completed_units":1,"total_units":2,"message":"Working"}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":2,"event":"completed","result":{"item_count":1}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":1,"event":"progress","completed_units":1,"total_units":2,"message":"Working"}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":2,"event":"completed","result":{"item_count":1}}'
             while IFS= read -r _; do :; done
             """
         )
@@ -368,9 +388,9 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":2,"event":"cancelled","copied_count":1}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":2,"event":"cancelled","copied_count":1}'
             while IFS= read -r _; do :; done
             """
         )
@@ -405,8 +425,8 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"cancelled","copied_count":-1}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"cancelled","copied_count":-1}'
             while IFS= read -r _; do :; done
             """
         )
@@ -438,8 +458,8 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"completed","result":{"item_count":1}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"completed","result":{"item_count":1}}'
             exit 0
             """
         )
@@ -467,8 +487,8 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
             exit 37
             """
         )
@@ -501,8 +521,8 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
             IFS= read -r _ || exit 4
             exec 1>&-
             sleep 5
@@ -543,8 +563,8 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
             exec 1>&-
             sleep 5
             """
@@ -579,8 +599,8 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"completed","result":{"item_count":1}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"completed","result":{"item_count":1}}'
             exec 1>&-
             sleep 5
             """
@@ -611,8 +631,8 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 3
             sleep 0.7
             IFS= read -r _ || exit 4
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-late"}}'
-            printf '%s\\n' '{"kind":"response","id":"macos-2","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-current"}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-late"}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-2","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-current"}}'
             while IFS= read -r _; do :; done
             """
         )
@@ -644,11 +664,11 @@ final class EngineSupervisorTests: XCTestCase {
             IFS= read -r _ || exit 2
             printf '%s\\n' '\(handshakeResponse)'
             IFS= read -r _ || exit 3
-            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":1,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
+            printf '%s\\n' '{"kind":"response","id":"macos-1","protocol_version":2,"status":"success","result":{"type":"operation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":0,"event":"started","name":"test.operation"}'
             IFS= read -r _ || exit 4
-            printf '%s\\n' '{"kind":"event","protocol_version":1,"operation_id":"operation-1","sequence":1,"event":"completed","result":{"won":"completion"}}'
-            printf '%s\\n' '{"kind":"response","id":"macos-2","protocol_version":1,"status":"success","result":{"type":"cancellation_accepted","operation_id":"operation-1"}}'
+            printf '%s\\n' '{"kind":"event","protocol_version":2,"operation_id":"operation-1","sequence":1,"event":"completed","result":{"won":"completion"}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-2","protocol_version":2,"status":"success","result":{"type":"cancellation_accepted","operation_id":"operation-1"}}'
             while IFS= read -r _; do :; done
             """
         )
@@ -775,7 +795,7 @@ final class EngineSupervisorTests: XCTestCase {
             """
             trap 'exit 23' TERM
             IFS= read -r _ || exit 2
-            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":[]}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":2,"compatible_client_version":"0.1.0","capabilities":[]}}'
             while :; do :; done
             """
         )
@@ -801,7 +821,7 @@ final class EngineSupervisorTests: XCTestCase {
             """
             trap '' TERM
             IFS= read -r _ || exit 2
-            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":[]}}'
+            printf '%s\\n' '{"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":2,"compatible_client_version":"0.1.0","capabilities":[]}}'
             while :; do :; done
             """
         )
@@ -976,7 +996,7 @@ final class EngineSupervisorTests: XCTestCase {
 
     private let handshakeResponse =
         """
-        {"kind":"response","id":"macos-handshake-1","protocol_version":1,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":1,"compatible_client_version":"0.1.0","capabilities":["operation.cancel"]}}
+        {"kind":"response","id":"macos-handshake-1","protocol_version":2,"status":"success","result":{"type":"handshake","engine_version":"0.1.0","protocol_version":2,"compatible_client_version":"0.1.0","capabilities":["operation.cancel"]}}
         """
 
     private func makeSupervisor(executableURL: URL) -> EngineSupervisor {
@@ -1004,7 +1024,7 @@ final class EngineSupervisorTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v1.jsonl")
+            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v2.jsonl")
         let lines = try String(contentsOf: fixture, encoding: .utf8)
             .split(separator: "\n")
         guard let response = lines.first(where: {

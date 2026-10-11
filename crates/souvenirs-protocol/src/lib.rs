@@ -7,7 +7,7 @@ use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 // This is the oldest macOS client version supported by the engine.
 pub const MINIMUM_CLIENT_VERSION: &str = "0.2.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
@@ -496,7 +496,7 @@ mod tests {
         let response = EngineMessage::error(
             Some("request-2".to_owned()),
             ProtocolError::new("incompatible_protocol", "unsupported protocol version")
-                .with_data(json!({"expected": 1, "actual": 2})),
+                .with_data(json!({"expected": 2, "actual": 1})),
         );
 
         assert_eq!(
@@ -509,7 +509,7 @@ mod tests {
                 "error": {
                     "code": "incompatible_protocol",
                     "message": "unsupported protocol version",
-                    "data": {"expected": 1, "actual": 2}
+                    "data": {"expected": 2, "actual": 1}
                 }
             })
         );
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn golden_fixture_matches_rust_types() {
-        let fixture = fixture_path("protocol-v1.jsonl");
+        let fixture = fixture_path("protocol-v2.jsonl");
         let contents = fs::read_to_string(fixture).expect("fixture should be readable");
         let values: Vec<Value> = contents
             .lines()
@@ -562,6 +562,11 @@ mod tests {
         let mut request_count = 0;
         let mut engine_message_count = 0;
         for value in &values {
+            assert_eq!(
+                value.get("protocol_version"),
+                Some(&json!(PROTOCOL_VERSION)),
+                "fixture line should use the current protocol version"
+            );
             if value.get("kind").is_some() {
                 decode_canonically::<EngineMessage>(value);
                 engine_message_count += 1;
@@ -578,6 +583,13 @@ mod tests {
                         | RequestPayload::InspectOperation(_)
                 ));
                 request_count += 1;
+            }
+            if value.pointer("/result/type") == Some(&json!("handshake")) {
+                assert_eq!(
+                    value.pointer("/result/protocol_version"),
+                    Some(&json!(PROTOCOL_VERSION)),
+                    "handshake result should report the current protocol version"
+                );
             }
         }
         assert_eq!(request_count, 5);
@@ -599,7 +611,7 @@ mod tests {
         let expected = serde_json::to_string_pretty(&protocol_schema())
             .expect("protocol schema should serialize")
             + "\n";
-        let actual = fs::read_to_string(fixture_path("../schema/v1.json"))
+        let actual = fs::read_to_string(fixture_path("../schema/v2.json"))
             .expect("committed schema should be readable");
 
         assert_eq!(actual, expected, "regenerate the committed protocol schema");

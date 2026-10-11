@@ -264,7 +264,7 @@ impl Connection {
                     request_id,
                     ProtocolError::new(
                         "invalid_request",
-                        "request does not match protocol version 1",
+                        format!("request does not match protocol version {PROTOCOL_VERSION}"),
                     )
                     .with_data(json!({"detail": error.to_string()})),
                 ));
@@ -918,12 +918,12 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_protocol_is_rejected_with_version_data() {
+    fn previous_protocol_is_rejected_with_version_data() {
         let input = format!(
             "{}\n",
             json!({
                 "id": "request-1",
-                "protocol_version": PROTOCOL_VERSION + 1,
+                "protocol_version": PROTOCOL_VERSION - 1,
                 "method": "handshake",
                 "params": {"client_version": "0.1.0"}
             })
@@ -934,7 +934,7 @@ mod tests {
         assert_eq!(response["id"], "request-1");
         assert_eq!(response["error"]["code"], "incompatible_protocol");
         assert_eq!(response["error"]["data"]["expected"], PROTOCOL_VERSION);
-        assert_eq!(response["error"]["data"]["actual"], PROTOCOL_VERSION + 1);
+        assert_eq!(response["error"]["data"]["actual"], PROTOCOL_VERSION - 1);
     }
 
     #[test]
@@ -1007,7 +1007,7 @@ mod tests {
         assert_eq!(response["error"]["code"], "invalid_request");
         assert_eq!(
             response["error"]["message"],
-            "request does not match protocol version 1"
+            format!("request does not match protocol version {PROTOCOL_VERSION}")
         );
     }
 

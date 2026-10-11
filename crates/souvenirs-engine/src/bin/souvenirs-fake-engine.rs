@@ -728,7 +728,7 @@ fn decode_request(line: &[u8]) -> Result<Request, (Option<String>, ProtocolError
             request_id,
             ProtocolError::new(
                 "invalid_request",
-                "Request does not match protocol version 1.",
+                format!("Request does not match protocol version {PROTOCOL_VERSION}."),
             )
             .with_data(json!({"detail": error.to_string()})),
         )

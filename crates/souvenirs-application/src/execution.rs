@@ -1320,12 +1320,13 @@ mod tests {
         let prepared = prep(&fixture, DestinationMode::Create);
         let destination = fixture.catalog.join(&prepared.plan.copies[1].destination);
 
-        let error = ImportExecutionService::execute(prepared, |progress| {
-            if progress.completed_units == 1 {
-                fs::write(&destination, b"late conflict").unwrap();
-            }
-        })
-        .unwrap_err();
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |progress| {
+                if progress.completed_units == 1 {
+                    fs::write(&destination, b"late conflict").unwrap();
+                }
+            })
+            .unwrap_err();
 
         assert!(error.to_string().contains("occupied destination"));
         assert_eq!(fs::read(destination).unwrap(), b"late conflict");
@@ -1807,7 +1808,9 @@ mod tests {
             .join("2026-10-10 RECOVERY IMPORT");
         fs::create_dir(&occupied).unwrap();
 
-        let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                .unwrap_err();
 
         assert_eq!(error.code(), "operation_conflict");
         assert_eq!(import_journal_count(&fixture), 0);
