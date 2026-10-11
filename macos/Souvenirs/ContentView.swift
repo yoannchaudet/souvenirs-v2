@@ -890,6 +890,9 @@ private struct ImportPlanningSheet: View {
     private enum FocusTarget: Hashable {
         case cancel
         case collectionName
+        case dateSummary
+        case asShown
+        case convertFromUTC
     }
 
     @ObservedObject var model: ImportPlanningModel
@@ -897,6 +900,8 @@ private struct ImportPlanningSheet: View {
     let onStart: () -> Void
     @FocusState private var keyboardFocus: FocusTarget?
     @AccessibilityFocusState private var titleFocused: Bool
+    @AccessibilityFocusState private var dateFocused: FocusTarget?
+    @State private var requestedDateFocus: FocusTarget?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -913,8 +918,8 @@ private struct ImportPlanningSheet: View {
 
                     if let scan = model.scan {
                         destinationCard
-                        if (model.review?.requiredDecisionCount ?? scan.pendingItemCount) > 0 {
-                            dateDecision(scan)
+                        if model.dateChoiceCount > 0 {
+                            dateDecision
                         }
                         summary(scan)
                         details
@@ -952,6 +957,12 @@ private struct ImportPlanningSheet: View {
                 .lineLimit(2)
                 .layoutPriority(-1)
                 Spacer(minLength: 0)
+                if model.isStartBlocked {
+                    Text("Can’t start")
+                        .font(.caption.bold())
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("import-start-blocked")
+                }
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("cancel-import-review")
@@ -964,6 +975,7 @@ private struct ImportPlanningSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!model.canStart || model.isPrepared)
                 .accessibilityIdentifier("start-import")
+                .accessibilityHint(model.startImportAccessibilityHint)
             }
             .padding(16)
             .background(.regularMaterial)
@@ -1021,28 +1033,94 @@ private struct ImportPlanningSheet: View {
         }
     }
 
-    private func dateDecision(_ scan: EngineSupervisor.ImportScan) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Needs your choice · \(model.review?.requiredDecisionCount ?? 1)")
-                .font(.caption.bold())
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier("import-date-decision")
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "questionmark")
-                    .font(.caption.bold())
-                    .foregroundStyle(.orange)
-                    .frame(width: 22, height: 22)
-                    .background(.orange.opacity(0.15), in: Circle())
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(
-                        scan.datetimeSources.filter { $0.state == .needsConfirmation },
-                        id: \.source
-                    ) { summary in
-                        Text(pendingDateSummary(summary))
-                            .font(.callout.bold())
+    private var dateDecision: some View {
+        Group {
+            if let resolution = model.dateResolution {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
+                    Text(selectedDateSummary(resolution))
+                        .font(.callout.bold())
+                        .focusable()
+                        .focused($keyboardFocus, equals: .dateSummary)
+                        .accessibilityFocused($dateFocused, equals: .dateSummary)
+                        .accessibilityIdentifier("import-date-selection")
+                        .accessibilityLabel("Selected date interpretation")
+                        .accessibilityValue(selectedDateSummary(resolution))
+                        .onAppear {
+                            guard requestedDateFocus == .dateSummary else { return }
+                            requestedDateFocus = nil
+                            keyboardFocus = .dateSummary
+                            dateFocused = .dateSummary
+                        }
+                    Spacer()
+                    Button("Change") {
+                        Task {
+                            requestedDateFocus = .asShown
+                            await model.changeDateResolution()
+                            if model.dateResolution != nil {
+                                requestedDateFocus = nil
+                            }
+                        }
                     }
-                    HStack {
-                        decisionButton("As shown", value: .asShown)
+                    .accessibilityIdentifier("change-date-selection")
+                    .accessibilityHint("Shows the date interpretation options again.")
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(
+                        "Optional date choice · \(itemCount(model.dateChoiceCount))"
+                    )
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("import-date-decision")
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "questionmark")
+                            .font(.caption.bold())
+                            .foregroundStyle(.orange)
+                            .frame(width: 22, height: 22)
+                            .background(.orange.opacity(0.15), in: Circle())
+                        VStack(alignment: .leading, spacing: 7) {
+                            ForEach(
+                                Array(model.interpretationChoiceSources.enumerated()),
+                                id: \.offset
+                            ) { _, summary in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(pendingDateSummary(summary))
+                                        .font(.callout.bold())
+                                    if let asShownTime = summary.asShownTime {
+                                        Text("Example · As shown: \(asShownTime)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if summary.supportsUTCConversion,
+                                       let convertedTime = summary.convertedFromUTCTime {
+                                        Text("Example · Convert from UTC: \(convertedTime)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            Text(dateFallbackDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            HStack {
+                                decisionButton(
+                                    model.supportsUTCConversion ? "As shown" : "Use proposed dates",
+                                    value: .asShown,
+                                    focus: .asShown
+                                )
+                                if model.supportsUTCConversion {
+                                    decisionButton(
+                                        "Convert from UTC",
+                                        detail: "Applies current \(model.utcOffsetDescription) to ambiguous items",
+                                        value: .convertFromUTC,
+                                        focus: .convertFromUTC
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1051,28 +1129,84 @@ private struct ImportPlanningSheet: View {
         .background(.orange.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
         .overlay {
             RoundedRectangle(cornerRadius: 11)
-                .stroke(.orange, lineWidth: model.dateResolution == nil ? 1.2 : 0)
+                .stroke(.orange, lineWidth: model.dateResolution == nil ? 1.2 : 0.6)
         }
     }
 
     private func decisionButton(
         _ title: String,
-        value: EngineSupervisor.ImportDateResolution
+        detail: String? = nil,
+        value: EngineSupervisor.ImportDateResolution,
+        focus: FocusTarget
     ) -> some View {
         Button {
-            Task { await model.resolveDate(value) }
+            Task {
+                requestedDateFocus = .dateSummary
+                await model.resolveDate(value)
+                if model.dateResolution == nil {
+                    requestedDateFocus = nil
+                }
+            }
         } label: {
-            Label(
-                title,
-                systemImage: model.dateResolution == value
-                    ? "checkmark.circle.fill" : "circle"
-            )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                if let detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .buttonStyle(.bordered)
-        .tint(model.dateResolution == value ? .accentColor : .secondary)
+        .tint(.secondary)
+        .accessibilityLabel(
+            [
+                title,
+                detail
+            ]
+            .compactMap { $0 }
+            .joined(separator: ", ")
+        )
         .accessibilityIdentifier(
             value == .asShown ? "date-as-shown" : "date-convert-utc"
         )
+        .focused($keyboardFocus, equals: focus)
+        .accessibilityFocused($dateFocused, equals: focus)
+        .onAppear {
+            guard focus == .asShown, requestedDateFocus == .asShown else { return }
+            requestedDateFocus = nil
+            keyboardFocus = .asShown
+            dateFocused = .asShown
+        }
+    }
+
+    private var dateFallbackDescription: String {
+        if model.dateChoicePreventsStart {
+            return """
+                These items will stay on the source until you select an interpretation.
+                """
+        }
+        if !model.canStart {
+            return """
+                These items will be skipped, stay on the source, and remain available for a \
+                later import unless you select an interpretation.
+                """
+        }
+        return """
+            You can start now. These items will be skipped, stay on the source, and remain \
+            available for a later import unless you select an interpretation.
+            """
+    }
+
+    private func selectedDateSummary(
+        _ resolution: EngineSupervisor.ImportDateResolution
+    ) -> String {
+        switch resolution {
+        case .asShown:
+            return model.supportsUTCConversion ? "As shown" : "Proposed dates"
+        case .convertFromUTC:
+            return "Converted from UTC where applicable"
+        }
     }
 
     private func summary(_ scan: EngineSupervisor.ImportScan) -> some View {
@@ -1094,7 +1228,23 @@ private struct ImportPlanningSheet: View {
                     systemImage: "calendar.badge.exclamationmark"
                 )
             }
+            if model.deferredDateCount > 0 {
+                Label(
+                    "\(itemCount(model.deferredDateCount)) \(model.deferredDateCount == 1 ? "needs" : "need") a time and will stay on the source.",
+                    systemImage: "clock.badge.exclamationmark"
+                )
+            }
             if let review = model.review {
+                let unappliedDateCount = max(
+                    0,
+                    review.skippedCount - model.deferredDateCount
+                )
+                if model.dateResolution != nil, unappliedDateCount > 0 {
+                    Label(
+                        "\(itemCount(unappliedDateCount)) could not use the selected interpretation and will stay on the source.",
+                        systemImage: "calendar.badge.exclamationmark"
+                    )
+                }
                 Label(
                     "\(review.operationCount) verified operations · \(bytes(review.requiredSpaceBytes))",
                     systemImage: "checkmark.circle"
@@ -1125,11 +1275,11 @@ private struct ImportPlanningSheet: View {
     ) -> String {
         switch summary.source {
         case .filenamePattern:
-            return "\(summary.itemCount) filename date proposals need confirmation"
+            return "\(summary.itemCount) filename date proposals"
         case .containerCreationTime:
-            return "\(summary.itemCount) ambiguous container dates need confirmation"
+            return "\(summary.itemCount) ambiguous container dates"
         default:
-            return "\(summary.itemCount) \(dateSourceName(summary.source)) dates need confirmation"
+            return "\(summary.itemCount) \(dateSourceName(summary.source)) dates"
         }
     }
 
@@ -1201,6 +1351,10 @@ private struct ImportPlanningSheet: View {
 
     private func bytes(_ count: UInt64) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)
+    }
+
+    private func itemCount(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "item" : "items")"
     }
 }
 
@@ -1371,7 +1525,11 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
                 .init(
                     source: .containerCreationTime,
                     state: .needsConfirmation,
-                    itemCount: 4
+                    itemCount: 4,
+                    requiresClock: false,
+                    supportsUTCConversion: true,
+                    asShownTime: "12:14",
+                    convertedFromUTCTime: "14:14"
                 )
             ]
         )
@@ -1394,13 +1552,13 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
             acceptedDate: acceptedDate,
             dateResolution: dateResolution,
             requiredDecisionCount: dateResolution == nil ? 1 : 0,
-            transferCount: scan.mediaCount,
-            skippedCount: 0,
-            leftOnSourceCount: scan.unsupportedCount,
-            operationCount: scan.mediaCount + 2,
+            transferCount: dateResolution == nil ? 8 : scan.mediaCount,
+            skippedCount: dateResolution == nil ? 4 : 0,
+            leftOnSourceCount: dateResolution == nil ? 6 : scan.unsupportedCount,
+            operationCount: (dateResolution == nil ? 8 : scan.mediaCount) + 2,
             requiredSpaceBytes: scan.totalBytes,
-            canStart: dateResolution != nil,
-            reviewedPlan: dateResolution == nil ? nil : "preview-reviewed-plan"
+            canStart: true,
+            reviewedPlan: "preview-reviewed-plan"
         )
     }
 

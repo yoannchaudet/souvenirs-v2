@@ -16,8 +16,7 @@ use crate::execution::{
 };
 use crate::{
     dated_collection_components, directory_identity, inspect_source, scan_summary, CatalogService,
-    DateResolution, DestinationMode, ImportPlanningError, ImportReview, ImportReviewRequest,
-    SourceSnapshotEntry,
+    DestinationMode, ImportPlanningError, ImportReview, ImportReviewRequest, SourceSnapshotEntry,
 };
 
 #[derive(Clone, Debug)]
@@ -70,11 +69,17 @@ pub(crate) fn review_import(
 }
 
 fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPlanningError> {
-    if request.date_resolution == Some(DateResolution::ConvertFromUtc) {
-        return Err(ImportPlanningError::UnsupportedDateResolution);
-    }
     CatalogService::open(&request.catalog_path).map_err(ImportPlanningError::Catalog)?;
-    let inspected = inspect_source(&request.source_path, request.date_resolution, true)?;
+    let utc_offset =
+        time::UtcOffset::from_whole_seconds(request.utc_offset_seconds).map_err(|error| {
+            ImportPlanningError::InvalidMetadata(format!("the UTC offset is invalid: {error}"))
+        })?;
+    let inspected = inspect_source(
+        &request.source_path,
+        request.date_resolution,
+        utc_offset,
+        true,
+    )?;
     let scan = scan_summary(&request.source_path, &inspected)?;
     if inspected.photo_count + inspected.video_count == 0 {
         return Err(ImportPlanningError::NoSupportedMedia);
@@ -98,7 +103,7 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
                 date_resolution: request.date_resolution,
                 required_decision_count,
                 transfer_count: 0,
-                skipped_count: 0,
+                skipped_count: inspected.pending_item_count,
                 left_on_source_count: scan.file_count,
                 operation_count: 0,
                 required_space_bytes: 0,
@@ -252,11 +257,11 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
         date_resolution: request.date_resolution,
         required_decision_count,
         transfer_count: inspected.transfer_media_count,
-        skipped_count: 0,
+        skipped_count: inspected.pending_item_count,
         left_on_source_count: inspected.excluded_file_count,
         operation_count: inspected.transfer_file_count + 2,
         required_space_bytes: inspected.transfer_bytes,
-        can_start: required_decision_count == 0 && inspected.transfer_file_count > 0,
+        can_start: inspected.transfer_file_count > 0,
         reviewed_plan: None,
         scan,
     };

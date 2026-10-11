@@ -241,6 +241,8 @@ final class ImportPlanningModel: ObservableObject {
     @Published var collectionName = ""
     @Published private(set) var destinationMode: EngineSupervisor.ImportDestinationMode = .create
     @Published private(set) var dateResolution: EngineSupervisor.ImportDateResolution?
+    @Published private(set) var dateChoiceSources:
+        [EngineSupervisor.ImportDateSourceSummary] = []
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
     @Published var showsDetails = false
@@ -274,6 +276,61 @@ final class ImportPlanningModel: ObservableObject {
             && errorMessage == nil
     }
 
+    var dateChoiceCount: Int {
+        interpretationChoiceSources.reduce(0) { $0 + $1.itemCount }
+    }
+
+    var deferredDateCount: Int {
+        dateChoiceSources
+            .filter(\.requiresClock)
+            .reduce(0) { $0 + $1.itemCount }
+    }
+
+    var interpretationChoiceSources: [EngineSupervisor.ImportDateSourceSummary] {
+        dateChoiceSources.filter {
+            !$0.requiresClock
+        }
+    }
+
+    var supportsUTCConversion: Bool {
+        interpretationChoiceSources.contains { $0.supportsUTCConversion }
+    }
+
+    var isStartBlocked: Bool {
+        if errorMessage != nil { return true }
+        guard let review, !isLoading else { return false }
+        return !review.canStart || review.reviewedPlan == nil
+    }
+
+    var dateChoicePreventsStart: Bool {
+        errorMessage == nil && review?.canStart == false
+    }
+
+    var startImportAccessibilityHint: String {
+        if isPrepared {
+            return "The import plan is ready."
+        }
+        if let errorMessage {
+            return "Import cannot start. \(errorMessage)"
+        }
+        if !canStart {
+            return "Import cannot start until the review is ready."
+        }
+        return "Starts the reviewed import."
+    }
+
+    var utcOffsetDescription: String {
+        let seconds = TimeZone.current.secondsFromGMT()
+        let sign = seconds < 0 ? "−" : "+"
+        let magnitude = abs(seconds)
+        return String(
+            format: "UTC%@%02d:%02d",
+            sign,
+            magnitude / 3_600,
+            (magnitude % 3_600) / 60
+        )
+    }
+
     var title: String {
         guard let scan else { return "Reading this source…" }
         return "\(review?.transferCount ?? scan.mediaCount) new photos and videos will be copied into \(destinationDescription)"
@@ -290,6 +347,9 @@ final class ImportPlanningModel: ObservableObject {
         do {
             let scan = try await engine.scanImport(sourcePath: sourcePath)
             self.scan = scan
+            dateChoiceSources = scan.datetimeSources.filter {
+                $0.state == .needsConfirmation
+            }
             collectionName = scan.suggestedCollectionName
             acceptedDate = scan.suggestedAcceptedDate ?? ""
             await refreshReview()
@@ -348,6 +408,11 @@ final class ImportPlanningModel: ObservableObject {
 
     func resolveDate(_ resolution: EngineSupervisor.ImportDateResolution) async {
         dateResolution = resolution
+        await refreshReview()
+    }
+
+    func changeDateResolution() async {
+        dateResolution = nil
         await refreshReview()
     }
 

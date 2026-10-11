@@ -159,6 +159,8 @@ pub struct CreateCatalogParameters {
 #[serde(deny_unknown_fields)]
 pub struct ImportScanParameters {
     pub source_path: String,
+    #[serde(default)]
+    pub utc_offset_seconds: i32,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -170,6 +172,8 @@ pub struct ImportReviewParameters {
     pub destination_mode: ImportDestinationMode,
     pub accepted_date: String,
     pub date_resolution: Option<ImportDateResolution>,
+    #[serde(default)]
+    pub utc_offset_seconds: i32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -340,6 +344,12 @@ pub struct ImportDateSourceSummary {
     pub source: ImportDateSource,
     pub state: ImportDateState,
     pub item_count: usize,
+    #[serde(default)]
+    pub requires_clock: bool,
+    #[serde(default)]
+    pub supports_utc_conversion: bool,
+    pub as_shown_time: Option<String>,
+    pub converted_from_utc_time: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

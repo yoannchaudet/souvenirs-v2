@@ -23,8 +23,9 @@ use souvenirs_domain::catalog::{
     DatedCollectionRange, ParsedCollectionDirectory,
 };
 use souvenirs_domain::datetime::{
-    confirm_batch, AcceptedDateTime, AcceptedDateTimeSource, ConfirmationDecision,
-    ConfirmationRequirement, DateTimeResolution, DateTimeSource,
+    confirm_batch, confirm_candidate, AcceptedDateTime, AcceptedDateTimeSource,
+    ConfirmationDecision, ConfirmationRequirement, DateTimeError, DateTimeResolution,
+    DateTimeSource, PendingConfirmationBatch,
 };
 use souvenirs_domain::names::CatalogLabel;
 use souvenirs_domain::relationships::{
@@ -361,6 +362,10 @@ pub struct ImportDateSourceSummary {
     pub source: ImportDateSource,
     pub state: ImportDateState,
     pub item_count: usize,
+    pub requires_clock: bool,
+    pub supports_utc_conversion: bool,
+    pub as_shown_time: Option<String>,
+    pub converted_from_utc_time: Option<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportReviewRequest {
@@ -370,6 +375,7 @@ pub struct ImportReviewRequest {
     pub destination_mode: DestinationMode,
     pub accepted_date: String,
     pub date_resolution: Option<DateResolution>,
+    pub utc_offset_seconds: i32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -497,8 +503,15 @@ impl OperationInspectionService {
 
 impl ImportPlanningService {
     pub fn scan(source: impl AsRef<Path>) -> Result<ImportScanSummary, ImportPlanningError> {
+        Self::scan_with_utc_offset(source, 0)
+    }
+
+    pub fn scan_with_utc_offset(
+        source: impl AsRef<Path>,
+        utc_offset_seconds: i32,
+    ) -> Result<ImportScanSummary, ImportPlanningError> {
         let source = source.as_ref();
-        let inspected = inspect_source(source, None, false)?;
+        let inspected = inspect_source(source, None, utc_offset(utc_offset_seconds)?, false)?;
         scan_summary(source, &inspected)
     }
 
@@ -581,6 +594,7 @@ pub(crate) fn directory_identity(metadata: &fs::Metadata) -> String {
 pub(crate) fn inspect_source(
     source: &Path,
     decision: Option<DateResolution>,
+    utc_offset: time::UtcOffset,
     include_snapshot: bool,
 ) -> Result<InspectedSource, ImportPlanningError> {
     if !source.is_dir() {
@@ -676,27 +690,35 @@ pub(crate) fn inspect_source(
         .collect::<BTreeMap<_, _>>();
     let relationships = resolve_directory_relationships(&source_files);
     let resolved = source_datetime::assemble_source_datetimes(&source_files, relationships);
+    let confirmation_batches = source_datetime::source_confirmation_batches(&resolved.items)
+        .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?;
+    let mut interpretation_previews = BTreeMap::new();
+    for batch in &confirmation_batches {
+        if let Some(preview) = interpretation_preview(batch, utc_offset)? {
+            interpretation_previews
+                .entry((import_date_source(batch.key.source), batch.key.requirement))
+                .or_insert(preview);
+        }
+    }
     let confirmed_by_item = if decision.is_some() {
         let mut confirmed = BTreeMap::new();
-        for batch in source_datetime::source_confirmation_batches(&resolved.items)
-            .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?
-        {
-            let confirmation = match batch.key.requirement {
-                ConfirmationRequirement::AcceptCandidate
-                | ConfirmationRequirement::ChooseLocalOrUtc => {
-                    Some(ConfirmationDecision::AcceptCandidate)
-                }
-                ConfirmationRequirement::SelectUtcOffset => {
-                    Some(ConfirmationDecision::InterpretUtc(time::UtcOffset::UTC))
-                }
-                ConfirmationRequirement::AssignClock => None,
-            };
+        for batch in confirmation_batches {
+            let confirmation = confirmation_decision(
+                &batch,
+                decision.expect("a date resolution exists"),
+                utc_offset,
+            )?;
             let Some(confirmation) = confirmation else {
                 continue;
             };
-            for item in confirm_batch(batch, confirmation)
-                .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?
-            {
+            let items = match confirm_batch(batch, confirmation) {
+                Ok(items) => items,
+                Err(DateTimeError::UtcInterpretationOutOfRange) => continue,
+                Err(error) => {
+                    return Err(ImportPlanningError::InvalidMetadata(error.to_string()));
+                }
+            };
+            for item in items {
                 confirmed.insert(item.item_id, item.accepted);
             }
         }
@@ -735,12 +757,16 @@ pub(crate) fn inspect_source(
             DateTimeResolution::Accepted { accepted, .. } => {
                 let source = accepted_source(&accepted.source);
                 *source_counts
-                    .entry((source, ImportDateState::Accepted))
+                    .entry((source, ImportDateState::Accepted, None))
                     .or_insert(0) += 1;
                 Some(accepted)
             }
             DateTimeResolution::NeedsConfirmation(pending) => {
                 let source = import_date_source(pending.candidate.source);
+                let requirement = pending
+                    .batch_key()
+                    .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?
+                    .requirement;
                 if decision.is_some() {
                     let accepted = confirmed_by_item.get(item.primary.as_str()).cloned();
                     let state = if accepted.is_some() {
@@ -749,12 +775,22 @@ pub(crate) fn inspect_source(
                         pending_item_count += 1;
                         ImportDateState::NeedsConfirmation
                     };
-                    *source_counts.entry((source, state)).or_insert(0) += 1;
+                    *source_counts
+                        .entry((
+                            source,
+                            state,
+                            (state == ImportDateState::NeedsConfirmation).then_some(requirement),
+                        ))
+                        .or_insert(0) += 1;
                     accepted
                 } else {
                     pending_item_count += 1;
                     *source_counts
-                        .entry((source, ImportDateState::NeedsConfirmation))
+                        .entry((
+                            source,
+                            ImportDateState::NeedsConfirmation,
+                            Some(requirement),
+                        ))
                         .or_insert(0) += 1;
                     None
                 }
@@ -815,15 +851,112 @@ pub(crate) fn inspect_source(
         range_end,
         datetime_sources: source_counts
             .into_iter()
-            .map(|((source, state), item_count)| ImportDateSourceSummary {
-                source,
-                state,
-                item_count,
+            .map(|((source, state, requirement), item_count)| {
+                let requires_clock = requirement == Some(ConfirmationRequirement::AssignClock);
+                let supports_utc_conversion = matches!(
+                    requirement,
+                    Some(
+                        ConfirmationRequirement::ChooseLocalOrUtc
+                            | ConfirmationRequirement::SelectUtcOffset
+                    )
+                );
+                ImportDateSourceSummary {
+                    source,
+                    state,
+                    item_count,
+                    requires_clock,
+                    supports_utc_conversion,
+                    as_shown_time: if state == ImportDateState::NeedsConfirmation && !requires_clock
+                    {
+                        interpretation_previews
+                            .get(&(
+                                source,
+                                requirement.expect("pending summaries have a requirement"),
+                            ))
+                            .map(|preview| preview.0.clone())
+                    } else {
+                        None
+                    },
+                    converted_from_utc_time: if state == ImportDateState::NeedsConfirmation
+                        && !requires_clock
+                    {
+                        interpretation_previews
+                            .get(&(
+                                source,
+                                requirement.expect("pending summaries have a requirement"),
+                            ))
+                            .map(|preview| preview.1.clone())
+                    } else {
+                        None
+                    },
+                }
             })
             .collect(),
         source_snapshot,
         items,
     })
+}
+
+fn interpretation_preview(
+    batch: &PendingConfirmationBatch,
+    utc_offset: time::UtcOffset,
+) -> Result<Option<(String, String)>, ImportPlanningError> {
+    let Some(first) = batch.items.first() else {
+        return Ok(None);
+    };
+    let Some(as_shown) = confirmation_decision(batch, DateResolution::AsShown, utc_offset)? else {
+        return Ok(None);
+    };
+    let Some(converted) = confirmation_decision(batch, DateResolution::ConvertFromUtc, utc_offset)?
+    else {
+        return Ok(None);
+    };
+    let preview = |decision| match confirm_candidate(first.pending.clone(), decision) {
+        Ok(accepted) => Ok(Some(accepted)),
+        Err(DateTimeError::UtcInterpretationOutOfRange) => Ok(None),
+        Err(error) => Err(ImportPlanningError::InvalidMetadata(error.to_string())),
+    };
+    let Some(as_shown) = preview(as_shown)? else {
+        return Ok(None);
+    };
+    let Some(converted) = preview(converted)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        display_time(as_shown.wall_clock.time()),
+        display_time(converted.wall_clock.time()),
+    )))
+}
+
+fn confirmation_decision(
+    batch: &PendingConfirmationBatch,
+    resolution: DateResolution,
+    utc_offset: time::UtcOffset,
+) -> Result<Option<ConfirmationDecision>, ImportPlanningError> {
+    Ok(match batch.key.requirement {
+        ConfirmationRequirement::AcceptCandidate => Some(ConfirmationDecision::AcceptCandidate),
+        ConfirmationRequirement::ChooseLocalOrUtc => match resolution {
+            DateResolution::AsShown => Some(ConfirmationDecision::AcceptCandidate),
+            DateResolution::ConvertFromUtc => Some(ConfirmationDecision::InterpretUtc(utc_offset)),
+        },
+        ConfirmationRequirement::SelectUtcOffset => {
+            Some(ConfirmationDecision::InterpretUtc(match resolution {
+                DateResolution::AsShown => time::UtcOffset::UTC,
+                DateResolution::ConvertFromUtc => utc_offset,
+            }))
+        }
+        ConfirmationRequirement::AssignClock => None,
+    })
+}
+
+fn utc_offset(seconds: i32) -> Result<time::UtcOffset, ImportPlanningError> {
+    time::UtcOffset::from_whole_seconds(seconds).map_err(|error| {
+        ImportPlanningError::InvalidMetadata(format!("the UTC offset is invalid: {error}"))
+    })
+}
+
+fn display_time(value: time::Time) -> String {
+    format!("{:02}:{:02}", value.hour(), value.minute())
 }
 
 fn collect_source_files(
@@ -947,7 +1080,6 @@ pub enum ImportPlanningError {
     NoSupportedMedia,
     SourceTooLarge,
     SourceUnavailable(PathBuf),
-    UnsupportedDateResolution,
 }
 
 impl ImportPlanningError {
@@ -965,7 +1097,6 @@ impl ImportPlanningError {
             Self::NoSupportedMedia => "no_supported_media",
             Self::SourceTooLarge => "source_too_large",
             Self::SourceUnavailable(_) => "source_unavailable",
-            Self::UnsupportedDateResolution => "unsupported_date_resolution",
         }
     }
 }
@@ -1004,9 +1135,6 @@ impl fmt::Display for ImportPlanningError {
             Self::SourceTooLarge => formatter.write_str("The source is too large to summarize."),
             Self::SourceUnavailable(_) => formatter
                 .write_str("The source is no longer available. Reconnect it and try again."),
-            Self::UnsupportedDateResolution => formatter.write_str(
-                "UTC conversion needs an explicit timezone and is not available in this review.",
-            ),
         }
     }
 }
@@ -1176,6 +1304,52 @@ mod tests {
         DateResolution, DestinationMode, ImportPlanningError, ImportPlanningService,
         ImportReviewRequest, OperationInspectionService,
     };
+
+    #[test]
+    fn interpretation_preview_uses_the_client_utc_offset() {
+        let batch = souvenirs_domain::datetime::PendingConfirmationBatch {
+            key: souvenirs_domain::datetime::ConfirmationBatchKey {
+                source: souvenirs_domain::datetime::DateTimeSource::ContainerCreationTime,
+                requirement: souvenirs_domain::datetime::ConfirmationRequirement::ChooseLocalOrUtc,
+            },
+            items: vec![souvenirs_domain::datetime::PendingConfirmationItem {
+                item_id: "video".to_owned(),
+                pending: souvenirs_domain::datetime::PendingDateTime {
+                    candidate: souvenirs_domain::datetime::DateTimeCandidate {
+                        source: souvenirs_domain::datetime::DateTimeSource::ContainerCreationTime,
+                        value: souvenirs_domain::datetime::DateTimeValue::AmbiguousContainer(
+                            time::macros::datetime!(2026-10-10 12:14:00),
+                        ),
+                    },
+                    reason: souvenirs_domain::datetime::ConfirmationReason::AmbiguousMetadata,
+                    disagreements: Vec::new(),
+                },
+            }],
+        };
+
+        assert_eq!(
+            super::interpretation_preview(&batch, time::UtcOffset::from_hms(2, 0, 0).unwrap())
+                .unwrap(),
+            Some(("12:14".to_owned(), "14:14".to_owned()))
+        );
+        assert_eq!(
+            super::interpretation_preview(&batch, time::UtcOffset::UTC).unwrap(),
+            Some(("12:14".to_owned(), "12:14".to_owned()))
+        );
+        let mut out_of_range = batch;
+        out_of_range.items[0].pending.candidate.value =
+            souvenirs_domain::datetime::DateTimeValue::AmbiguousContainer(
+                time::macros::datetime!(9999-12-31 23:59:59),
+            );
+        assert_eq!(
+            super::interpretation_preview(
+                &out_of_range,
+                time::UtcOffset::from_hms(2, 0, 0).unwrap()
+            )
+            .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn creates_and_opens_catalog_through_application_service() {
@@ -1461,6 +1635,7 @@ mod tests {
             destination_mode: DestinationMode::Create,
             accepted_date: "2026-10-10".to_owned(),
             date_resolution: None,
+            utc_offset_seconds: 0,
         })
         .unwrap();
         assert!(!unresolved.can_start);
@@ -1472,6 +1647,7 @@ mod tests {
             destination_mode: DestinationMode::Create,
             accepted_date: "2026-10-10".to_owned(),
             date_resolution: Some(DateResolution::AsShown),
+            utc_offset_seconds: 0,
         })
         .unwrap();
         assert!(resolved.can_start);
@@ -1491,7 +1667,13 @@ mod tests {
             .ends_with("2024-10-10 +1d Dolomites"));
         assert!(!resolved.destination_path.exists());
         fs::write(source.join("IMG-20241011-WA0001.jpg"), b"date only").unwrap();
-        let pending = super::inspect_source(&source, Some(DateResolution::AsShown), false).unwrap();
+        let pending = super::inspect_source(
+            &source,
+            Some(DateResolution::AsShown),
+            time::UtcOffset::UTC,
+            false,
+        )
+        .unwrap();
         assert_eq!(pending.pending_item_count, 1);
     }
 
@@ -1519,19 +1701,21 @@ mod tests {
                 destination_mode: DestinationMode::Create,
                 accepted_date: "2026-10-10".to_owned(),
                 date_resolution: Some(DateResolution::AsShown),
+                utc_offset_seconds: 0,
             }),
             Err(ImportPlanningError::DestinationAlreadyExists(_))
         ));
-        assert!(matches!(
-            ImportPlanningService::review(ImportReviewRequest {
-                catalog_path: catalog,
-                source_path: source,
-                collection_name: "Dolomites".to_owned(),
-                destination_mode: DestinationMode::Create,
-                accepted_date: String::new(),
-                date_resolution: Some(DateResolution::ConvertFromUtc),
-            }),
-            Err(ImportPlanningError::UnsupportedDateResolution)
-        ));
+        let converted = ImportPlanningService::review(ImportReviewRequest {
+            catalog_path: catalog,
+            source_path: source,
+            collection_name: "UTC Dolomites".to_owned(),
+            destination_mode: DestinationMode::Create,
+            accepted_date: String::new(),
+            date_resolution: Some(DateResolution::ConvertFromUtc),
+            utc_offset_seconds: 7_200,
+        })
+        .unwrap();
+        assert!(converted.can_start);
+        assert!(converted.reviewed_plan.is_some());
     }
 }

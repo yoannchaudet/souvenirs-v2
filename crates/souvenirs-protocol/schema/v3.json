@@ -446,16 +446,36 @@
         "state"
       ],
       "properties": {
+        "as_shown_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "converted_from_utc_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "item_count": {
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        },
+        "requires_clock": {
+          "default": false,
+          "type": "boolean"
         },
         "source": {
           "$ref": "#/definitions/ImportDateSource"
         },
         "state": {
           "$ref": "#/definitions/ImportDateState"
+        },
+        "supports_utc_conversion": {
+          "default": false,
+          "type": "boolean"
         }
       }
     },
@@ -507,6 +527,11 @@
         },
         "source_path": {
           "type": "string"
+        },
+        "utc_offset_seconds": {
+          "default": 0,
+          "type": "integer",
+          "format": "int32"
         }
       },
       "additionalProperties": false
@@ -519,6 +544,11 @@
       "properties": {
         "source_path": {
           "type": "string"
+        },
+        "utc_offset_seconds": {
+          "default": 0,
+          "type": "integer",
+          "format": "int32"
         }
       },
       "additionalProperties": false

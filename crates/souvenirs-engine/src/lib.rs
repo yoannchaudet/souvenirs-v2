@@ -389,7 +389,10 @@ impl Connection {
             ),
             RequestPayload::ScanImport(parameters) => import_scan_response(
                 request.id,
-                ImportPlanningService::scan(parameters.source_path),
+                ImportPlanningService::scan_with_utc_offset(
+                    parameters.source_path,
+                    parameters.utc_offset_seconds,
+                ),
             ),
             RequestPayload::ReviewImport(parameters) => import_review_response(
                 request.id,
@@ -408,6 +411,7 @@ impl Connection {
                             ImportDateResolution::ConvertFromUtc => DateResolution::ConvertFromUtc,
                         },
                     ),
+                    utc_offset_seconds: parameters.utc_offset_seconds,
                 }),
             ),
             RequestPayload::InspectOperation(parameters) => {
@@ -845,6 +849,10 @@ fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportS
                     ApplicationDateState::NeedsConfirmation => ImportDateState::NeedsConfirmation,
                 },
                 item_count: summary.item_count,
+                requires_clock: summary.requires_clock,
+                supports_utc_conversion: summary.supports_utc_conversion,
+                as_shown_time: summary.as_shown_time,
+                converted_from_utc_time: summary.converted_from_utc_time,
             })
             .collect(),
     }
@@ -1255,6 +1263,7 @@ mod tests {
                 destination_mode: DestinationMode::Existing,
                 accepted_date: "2026-10-10".to_owned(),
                 date_resolution: Some(DateResolution::AsShown),
+                utc_offset_seconds: 0,
             })
             .unwrap();
             let prepared = match super::Connection::default().start_operation(
@@ -1403,6 +1412,7 @@ mod tests {
             destination_mode: DestinationMode::Create,
             accepted_date: "2026-10-10".to_owned(),
             date_resolution: Some(DateResolution::AsShown),
+            utc_offset_seconds: 0,
         })
         .unwrap();
         let prepared = ImportExecutionService::prepare(ImportExecutionRequest {
