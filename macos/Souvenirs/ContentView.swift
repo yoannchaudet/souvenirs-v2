@@ -1051,6 +1051,7 @@ private struct ImportPlanningSheet: View {
                     Button("Change") {
                         Task {
                             await model.changeDateResolution()
+                            await Task.yield()
                             keyboardFocus = .asShown
                             dateFocused = .asShown
                         }
@@ -1105,7 +1106,7 @@ private struct ImportPlanningSheet: View {
                                 if model.supportsUTCConversion {
                                     decisionButton(
                                         "Convert from UTC",
-                                        detail: "Using current \(model.utcOffsetDescription) for all items",
+                                        detail: "Applies current \(model.utcOffsetDescription) to ambiguous items",
                                         value: .convertFromUTC,
                                         focus: .convertFromUTC
                                     )
@@ -1133,6 +1134,7 @@ private struct ImportPlanningSheet: View {
         Button {
             Task {
                 await model.resolveDate(value)
+                await Task.yield()
                 keyboardFocus = .dateSummary
                 dateFocused = .dateSummary
             }
@@ -1167,6 +1169,12 @@ private struct ImportPlanningSheet: View {
         if model.dateChoicePreventsStart {
             return """
                 These items will stay on the source until you select an interpretation.
+                """
+        }
+        if model.isStartBlocked {
+            return """
+                These items will be skipped, stay on the source, and remain available for a \
+                later import unless you select an interpretation.
                 """
         }
         return """
