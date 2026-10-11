@@ -959,6 +959,7 @@ struct CatalogCreationSheet: View {
 private struct ImportPlanningSheet: View {
     private enum FocusTarget: Hashable {
         case cancel
+        case retry
         case collectionName
         case dateSummary
         case asShown
@@ -971,7 +972,10 @@ private struct ImportPlanningSheet: View {
     @FocusState private var keyboardFocus: FocusTarget?
     @AccessibilityFocusState private var titleFocused: Bool
     @AccessibilityFocusState private var dateFocused: FocusTarget?
+    @AccessibilityFocusState private var errorFocused: Bool
+    @AccessibilityFocusState private var reviewFocused: FocusTarget?
     @State private var requestedDateFocus: FocusTarget?
+    @State private var retryRequested = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1004,13 +1008,36 @@ private struct ImportPlanningSheet: View {
                     }
 
                     if let message = model.errorMessage {
-                        Label(message, systemImage: "exclamationmark.triangle.fill")
-                            .font(.callout)
-                            .foregroundStyle(.red)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
-                            .accessibilityIdentifier("import-planning-error")
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label(message, systemImage: "exclamationmark.triangle.fill")
+                                .font(.callout)
+                                .foregroundStyle(.red)
+                                .accessibilityLabel(
+                                    model.canRetryScan
+                                        ? "Import source unavailable. \(message)"
+                                        : message
+                                )
+                                .accessibilityIdentifier("import-planning-error")
+                                .accessibilityFocused($errorFocused)
+                                .onAppear {
+                                    errorFocused = true
+                                }
+                            if model.canRetryScan {
+                                Button("Try Again") {
+                                    retryRequested = true
+                                    Task { await model.retryScan() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .accessibilityHint(
+                                    "Scans the same source again without closing this sheet."
+                                )
+                                .accessibilityIdentifier("retry-import-scan")
+                                .focused($keyboardFocus, equals: .retry)
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
                     }
                 }
                 .padding(24)
@@ -1052,8 +1079,17 @@ private struct ImportPlanningSheet: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
-            keyboardFocus = model.scan == nil ? .cancel : .collectionName
-            titleFocused = true
+            if model.canRetryScan {
+                keyboardFocus = .retry
+            } else {
+                keyboardFocus = model.scan == nil ? .cancel : .collectionName
+                titleFocused = true
+            }
+        }
+        .onChange(of: model.canRetryScan) {
+            if $1 {
+                keyboardFocus = .retry
+            }
         }
         .onChange(of: model.scan != nil) {
             if $1 {
@@ -1079,6 +1115,12 @@ private struct ImportPlanningSheet: View {
                         .onSubmit { Task { await model.refreshReview() } }
                         .accessibilityIdentifier("import-collection-name")
                         .focused($keyboardFocus, equals: .collectionName)
+                        .accessibilityFocused($reviewFocused, equals: .collectionName)
+                        .onAppear {
+                            guard retryRequested else { return }
+                            retryRequested = false
+                            reviewFocused = .collectionName
+                        }
                     Button(
                         model.destinationMode == .create
                             ? "Add to Existing…" : "Create New…"

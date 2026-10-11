@@ -245,6 +245,7 @@ final class ImportPlanningModel: ObservableObject {
     @Published private(set) var dateChoiceSources:
         [EngineSupervisor.ImportDateSourceSummary] = []
     @Published private(set) var isLoading = false
+    @Published private(set) var errorCode: String?
     @Published private(set) var errorMessage: String?
     @Published var showsDetails = false
     @Published private(set) var isPrepared = false
@@ -303,6 +304,13 @@ final class ImportPlanningModel: ObservableObject {
         return !review.canStart || review.reviewedPlan == nil
     }
 
+    var canRetryScan: Bool {
+        scan == nil
+            && errorCode == "source_unavailable"
+            && errorMessage != nil
+            && !isLoading
+    }
+
     var dateChoicePreventsStart: Bool {
         errorMessage == nil && review?.canStart == false
     }
@@ -333,6 +341,12 @@ final class ImportPlanningModel: ObservableObject {
     }
 
     var title: String {
+        if errorCode == "source_unavailable" {
+            return "This source is unavailable"
+        }
+        if errorMessage != nil {
+            return "Couldn’t read this source"
+        }
         guard let scan else { return "Reading this source…" }
         return "\(review?.transferCount ?? scan.mediaCount) new photos and videos will be copied into \(destinationDescription)"
     }
@@ -343,7 +357,13 @@ final class ImportPlanningModel: ObservableObject {
     }
 
     func load() async {
+        guard !isLoading else { return }
+        reviewGeneration += 1
+        scan = nil
+        review = nil
+        isPrepared = false
         isLoading = true
+        errorCode = nil
         errorMessage = nil
         do {
             let scan = try await engine.scanImport(sourcePath: sourcePath)
@@ -356,8 +376,14 @@ final class ImportPlanningModel: ObservableObject {
             await refreshReview()
         } catch {
             isLoading = false
+            errorCode = protocolErrorCode(for: error)
             errorMessage = userMessage(for: error)
         }
+    }
+
+    func retryScan() async {
+        guard canRetryScan else { return }
+        await load()
     }
 
     func refreshReview() async {
@@ -369,6 +395,7 @@ final class ImportPlanningModel: ObservableObject {
         let acceptedDate = acceptedDate
         let dateResolution = dateResolution
         isLoading = true
+        errorCode = nil
         errorMessage = nil
         isPrepared = false
         do {
@@ -387,6 +414,7 @@ final class ImportPlanningModel: ObservableObject {
         } catch {
             guard generation == reviewGeneration else { return }
             review = nil
+            errorCode = protocolErrorCode(for: error)
             errorMessage = userMessage(for: error)
         }
         if generation == reviewGeneration {
@@ -397,6 +425,7 @@ final class ImportPlanningModel: ObservableObject {
     func collectionNameChanged() {
         reviewGeneration += 1
         review = nil
+        errorCode = nil
         errorMessage = nil
         isLoading = false
         isPrepared = false
@@ -427,5 +456,12 @@ final class ImportPlanningModel: ObservableObject {
             return message
         }
         return error.localizedDescription
+    }
+
+    private func protocolErrorCode(for error: Error) -> String? {
+        guard case EngineSupervisor.SupervisorError.protocolError(let code, _) = error else {
+            return nil
+        }
+        return code
     }
 }

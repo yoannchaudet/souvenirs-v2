@@ -185,7 +185,7 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
-    func testImportSourceFailureBlocksPlanning() throws {
+    func testImportSourceFailureRetriesInPlaceAndRestoresKeyboardFocus() throws {
         let app = launch(scenario: "import-error")
 
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
@@ -197,8 +197,38 @@ final class SouvenirsUITests: XCTestCase {
             app.staticTexts["import-planning-error"].waitForExistence(timeout: 5)
         )
         let sheet = activeSheet(app)
+        XCTAssertEqual(
+            sheet.staticTexts["import-review-title"].label,
+            "This source is unavailable"
+        )
         XCTAssertFalse(sheet.buttons["start-import"].isEnabled)
         XCTAssertTrue(sheet.staticTexts["import-start-blocked"].exists)
+        let retry = sheet.buttons["retry-import-scan"]
+        XCTAssertTrue(retry.isEnabled)
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: retry
+        )
+        waitForExpectations(timeout: 3)
+
+        retry.click()
+
+        XCTAssertEqual(app.sheets.count, 1)
+        XCTAssertTrue(
+            sheet.staticTexts["import-planning-error"].waitForNonExistence(timeout: 3)
+        )
+        let collectionName = sheet.textFields["import-collection-name"]
+        XCTAssertTrue(collectionName.waitForExistence(timeout: 5))
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: collectionName
+        )
+        waitForExpectations(timeout: 3)
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: sheet.buttons["start-import"]
+        )
+        waitForExpectations(timeout: 3)
     }
 
     @MainActor

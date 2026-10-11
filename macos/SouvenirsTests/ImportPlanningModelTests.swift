@@ -68,8 +68,56 @@ final class ImportPlanningModelTests: XCTestCase {
         await model.load()
 
         XCTAssertEqual(model.errorMessage, "Reconnect the source and try again.")
+        XCTAssertEqual(model.errorCode, "source_unavailable")
+        XCTAssertEqual(model.title, "This source is unavailable")
+        XCTAssertTrue(model.canRetryScan)
         XCTAssertNil(model.scan)
         XCTAssertFalse(model.canStart)
+    }
+
+    func testNonRetryableScanFailureUsesAnErrorHeadline() async {
+        let engine = FakeImportPlanningEngine()
+        engine.error = EngineSupervisor.SupervisorError.protocolError(
+            code: "scan_failed",
+            message: "The source could not be read."
+        )
+        let model = makeModel(engine: engine)
+
+        await model.load()
+
+        XCTAssertEqual(model.title, "Couldn’t read this source")
+        XCTAssertFalse(model.canRetryScan)
+    }
+
+    func testRetryClearsFailureAndScansTheSameSourceOncePerActivation() async {
+        let engine = FakeImportPlanningEngine()
+        engine.scanErrors = [
+            EngineSupervisor.SupervisorError.protocolError(
+                code: "source_unavailable",
+                message: "Reconnect the source and try again."
+            )
+        ]
+        let model = makeModel(engine: engine)
+
+        await model.load()
+        XCTAssertTrue(model.canRetryScan)
+        XCTAssertEqual(engine.scannedSourcePaths, ["/Volumes/EOS_DIGITAL"])
+
+        await model.retryScan()
+
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.errorCode)
+        XCTAssertEqual(model.sourcePath, "/Volumes/EOS_DIGITAL")
+        XCTAssertEqual(
+            engine.scannedSourcePaths,
+            ["/Volumes/EOS_DIGITAL", "/Volumes/EOS_DIGITAL"]
+        )
+        XCTAssertEqual(model.scan?.sourceName, "EOS_DIGITAL")
+        XCTAssertEqual(model.collectionName, "Dolomites")
+        XCTAssertTrue(model.canStart)
+
+        await model.retryScan()
+        XCTAssertEqual(engine.scannedSourcePaths.count, 2)
     }
 
     func testClocklessItemsRemainDisclosedWithoutInterpretationButtons() async {
@@ -133,9 +181,19 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
     var lastDestinationMode: EngineSupervisor.ImportDestinationMode?
     var includesDeferredDate = false
     var supportsUTCConversion = true
+    var scanErrors: [Error] = []
+    private(set) var scannedSourcePaths: [String] = []
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
+        scannedSourcePaths.append(sourcePath)
+        if !scanErrors.isEmpty {
+            throw scanErrors.removeFirst()
+        }
         if let error { throw error }
+        return scan(sourcePath: sourcePath)
+    }
+
+    private func scan(sourcePath: String) -> EngineSupervisor.ImportScan {
         return .init(
             sourcePath: sourcePath,
             sourceName: "EOS_DIGITAL",
@@ -188,7 +246,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
         if let error { throw error }
         lastCollectionName = collectionName
         lastDestinationMode = destinationMode
-        let scan = try await scanImport(sourcePath: sourcePath)
+        let scan = scan(sourcePath: sourcePath)
         let deferred = includesDeferredDate ? 1 : 0
         return .init(
             scan: scan,
