@@ -54,6 +54,24 @@ fn append_transitions(path: &Path, transitions: impl IntoIterator<Item = Durable
     file.sync_all().unwrap();
 }
 
+fn owned_stage(operation_id: &str, suffix: &str) -> PathBuf {
+    format!(
+        ".souvenirs/staging/{}-{operation_id}-{suffix}",
+        operation_id.len()
+    )
+    .into()
+}
+
+fn operation_records(path: &Path) -> Vec<OperationRecord> {
+    souvenirs_storage::read_operation_records(path).unwrap()
+}
+
+fn assert_no_outcome(records: &[OperationRecord]) {
+    assert!(!records
+        .iter()
+        .any(|record| matches!(record, OperationRecord::Outcome { .. })));
+}
+
 struct Scenario {
     _catalog: TempDir,
     _source: TempDir,
@@ -305,6 +323,449 @@ fn resumes_forward_from_every_durable_failpoint() {
             RecoveryOutcome::Completed
         );
     }
+}
+
+#[test]
+fn observed_directory_is_persisted_before_recovery_records_completion() {
+    let (_catalog, layout, lock) = initialized_catalog();
+    let journal =
+        OperationJournal::create(&layout, &lock, "observed-directory", &json!({})).unwrap();
+    let path = journal.path().to_path_buf();
+    drop(journal);
+    append_transitions(
+        &path,
+        [DurableTransition::DirectoryCreationStarted {
+            step_id: "directory".into(),
+            path: "2026".into(),
+        }],
+    );
+    fs::create_dir(layout.root().join("2026")).unwrap();
+    let request = RecoveryRequest {
+        directories: vec![RecoveryDirectory {
+            step_id: "directory".into(),
+            path: "2026".into(),
+        }],
+        ..RecoveryRequest::default()
+    };
+
+    let error = layout
+        .recover_operation_failing_at(
+            &lock,
+            &path,
+            request.clone(),
+            Failpoint::RecoveryDirectoryObservedBeforePersistence,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RecoveryError::Journal(OperationJournalError::Failpoint(
+            Failpoint::RecoveryDirectoryObservedBeforePersistence
+        ))
+    ));
+    let records = operation_records(&path);
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        OperationRecord::Transition {
+            transition: DurableTransition::DirectoryCreated { .. }
+        }
+    )));
+    assert_no_outcome(&records);
+
+    assert_eq!(
+        layout.recover_operation(&lock, &path, request).unwrap(),
+        RecoveryOutcome::Completed
+    );
+}
+
+#[test]
+fn observed_copy_rename_is_persisted_on_both_sides_before_completion() {
+    for failpoint in [
+        Failpoint::RecoveryCopyStageObservedBeforePersistence,
+        Failpoint::RecoveryCopyDestinationObservedBeforePersistence,
+    ] {
+        let (_catalog, layout, lock) = initialized_catalog();
+        fs::create_dir(layout.root().join("2026")).unwrap();
+        let operation_id = "observed-copy";
+        let journal = OperationJournal::create(&layout, &lock, operation_id, &json!({})).unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+        let staged_path = owned_stage(operation_id, "copy.copy");
+        let staged_absolute = layout.root().join(&staged_path);
+        fs::write(&staged_absolute, b"published").unwrap();
+        append_transitions(
+            &path,
+            [
+                DurableTransition::CopyStarted {
+                    step_id: "copy".into(),
+                    source: "unavailable".into(),
+                    staged_path: staged_path.clone(),
+                    destination: "2026/original.bin".into(),
+                },
+                DurableTransition::CopyVerified {
+                    step_id: "copy".into(),
+                    staged_path: staged_path.clone(),
+                    destination: "2026/original.bin".into(),
+                    sha256: digest(b"published"),
+                    bytes_copied: 9,
+                },
+                DurableTransition::CopyPublicationStarted {
+                    step_id: "copy".into(),
+                    staged_path: staged_path.clone(),
+                    destination: "2026/original.bin".into(),
+                    sha256: digest(b"published"),
+                },
+            ],
+        );
+        fs::rename(staged_absolute, layout.root().join("2026/original.bin")).unwrap();
+        let request = RecoveryRequest {
+            copies: vec![RecoveryCopy {
+                step_id: "copy".into(),
+                source: "unavailable".into(),
+                destination: "2026/original.bin".into(),
+                expected_sha256: digest(b"published"),
+                expected_size_bytes: 9,
+            }],
+            ..RecoveryRequest::default()
+        };
+
+        let error = layout
+            .recover_operation_failing_at(&lock, &path, request.clone(), failpoint)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RecoveryError::Journal(OperationJournalError::Failpoint(actual))
+                if actual == failpoint
+        ));
+        let records = operation_records(&path);
+        assert!(!records.iter().any(|record| matches!(
+            record,
+            OperationRecord::Transition {
+                transition: DurableTransition::CopyPublished { .. }
+            }
+        )));
+        assert_no_outcome(&records);
+
+        assert_eq!(
+            layout.recover_operation(&lock, &path, request).unwrap(),
+            RecoveryOutcome::Completed
+        );
+        assert_eq!(
+            fs::read(layout.root().join("2026/original.bin")).unwrap(),
+            b"published"
+        );
+    }
+}
+
+#[test]
+fn recorded_copy_publication_persists_observed_stage_cleanup_before_outcome() {
+    let (_catalog, layout, lock) = initialized_catalog();
+    fs::create_dir(layout.root().join("2026")).unwrap();
+    let operation_id = "published-copy";
+    let journal = OperationJournal::create(&layout, &lock, operation_id, &json!({})).unwrap();
+    let path = journal.path().to_path_buf();
+    drop(journal);
+    let staged_path = owned_stage(operation_id, "copy.copy");
+    let staged_absolute = layout.root().join(&staged_path);
+    let staged_name = staged_absolute.file_name().unwrap().to_string_lossy();
+    let apple_double = staged_absolute.with_file_name(format!("._{staged_name}"));
+    fs::write(layout.root().join("2026/original.bin"), b"published").unwrap();
+    fs::write(&apple_double, b"metadata").unwrap();
+    append_transitions(
+        &path,
+        [
+            DurableTransition::CopyStarted {
+                step_id: "copy".into(),
+                source: "unavailable".into(),
+                staged_path: staged_path.clone(),
+                destination: "2026/original.bin".into(),
+            },
+            DurableTransition::CopyVerified {
+                step_id: "copy".into(),
+                staged_path,
+                destination: "2026/original.bin".into(),
+                sha256: digest(b"published"),
+                bytes_copied: 9,
+            },
+            DurableTransition::CopyPublished {
+                step_id: "copy".into(),
+                destination: "2026/original.bin".into(),
+                sha256: digest(b"published"),
+            },
+        ],
+    );
+    let request = RecoveryRequest {
+        copies: vec![RecoveryCopy {
+            step_id: "copy".into(),
+            source: "unavailable".into(),
+            destination: "2026/original.bin".into(),
+            expected_sha256: digest(b"published"),
+            expected_size_bytes: 9,
+        }],
+        ..RecoveryRequest::default()
+    };
+
+    let error = layout
+        .recover_operation_failing_at(
+            &lock,
+            &path,
+            request.clone(),
+            Failpoint::RecoveryCopyStageObservedBeforePersistence,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RecoveryError::Journal(OperationJournalError::Failpoint(
+            Failpoint::RecoveryCopyStageObservedBeforePersistence
+        ))
+    ));
+    assert!(!apple_double.exists());
+    assert_no_outcome(&operation_records(&path));
+
+    assert_eq!(
+        layout.recover_operation(&lock, &path, request).unwrap(),
+        RecoveryOutcome::Completed
+    );
+}
+
+#[test]
+fn observed_manifest_rename_is_persisted_on_both_sides_before_completion() {
+    for failpoint in [
+        Failpoint::RecoveryManifestStageObservedBeforePersistence,
+        Failpoint::RecoveryManifestDestinationObservedBeforePersistence,
+    ] {
+        let (_catalog, layout, lock) = initialized_catalog();
+        fs::create_dir(layout.root().join("2026")).unwrap();
+        let operation_id = "observed-manifest";
+        let journal = OperationJournal::create(&layout, &lock, operation_id, &json!({})).unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+        let contents = format!("{}  original.bin\n", digest(b"published")).into_bytes();
+        let resulting_sha256 = digest(&contents);
+        let staged_path = owned_stage(operation_id, "manifest.tmp");
+        let staged_absolute = layout.root().join(&staged_path);
+        fs::write(&staged_absolute, &contents).unwrap();
+        append_transitions(
+            &path,
+            [
+                DurableTransition::ManifestReplacementStarted {
+                    step_id: "manifest".into(),
+                    staged_path: staged_path.clone(),
+                    manifest_path: "2026/SHA256SUMS".into(),
+                    previous_sha256: None,
+                    resulting_sha256: resulting_sha256.clone(),
+                },
+                DurableTransition::ManifestStaged {
+                    step_id: "manifest".into(),
+                    staged_path: staged_path.clone(),
+                    manifest_path: "2026/SHA256SUMS".into(),
+                    resulting_sha256: resulting_sha256.clone(),
+                },
+                DurableTransition::ManifestPublicationStarted {
+                    step_id: "manifest".into(),
+                    staged_path: staged_path.clone(),
+                    manifest_path: "2026/SHA256SUMS".into(),
+                    resulting_sha256: resulting_sha256.clone(),
+                },
+            ],
+        );
+        fs::rename(staged_absolute, layout.root().join("2026/SHA256SUMS")).unwrap();
+        let request = RecoveryRequest {
+            manifests: vec![RecoveryManifest {
+                step_id: "manifest".into(),
+                path: "2026/SHA256SUMS".into(),
+                previous_sha256: None,
+                contents: contents.clone(),
+            }],
+            ..RecoveryRequest::default()
+        };
+
+        let error = layout
+            .recover_operation_failing_at(&lock, &path, request.clone(), failpoint)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RecoveryError::Journal(OperationJournalError::Failpoint(actual))
+                if actual == failpoint
+        ));
+        let records = operation_records(&path);
+        assert!(!records.iter().any(|record| matches!(
+            record,
+            OperationRecord::Transition {
+                transition: DurableTransition::ManifestReplaced { .. }
+            }
+        )));
+        assert_no_outcome(&records);
+
+        assert_eq!(
+            layout.recover_operation(&lock, &path, request).unwrap(),
+            RecoveryOutcome::Completed
+        );
+        assert_eq!(
+            fs::read(layout.root().join("2026/SHA256SUMS")).unwrap(),
+            contents
+        );
+    }
+}
+
+#[test]
+fn observed_absent_owned_stage_is_persisted_before_removal_completion() {
+    let (_catalog, layout, lock) = initialized_catalog();
+    let operation_id = "observed-removal";
+    let journal = OperationJournal::create(&layout, &lock, operation_id, &json!({})).unwrap();
+    let path = journal.path().to_path_buf();
+    drop(journal);
+    let staged_path = owned_stage(operation_id, "copy.copy");
+    append_transitions(
+        &path,
+        [
+            DurableTransition::CopyStarted {
+                step_id: "copy".into(),
+                source: "unavailable".into(),
+                staged_path: staged_path.clone(),
+                destination: "original.bin".into(),
+            },
+            DurableTransition::StageRemovalStarted {
+                step_id: "copy".into(),
+                staged_path: staged_path.clone(),
+            },
+        ],
+    );
+    let unrelated_stage = layout.staging_directory().join("unrelated.tmp");
+    fs::write(&unrelated_stage, b"keep").unwrap();
+    let request = RecoveryRequest {
+        mode: RecoveryMode::CancelRemainingCopies,
+        copies: vec![RecoveryCopy {
+            step_id: "copy".into(),
+            source: "unavailable".into(),
+            destination: "original.bin".into(),
+            expected_sha256: digest(b"unused"),
+            expected_size_bytes: 6,
+        }],
+        ..RecoveryRequest::default()
+    };
+
+    let error = layout
+        .recover_operation_failing_at(
+            &lock,
+            &path,
+            request.clone(),
+            Failpoint::RecoveryStageRemovalObservedBeforePersistence,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RecoveryError::Journal(OperationJournalError::Failpoint(
+            Failpoint::RecoveryStageRemovalObservedBeforePersistence
+        ))
+    ));
+    let records = operation_records(&path);
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        OperationRecord::Transition {
+            transition: DurableTransition::StageRemoved { .. }
+        }
+    )));
+    assert_no_outcome(&records);
+
+    assert_eq!(
+        layout.recover_operation(&lock, &path, request).unwrap(),
+        RecoveryOutcome::Cancelled
+    );
+    assert_eq!(fs::read(unrelated_stage).unwrap(), b"keep");
+    let records = operation_records(&path);
+    let removed = records
+        .iter()
+        .position(|record| {
+            matches!(
+                record,
+                OperationRecord::Transition {
+                    transition: DurableTransition::StageRemoved { .. }
+                }
+            )
+        })
+        .unwrap();
+    let outcome = records
+        .iter()
+        .position(|record| matches!(record, OperationRecord::Outcome { .. }))
+        .unwrap();
+    assert!(removed < outcome);
+}
+
+#[test]
+fn cleanup_tracks_the_latest_lifecycle_for_a_reused_owned_stage_path() {
+    let (_catalog, layout, lock) = initialized_catalog();
+    let operation_id = "reused-stage";
+    let journal = OperationJournal::create(&layout, &lock, operation_id, &json!({})).unwrap();
+    let path = journal.path().to_path_buf();
+    drop(journal);
+    let staged_path = owned_stage(operation_id, "copy.copy");
+    fs::write(layout.root().join(&staged_path), b"new lifecycle").unwrap();
+    append_transitions(
+        &path,
+        [
+            DurableTransition::CopyStarted {
+                step_id: "copy".into(),
+                source: "unavailable".into(),
+                staged_path: staged_path.clone(),
+                destination: "original.bin".into(),
+            },
+            DurableTransition::StageRemovalStarted {
+                step_id: "copy".into(),
+                staged_path: staged_path.clone(),
+            },
+            DurableTransition::StageRemoved {
+                step_id: "copy".into(),
+                staged_path: staged_path.clone(),
+            },
+            DurableTransition::CopyStarted {
+                step_id: "copy".into(),
+                source: "unavailable".into(),
+                staged_path: staged_path.clone(),
+                destination: "original.bin".into(),
+            },
+        ],
+    );
+    let request = RecoveryRequest {
+        mode: RecoveryMode::CancelRemainingCopies,
+        copies: vec![RecoveryCopy {
+            step_id: "copy".into(),
+            source: "unavailable".into(),
+            destination: "original.bin".into(),
+            expected_sha256: digest(b"new lifecycle"),
+            expected_size_bytes: 13,
+        }],
+        ..RecoveryRequest::default()
+    };
+
+    let error = layout
+        .recover_operation_failing_at(
+            &lock,
+            &path,
+            request.clone(),
+            Failpoint::StageRemovalIntentPersisted,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RecoveryError::Journal(OperationJournalError::Failpoint(
+            Failpoint::StageRemovalIntentPersisted
+        ))
+    ));
+    assert!(layout.root().join(&staged_path).is_file());
+
+    assert_eq!(
+        layout
+            .recover_operation(&lock, &path, request.clone())
+            .unwrap(),
+        RecoveryOutcome::Cancelled
+    );
+    assert!(!layout.root().join(staged_path).exists());
+    assert_eq!(
+        layout
+            .recover_operation(&lock, &path, RecoveryRequest::default())
+            .unwrap(),
+        RecoveryOutcome::Cancelled
+    );
 }
 
 #[test]

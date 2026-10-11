@@ -680,6 +680,12 @@ pub enum Failpoint {
     ManifestPublished,
     StageRemovalIntentPersisted,
     StageRemovalPersisted,
+    RecoveryDirectoryObservedBeforePersistence,
+    RecoveryCopyStageObservedBeforePersistence,
+    RecoveryCopyDestinationObservedBeforePersistence,
+    RecoveryManifestStageObservedBeforePersistence,
+    RecoveryManifestDestinationObservedBeforePersistence,
+    RecoveryStageRemovalObservedBeforePersistence,
     OutcomePersisted,
 }
 
