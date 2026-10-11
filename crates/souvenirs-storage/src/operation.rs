@@ -113,6 +113,28 @@ pub enum OperationOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationInterruptionCause {
+    SourceUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OperationTimestamp {
+    pub unix_seconds: i64,
+    pub nanosecond: u32,
+}
+
+impl OperationTimestamp {
+    fn now() -> Result<Self, OperationJournalError> {
+        let timestamp = OffsetDateTime::now_utc();
+        Ok(Self {
+            unix_seconds: timestamp.unix_timestamp(),
+            nanosecond: timestamp.nanosecond(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum RetainedDuplicateDisposition {
@@ -145,9 +167,26 @@ pub enum OperationRecord {
     Transition {
         transition: DurableTransition,
     },
+    Interruption {
+        cause: OperationInterruptionCause,
+    },
     Outcome {
         outcome: OperationOutcome,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimestampedOperationRecord {
+    pub record: OperationRecord,
+    pub recorded_at: Option<OperationTimestamp>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedOperationRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recorded_at: Option<OperationTimestamp>,
+    #[serde(flatten)]
+    record: OperationRecord,
 }
 
 #[derive(Debug)]
@@ -455,6 +494,35 @@ impl OperationJournal {
         self.record_outcome(layout, lock, OperationOutcome::Cancelled)
     }
 
+    pub fn interrupt(
+        &mut self,
+        layout: &CatalogLayout,
+        lock: &CatalogLock,
+        cause: OperationInterruptionCause,
+    ) -> Result<(), OperationJournalError> {
+        self.ensure_active(layout, lock)?;
+        self.append(&OperationRecord::Interruption { cause })
+    }
+
+    pub fn record_interruption(
+        layout: &CatalogLayout,
+        lock: &CatalogLock,
+        path: &Path,
+        cause: OperationInterruptionCause,
+    ) -> Result<(), OperationJournalError> {
+        let (mut journal, records) = Self::open_for_recovery(layout, lock, path)?;
+        if matches!(
+            records.last(),
+            Some(OperationRecord::Interruption {
+                cause: recorded_cause,
+                ..
+            }) if *recorded_cause == cause
+        ) {
+            return Ok(());
+        }
+        journal.interrupt(layout, lock, cause)
+    }
+
     #[cfg(feature = "test-failpoints")]
     pub fn fail_at(&mut self, failpoint: Failpoint) {
         self.failpoint = Some(failpoint);
@@ -546,6 +614,15 @@ fn validate_source_file_identifier(identifier: &str) -> Result<(), OperationJour
 pub fn read_operation_records(
     path: impl AsRef<Path>,
 ) -> Result<Vec<OperationRecord>, OperationJournalError> {
+    Ok(read_timestamped_operation_records(path)?
+        .into_iter()
+        .map(|record| record.record)
+        .collect())
+}
+
+pub fn read_timestamped_operation_records(
+    path: impl AsRef<Path>,
+) -> Result<Vec<TimestampedOperationRecord>, OperationJournalError> {
     let path = path.as_ref();
     let metadata = fs::symlink_metadata(path).map_err(|source| OperationJournalError::Io {
         action: "inspect operation journal",
@@ -559,11 +636,21 @@ pub fn read_operation_records(
             path.to_path_buf(),
         ));
     }
-    Ok(read_parsed_operation_records(path, "read operation journal")?.records)
+    let parsed = read_parsed_operation_records(path, "read operation journal")?;
+    Ok(parsed
+        .records
+        .into_iter()
+        .zip(parsed.recorded_at)
+        .map(|(record, recorded_at)| TimestampedOperationRecord {
+            record,
+            recorded_at,
+        })
+        .collect())
 }
 
 pub(crate) struct ParsedOperationRecords {
     pub records: Vec<OperationRecord>,
+    pub recorded_at: Vec<Option<OperationTimestamp>>,
     pub complete_length: u64,
     pub interrupted_tail: bool,
     pub legacy_initialization: Option<(u32, bool)>,
@@ -595,6 +682,7 @@ pub(crate) fn read_parsed_operation_records(
             });
         }
         return Ok(ParsedOperationRecords {
+            recorded_at: vec![None; records.len()],
             records,
             complete_length: complete_length as u64,
             interrupted_tail: complete_length < bytes.len(),
@@ -602,6 +690,7 @@ pub(crate) fn read_parsed_operation_records(
         });
     }
     let mut records = Vec::new();
+    let mut recorded_at = Vec::new();
     let mut start = 0;
     let mut line_number = 1;
     for (end, _) in bytes.iter().enumerate().filter(|(_, byte)| **byte == b'\n') {
@@ -612,18 +701,22 @@ pub(crate) fn read_parsed_operation_records(
             continue;
         }
 
-        records.push(serde_json::from_slice(line).map_err(|source| {
-            OperationJournalError::DeserializeRecord {
-                path: path.to_path_buf(),
-                line: line_number,
-                source,
-            }
-        })?);
+        let persisted: PersistedOperationRecord =
+            serde_json::from_slice(line).map_err(|source| {
+                OperationJournalError::DeserializeRecord {
+                    path: path.to_path_buf(),
+                    line: line_number,
+                    source,
+                }
+            })?;
+        records.push(persisted.record);
+        recorded_at.push(persisted.recorded_at);
         start = end + 1;
         line_number += 1;
     }
     Ok(ParsedOperationRecords {
         records,
+        recorded_at,
         complete_length: start as u64,
         interrupted_tail: start < bytes.len(),
         legacy_initialization: None,
@@ -639,20 +732,29 @@ fn parse_legacy_initialization(path: &Path, bytes: &[u8]) -> Option<(u32, bool)>
         .filter(|line| !line.is_empty());
     let plan = serde_json::from_slice::<serde_json::Value>(lines.next()?).ok()?;
     let fields = plan.as_object()?;
-    if fields.len() != 3
+    if !(fields.len() == 3 || fields.len() == 4 && fields.contains_key("recorded_at"))
         || fields.get("kind")? != "plan"
         || fields.get("operation")? != INITIALIZATION_OPERATION_ID
     {
         return None;
     }
+    if let Some(recorded_at) = fields.get("recorded_at") {
+        serde_json::from_value::<OperationTimestamp>(recorded_at.clone()).ok()?;
+    }
     let format_version = fields.get("format_version")?.as_u64()?.try_into().ok()?;
     let completed = match (lines.next(), lines.next()) {
         (None, None) => false,
-        (Some(line), None)
-            if serde_json::from_slice::<serde_json::Value>(line).ok()
-                == Some(serde_json::json!({"kind":"outcome","outcome":"completed"})) =>
-        {
-            true
+        (Some(line), None) => {
+            let outcome = serde_json::from_slice::<serde_json::Value>(line).ok()?;
+            let fields = outcome.as_object()?;
+            if (fields.len() == 2 || fields.len() == 3 && fields.contains_key("recorded_at"))
+                && fields.get("kind")? == "outcome"
+                && fields.get("outcome")? == "completed"
+            {
+                true
+            } else {
+                return None;
+            }
         }
         _ => return None,
     };
@@ -664,11 +766,14 @@ pub(crate) fn append_operation_record(
     path: &Path,
     record: &OperationRecord,
 ) -> Result<(), OperationJournalError> {
-    let mut encoded =
-        serde_json::to_vec(record).map_err(|source| OperationJournalError::SerializeRecord {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let mut encoded = serde_json::to_vec(&PersistedOperationRecord {
+        recorded_at: Some(OperationTimestamp::now()?),
+        record: record.clone(),
+    })
+    .map_err(|source| OperationJournalError::SerializeRecord {
+        path: path.to_path_buf(),
+        source,
+    })?;
     encoded.push(b'\n');
     file.write_all(&encoded)
         .and_then(|()| sync_file(file))

@@ -387,7 +387,14 @@ final class CatalogVisualTests: XCTestCase {
             sourceName: "EOS_DIGITAL",
             copiedCount: 7,
             totalCount: 12,
-            sourceAvailable: true
+            remainingCount: 5,
+            sourceAvailable: true,
+            interruption: .incompleteWithoutTerminalRecord,
+            activityTime: .init(
+                kind: .lastRecordedActivity,
+                unixSeconds: 1_760_151_600,
+                nanosecond: 0
+            )
         )
         let recoveryPresent = ImportExecutionCoordinator(engine: recoveryPresentEngine)
         await recoveryPresent.inspect(catalog: catalog)
@@ -409,7 +416,14 @@ final class CatalogVisualTests: XCTestCase {
             sourceName: "EOS_DIGITAL",
             copiedCount: 7,
             totalCount: 12,
-            sourceAvailable: false
+            remainingCount: 5,
+            sourceAvailable: false,
+            interruption: .sourceUnavailable,
+            activityTime: .init(
+                kind: .interruptedAt,
+                unixSeconds: 1_760_151_600,
+                nanosecond: 0
+            )
         )
         let recoveryMissing = ImportExecutionCoordinator(engine: recoveryMissingEngine)
         await recoveryMissing.inspect(catalog: catalog)

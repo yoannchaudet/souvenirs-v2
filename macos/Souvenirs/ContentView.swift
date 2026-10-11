@@ -1587,6 +1587,7 @@ private struct RecoverySheet: View {
     let onFinish: () -> Void
     @FocusState private var keyboardFocus: FocusTarget?
     @AccessibilityFocusState private var titleFocused: Bool
+    @State private var recoveryChecksExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1594,37 +1595,71 @@ private struct RecoverySheet: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Label(
                         sourceAvailable
-                            ? "Finish importing “\(imports.collectionName)”?"
+                            ? imports.remainingUnits == 0
+                                ? "Finish recovery for “\(imports.collectionName)”?"
+                                : "Resume importing “\(imports.collectionName)”?"
                             : "Connect \(imports.sourceName) to finish the import",
                         systemImage: sourceAvailable ? "arrow.clockwise" : "externaldrive"
                     )
                     .font(.title3.bold())
                     .accessibilityIdentifier("recovery-title")
                     .accessibilityFocused($titleFocused)
-                    Text(
-                        sourceAvailable
-                            ? "The import stopped before it finished. Nothing was lost."
-                            : "\(imports.completedUnits) items are safely in your catalog. The rest are still on the source."
-                    )
+                    Text(interruptionSummary)
                     .foregroundStyle(.secondary)
-                    Label(
-                        "\(imports.completedUnits) items are safely in your catalog.",
-                        systemImage: "checkmark"
+                    .accessibilityIdentifier("recovery-interruption")
+                    if let activityTime = imports.recoveryActivityTime {
+                    LabeledContent(
+                        activityTime.kind == .interruptedAt
+                            ? "Interrupted at"
+                            : "Last recorded activity",
+                        value: activityTime.date.formatted(
+                            date: .abbreviated,
+                            time: .shortened
+                        )
                     )
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        .background.opacity(0.7),
-                        in: RoundedRectangle(cornerRadius: 10)
+                    .accessibilityIdentifier("recovery-activity-time")
+                    }
+                    LabeledContent(
+                    "Source",
+                    value: "\(imports.sourceName) · \(sourceAvailable ? "Connected" : "Not connected")"
                     )
+                    .accessibilityIdentifier("recovery-source-status")
+                    Text(recoveryCountSummary)
+                    .accessibilityIdentifier("recovery-counts")
+                    Text(
+                    "Stop Here… keeps the copied items and records the remaining items as not imported."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("recovery-stop-explanation")
                     if !sourceAvailable {
-                        Label(
-                            "Reconnect \(imports.sourceName), then choose Try Again.",
-                            systemImage: "externaldrive.badge.exclamationmark"
+                    Label(
+                        "Reconnect \(imports.sourceName), then choose Try Again to resume recovery.",
+                        systemImage: "externaldrive.badge.exclamationmark"
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("recovery-source-unavailable")
+                    } else {
+                        DisclosureGroup(
+                            "Recovery checks",
+                            isExpanded: $recoveryChecksExpanded
+                        ) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label(
+                                    "Confirm copied items are complete.",
+                                    systemImage: "checkmark.circle"
+                                )
+                                Label(
+                                    "Verify the source before copying the remaining items.",
+                                    systemImage: "checkmark.circle"
+                                )
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 6)
+                        }
+                        .accessibilityIdentifier("recovery-checks")
                     }
                 }
                 .padding(24)
@@ -1652,7 +1687,7 @@ private struct RecoverySheet: View {
                         .accessibilityIdentifier("retry-recovery")
                         .focused($keyboardFocus, equals: .retry)
                 }
-                Button("Finish Import", action: onFinish)
+                Button("Resume Import", action: onFinish)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!sourceAvailable || imports.isRetryingRecovery)
@@ -1666,6 +1701,31 @@ private struct RecoverySheet: View {
             keyboardFocus = sourceAvailable ? .finish : .retry
             titleFocused = true
         }
+    }
+
+    private var interruptionSummary: String {
+        switch imports.interruption {
+        case .sourceUnavailable:
+            return "The source became unavailable before the import finished. Nothing was lost."
+        case .incompleteWithoutTerminalRecord, nil:
+            return "The import stopped before it finished. Nothing was lost."
+        }
+    }
+
+    private func itemCount(_ count: UInt64) -> String {
+        "\(count) \(count == 1 ? "item" : "items")"
+    }
+
+    private var recoveryCountSummary: String {
+        let safe = "\(itemCount(imports.completedUnits)) "
+            + "\(imports.completedUnits == 1 ? "is" : "are") safely in your catalog."
+        if imports.remainingUnits == 0 {
+            return "\(safe) 0 items remain to copy from \(imports.sourceName). "
+                + "Recovery still needs to finish the catalog record."
+        }
+        return "\(safe) \(itemCount(imports.remainingUnits)) "
+            + "\(imports.remainingUnits == 1 ? "remains" : "remain") "
+            + "on \(imports.sourceName)."
     }
 }
 

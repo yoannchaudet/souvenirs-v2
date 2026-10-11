@@ -42,6 +42,10 @@ These are proposed operations, not command names.
 | Cancel a copy | Keep durable copies and stop active copy or recovery work at the next durable boundary. |
 | Rebuild index | Recreate `index.sqlite` from manifests and filenames. |
 
+Recovery inspection returns exact copied, total, and remaining counts.
+It rejects a journal when the copied count exceeds the total count.
+The macOS application presents the journal facts before recovery actions.
+
 ## Plans
 
 A plan lists sources, destinations, accepted datetimes, and every planned file and manifest change.

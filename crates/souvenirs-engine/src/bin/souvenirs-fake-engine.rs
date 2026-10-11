@@ -420,7 +420,15 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             source_name: "EOS_DIGITAL".to_owned(),
                             copied_count: 7,
                             total_count: 12,
+                            remaining_count: 5,
                             source_available: false,
+                            interruption:
+                                souvenirs_protocol::UnfinishedOperationInterruption::SourceUnavailable,
+                            activity_time: souvenirs_protocol::UnfinishedOperationActivityTime {
+                                kind: souvenirs_protocol::UnfinishedOperationActivityTimeKind::InterruptedAt,
+                                unix_seconds: 1_760_151_600,
+                                nanosecond: 0,
+                            },
                         });
                         operation_inspection(&mut output, request.id, operation)?;
                     }
@@ -488,7 +496,22 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             source_name: "EOS_DIGITAL".to_owned(),
                             copied_count: 7,
                             total_count: 12,
+                            remaining_count: 5,
                             source_available: matches!(scenario, Scenario::ImportRecovery),
+                            interruption: if matches!(scenario, Scenario::ImportRecoveryMissing) {
+                                souvenirs_protocol::UnfinishedOperationInterruption::SourceUnavailable
+                            } else {
+                                souvenirs_protocol::UnfinishedOperationInterruption::IncompleteWithoutTerminalRecord
+                            },
+                            activity_time: souvenirs_protocol::UnfinishedOperationActivityTime {
+                                kind: if matches!(scenario, Scenario::ImportRecoveryMissing) {
+                                    souvenirs_protocol::UnfinishedOperationActivityTimeKind::InterruptedAt
+                                } else {
+                                    souvenirs_protocol::UnfinishedOperationActivityTimeKind::LastRecordedActivity
+                                },
+                                unix_seconds: 1_760_151_600,
+                                nanosecond: 0,
+                            },
                         }),
                     )?,
                     RequestPayload::StartOperation(

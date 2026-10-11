@@ -1486,10 +1486,14 @@ mod tests {
         let resumed = CatalogLayout::resume_initialization(temporary.path()).unwrap();
         let recovered = fs::read_to_string(journals[0].path()).unwrap();
         assert!(resumed.is_some());
-        assert_eq!(
-            recovered,
-            format!("{plan}{{\"kind\":\"outcome\",\"outcome\":\"completed\"}}\n")
-        );
+        let mut recovered_lines = recovered.lines();
+        assert_eq!(recovered_lines.next(), Some(plan.trim_end()));
+        let outcome: serde_json::Value =
+            serde_json::from_str(recovered_lines.next().unwrap()).unwrap();
+        assert_eq!(outcome["kind"], "outcome");
+        assert_eq!(outcome["outcome"], "completed");
+        assert!(outcome["recorded_at"].is_object());
+        assert_eq!(recovered_lines.next(), None);
         fs::write(journals[0].path(), &plan).unwrap();
         fs::remove_file(layout.config_path()).unwrap();
         let error = CatalogLayout::resume_initialization(temporary.path()).unwrap_err();

@@ -108,6 +108,9 @@ final class ImportExecutionModelTests: XCTestCase {
         XCTAssertEqual(model.operationID, "operation-1")
         XCTAssertEqual(model.completedUnits, 7)
         XCTAssertEqual(model.totalUnits, 12)
+        XCTAssertEqual(model.remainingUnits, 5)
+        XCTAssertEqual(model.interruption, .sourceUnavailable)
+        XCTAssertEqual(model.recoveryActivityTime?.kind, .interruptedAt)
     }
 
     func testUnfinishedOperationRoutesBySourceAvailability() async {
@@ -120,6 +123,9 @@ final class ImportExecutionModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .recoveryPrompt(sourceAvailable: false))
         XCTAssertEqual(model.completedUnits, 7)
         XCTAssertEqual(model.totalUnits, 12)
+        XCTAssertEqual(model.remainingUnits, 5)
+        XCTAssertEqual(model.interruption, .sourceUnavailable)
+        XCTAssertEqual(model.recoveryActivityTime?.kind, .interruptedAt)
         XCTAssertEqual(model.sourceName, "EOS_DIGITAL")
     }
 
@@ -330,7 +336,16 @@ final class ImportExecutionModelTests: XCTestCase {
             sourceName: "EOS_DIGITAL",
             copiedCount: 7,
             totalCount: 12,
-            sourceAvailable: sourceAvailable
+            remainingCount: 5,
+            sourceAvailable: sourceAvailable,
+            interruption: sourceAvailable
+                ? .incompleteWithoutTerminalRecord
+                : .sourceUnavailable,
+            activityTime: .init(
+                kind: sourceAvailable ? .lastRecordedActivity : .interruptedAt,
+                unixSeconds: 1_760_151_600,
+                nanosecond: 0
+            )
         )
     }
 

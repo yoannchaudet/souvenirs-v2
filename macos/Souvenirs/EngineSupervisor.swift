@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public actor EngineSupervisor {
-    public static let protocolVersion: UInt32 = 4
+    public static let protocolVersion: UInt32 = 5
     public static let protocolClientVersion = "0.2.0"
 
     public struct Handshake: Equatable, Sendable {
@@ -335,12 +335,44 @@ public actor EngineSupervisor {
     }
 
     public struct UnfinishedOperation: Codable, Equatable, Sendable {
+        public enum Interruption: String, Codable, Equatable, Sendable {
+            case sourceUnavailable = "source_unavailable"
+            case incompleteWithoutTerminalRecord = "incomplete_without_terminal_record"
+        }
+
+        public struct ActivityTime: Codable, Equatable, Sendable {
+            public enum Kind: String, Codable, Equatable, Sendable {
+                case interruptedAt = "interrupted_at"
+                case lastRecordedActivity = "last_recorded_activity"
+            }
+
+            public let kind: Kind
+            public let unixSeconds: Int64
+            public let nanosecond: UInt32
+
+            public var date: Date {
+                Date(
+                    timeIntervalSince1970: TimeInterval(unixSeconds)
+                        + TimeInterval(nanosecond) / 1_000_000_000
+                )
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case kind
+                case unixSeconds = "unix_seconds"
+                case nanosecond
+            }
+        }
+
         public let operationID: String
         public let collectionName: String
         public let sourceName: String
         public let copiedCount: Int
         public let totalCount: Int
+        public let remainingCount: Int
         public let sourceAvailable: Bool
+        public let interruption: Interruption
+        public let activityTime: ActivityTime
 
         enum CodingKeys: String, CodingKey {
             case operationID = "operation_id"
@@ -348,7 +380,10 @@ public actor EngineSupervisor {
             case sourceName = "source_name"
             case copiedCount = "copied_count"
             case totalCount = "total_count"
+            case remainingCount = "remaining_count"
             case sourceAvailable = "source_available"
+            case interruption
+            case activityTime = "activity_time"
         }
     }
 

@@ -83,6 +83,8 @@ A folder rename changes no manifest, because manifests list only filenames.
 Each mutation writes `.souvenirs/journal/{yyyyMMdd-HHmmss}-{operation}.jsonl` before changing any file.
 The first line records the confirmed plan.
 Each completed step appends one persisted line.
+Each new journal record also records a durable UTC activity time.
+Source loss appends an interruption record before the operation reports `source_unavailable`.
 The last line records the outcome: `completed` or `cancelled`.
 
 The plan line records:
@@ -102,6 +104,12 @@ Consumers must read the terminal outcome before they interpret retained records 
 
 A journal without an outcome is unfinished.
 An unfinished journal blocks other mutations until recovery records an outcome.
+Inspection reports an explicit interruption cause only when the journal records that cause.
+Otherwise, inspection reports `incomplete_without_terminal_record`.
+Inspection reports the last durable activity time when no interruption record supplies an exact time.
+Current source connection state does not define the historical interruption cause.
+A legacy unfinished journal without a durable time fails inspection.
+Recovery tools can still read its semantic records, but the macOS application does not invent time evidence.
 Completed journals are optional history and can be archived or deleted.
 
 ## Interruption and recovery
