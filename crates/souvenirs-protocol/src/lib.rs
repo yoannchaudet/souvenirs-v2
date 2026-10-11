@@ -405,7 +405,9 @@ pub enum OperationEventPayload {
     Failed {
         error: ProtocolError,
     },
-    Cancelled,
+    Cancelled {
+        copied_count: usize,
+    },
 }
 
 #[must_use]

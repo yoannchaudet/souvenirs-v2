@@ -5,8 +5,9 @@ mod planning;
 mod source_datetime;
 
 pub use execution::{
-    ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest, ImportExecutionService,
-    ImportRecoveryMode, ImportRecoveryService, OperationProgress, PreparedImport, RecoveryOutcome,
+    ImportCancellation, ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest,
+    ImportExecutionResult, ImportExecutionService, ImportRecoveryMode, ImportRecoveryService,
+    OperationProgress, PreparedImport, RecoveryOutcome,
 };
 pub use souvenirs_domain as domain;
 

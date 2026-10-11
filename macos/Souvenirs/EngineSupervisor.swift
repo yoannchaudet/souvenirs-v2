@@ -171,7 +171,7 @@ public actor EngineSupervisor {
             )
             case completed(result: Data)
             case failed(code: String, message: String)
-            case cancelled
+            case cancelled(copiedCount: Int)
         }
 
         public let operationID: String
@@ -1037,7 +1037,12 @@ public actor EngineSupervisor {
             }
             payload = .failed(code: error.code, message: error.message)
         case "cancelled":
-            payload = .cancelled
+            guard let copiedCount = envelope.copiedCount, copiedCount >= 0 else {
+                throw SupervisorError.malformedResponse(
+                    "A cancelled event requires a nonnegative copied_count"
+                )
+            }
+            payload = .cancelled(copiedCount: copiedCount)
         default:
             throw SupervisorError.malformedResponse(
                 "The operation event type is unsupported"
@@ -1916,6 +1921,7 @@ private struct OperationEventEnvelope: Decodable {
     let completedUnits: UInt64?
     let totalUnits: UInt64?
     let message: String?
+    let copiedCount: Int?
     let error: ProtocolErrorResponse?
 
     enum CodingKeys: String, CodingKey {
@@ -1927,6 +1933,7 @@ private struct OperationEventEnvelope: Decodable {
         case completedUnits = "completed_units"
         case totalUnits = "total_units"
         case message
+        case copiedCount = "copied_count"
         case error
     }
 }

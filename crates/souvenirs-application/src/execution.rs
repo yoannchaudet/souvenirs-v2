@@ -5,6 +5,8 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +58,68 @@ pub struct ImportExecutionOutcome {
     pub left_on_source_count: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImportExecutionResult {
+    Completed(ImportExecutionOutcome),
+    Cancelled(ImportExecutionOutcome),
+}
+
+const EXECUTION_RUNNING: u8 = 0;
+const CANCELLATION_REQUESTED: u8 = 1;
+const COMPLETION_STARTED: u8 = 2;
+const EXECUTION_TERMINAL: u8 = 3;
+
+#[derive(Clone, Debug, Default)]
+pub struct ImportCancellation {
+    state: Arc<AtomicU8>,
+}
+
+impl ImportCancellation {
+    #[must_use]
+    pub fn request(&self) -> bool {
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                EXECUTION_RUNNING => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            EXECUTION_RUNNING,
+                            CANCELLATION_REQUESTED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                CANCELLATION_REQUESTED => return true,
+                COMPLETION_STARTED | EXECUTION_TERMINAL => return false,
+                _ => unreachable!("import cancellation state is valid"),
+            }
+        }
+    }
+
+    fn is_requested(&self) -> bool {
+        self.state.load(Ordering::Acquire) == CANCELLATION_REQUESTED
+    }
+
+    fn begin_completion(&self) -> bool {
+        self.state
+            .compare_exchange(
+                EXECUTION_RUNNING,
+                COMPLETION_STARTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn finish(&self) {
+        self.state.store(EXECUTION_TERMINAL, Ordering::Release);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryOutcome {
     Completed,
@@ -99,8 +163,9 @@ impl ImportExecutionService {
 
     pub fn execute(
         prepared: PreparedImport,
+        cancellation: &ImportCancellation,
         mut progress: impl FnMut(OperationProgress),
-    ) -> Result<ImportExecutionOutcome, ImportExecutionError> {
+    ) -> Result<ImportExecutionResult, ImportExecutionError> {
         CatalogService::open(&prepared.plan.catalog_path)
             .map_err(|error| ImportExecutionError::Catalog(error.to_string()))?;
         let layout = CatalogLayout::new(&prepared.plan.catalog_path);
@@ -132,7 +197,11 @@ impl ImportExecutionService {
         }
 
         let total_units = prepared.plan.copies.len() as u64;
+        let mut copied_count = 0;
         for (index, copy) in prepared.plan.copies.iter().enumerate() {
+            if cancellation.is_requested() {
+                return cancel_execution(&prepared, &layout, lock, &mut journal, copied_count);
+            }
             layout
                 .copy_verified(
                     &lock,
@@ -146,11 +215,19 @@ impl ImportExecutionService {
                     },
                 )
                 .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+            copied_count = index + 1;
             progress(OperationProgress {
-                completed_units: (index + 1) as u64,
+                completed_units: copied_count as u64,
                 total_units,
-                message: format!("Copied {} of {}", index + 1, total_units),
+                message: format!("Copied {copied_count} of {total_units}"),
             });
+            if cancellation.is_requested() {
+                return cancel_execution(&prepared, &layout, lock, &mut journal, copied_count);
+            }
+        }
+
+        if !cancellation.begin_completion() {
+            return cancel_execution(&prepared, &layout, lock, &mut journal, copied_count);
         }
 
         layout
@@ -171,12 +248,66 @@ impl ImportExecutionService {
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
         lock.release()
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
-        Ok(ImportExecutionOutcome {
-            copied_count: prepared.plan.copies.len(),
+        Ok(ImportExecutionResult::Completed(ImportExecutionOutcome {
+            copied_count,
             skipped_count: 0,
             left_on_source_count: prepared.plan.left_on_source_count,
-        })
+        }))
     }
+}
+
+fn cancel_execution(
+    prepared: &PreparedImport,
+    layout: &CatalogLayout,
+    lock: CatalogLock,
+    journal: &mut OperationJournal,
+    copied_count: usize,
+) -> Result<ImportExecutionResult, ImportExecutionError> {
+    let manifest_contents = cancellation_manifest_for_prefix(&prepared.plan, copied_count)?;
+    layout
+        .replace_manifest(
+            &lock,
+            journal,
+            ManifestReplacementRequest {
+                path: &prepared.plan.manifest.path,
+                previous_sha256: prepared.plan.manifest.previous_digest.as_deref(),
+                resulting_sha256: &digest_bytes(&manifest_contents),
+                step_id: &prepared.plan.manifest.step_id,
+            },
+            &manifest_contents,
+        )
+        .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+    journal
+        .cancel(layout, &lock)
+        .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+    lock.release()
+        .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+    Ok(ImportExecutionResult::Cancelled(ImportExecutionOutcome {
+        copied_count,
+        skipped_count: 0,
+        left_on_source_count: prepared.plan.left_on_source_count,
+    }))
+}
+
+fn cancellation_manifest_for_prefix(
+    plan: &ExecutionPlan,
+    copied_count: usize,
+) -> Result<Vec<u8>, ImportExecutionError> {
+    let mut lines = existing_manifest(&plan.catalog_path.join(&plan.manifest.path))?;
+    for copy in plan
+        .copies
+        .iter()
+        .take(copied_count)
+        .filter(|copy| copy.manifested)
+    {
+        let filename = copy
+            .destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| ImportExecutionError::InvalidSource(copy.destination.clone()))?;
+        lines.insert(filename.to_owned(), copy.digest.clone());
+    }
+    Ok(encode_manifest(&lines))
 }
 
 pub(crate) fn encode_reviewed_plan(
@@ -877,12 +1008,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CopyExpectation, ImportExecutionRequest, ImportExecutionService, ImportRecoveryMode,
-        ImportRecoveryService, RecoveryOutcome,
+        CopyExpectation, ImportCancellation, ImportExecutionRequest, ImportExecutionResult,
+        ImportExecutionService, ImportRecoveryMode, ImportRecoveryService, RecoveryOutcome,
     };
     use crate::{CatalogService, DateResolution, DestinationMode};
     use souvenirs_storage::{
-        CatalogLayout, CatalogLock, DurableTransition, OperationJournal, OperationRecord,
+        read_operation_records, CatalogLayout, CatalogLock, DurableTransition, OperationJournal,
+        OperationOutcome, OperationRecord,
     };
 
     fn append_transitions(
@@ -908,7 +1040,13 @@ mod tests {
         let mut progress = Vec::new();
 
         let outcome =
-            ImportExecutionService::execute(prepared, |event| progress.push(event)).unwrap();
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |event| {
+                progress.push(event)
+            })
+            .unwrap();
+        let ImportExecutionResult::Completed(outcome) = outcome else {
+            panic!("execution should complete");
+        };
 
         assert_eq!(outcome.copied_count, 2);
         assert_eq!(
@@ -928,7 +1066,7 @@ mod tests {
         assert!(manifest.contains("2026-10-10 10-11-13 002.jpg"));
 
         let prepared = prep(&fixture, DestinationMode::Existing);
-        ImportExecutionService::execute(prepared, |_| {}).unwrap();
+        ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {}).unwrap();
         let manifest = fs::read_to_string(collection.join("SHA256SUMS")).unwrap();
         assert_eq!(manifest.lines().count(), 4);
         assert!(manifest.contains("2026-10-10 10-11-12 003.jpg"));
@@ -936,10 +1074,69 @@ mod tests {
     }
 
     #[test]
+    fn active_cancellation_stops_after_a_published_copy() {
+        let fixture = fixture();
+        let prepared = prep(&fixture, DestinationMode::Create);
+        let operation_id = prepared.operation_id().to_owned();
+        let cancellation = ImportCancellation::default();
+        let progress_cancellation = cancellation.clone();
+
+        let result = ImportExecutionService::execute(prepared, &cancellation, |_| {
+            assert!(progress_cancellation.request());
+        })
+        .unwrap();
+
+        let ImportExecutionResult::Cancelled(outcome) = result else {
+            panic!("execution should be cancelled");
+        };
+        assert_eq!(outcome.copied_count, 1);
+        let collection = fixture
+            .catalog
+            .join("2026")
+            .join("2026-10-10 Recovery Import");
+        let files = fs::read_dir(&collection)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 2);
+        assert!(collection.join("2026-10-10 10-11-12 001.jpg").is_file());
+        assert!(!collection.join("2026-10-10 10-11-13 002.jpg").exists());
+        assert_eq!(
+            fs::read_to_string(collection.join("SHA256SUMS"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        let journal = fs::read_dir(CatalogLayout::new(&fixture.catalog).journal_directory())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(&operation_id))
+            })
+            .unwrap();
+        assert_eq!(
+            read_operation_records(&journal).unwrap().last(),
+            Some(&OperationRecord::Outcome {
+                outcome: OperationOutcome::Cancelled,
+            })
+        );
+    }
+
+    #[test]
     fn executes_compound_item_with_shared_stem_and_original_only_manifest() {
         let fixture = compound_fixture();
         let prepared = prep(&fixture, DestinationMode::Create);
-        let outcome = ImportExecutionService::execute(prepared, |_| {}).unwrap();
+        let outcome =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                .unwrap();
+        let ImportExecutionResult::Completed(outcome) = outcome else {
+            panic!("execution should complete");
+        };
 
         assert_eq!(outcome.copied_count, 3);
         assert_eq!(outcome.left_on_source_count, 0);
@@ -969,7 +1166,7 @@ mod tests {
         assert!(!manifest.contains(".xmp"));
 
         let prepared = prep(&fixture, DestinationMode::Existing);
-        ImportExecutionService::execute(prepared, |_| {}).unwrap();
+        ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {}).unwrap();
         assert!(collection.join("2026-10-10 12-00-00 002.CR3").is_file());
         assert!(collection.join("2026-10-10 12-00-00 002.JPG").is_file());
         assert!(collection.join("2026-10-10 12-00-00 002.JPG.xmp").is_file());
@@ -1055,7 +1252,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                .unwrap_err();
 
         assert!(error
             .to_string()
@@ -1106,7 +1305,9 @@ mod tests {
         let sidecar_destination = fixture.catalog.join(&sidecar.destination);
         fs::write(&sidecar_destination, b"existing sidecar").unwrap();
 
-        let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                .unwrap_err();
 
         assert!(error.to_string().contains("Review the import again."));
         assert_eq!(import_journal_count(&fixture), 0);
@@ -1263,7 +1464,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = ImportExecutionService::execute(prepared, |_| {}).unwrap_err();
+        let error =
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
+                .unwrap_err();
 
         assert!(error
             .to_string()

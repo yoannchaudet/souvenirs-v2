@@ -2,14 +2,18 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, ScopedJoinHandle};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use souvenirs_application::{
     CatalogIntent as ApplicationIntent, CatalogService, DateResolution, DestinationMode,
-    ImportDateSource as ApplicationDateSource, ImportDateState as ApplicationDateState,
-    ImportExecutionRequest, ImportExecutionService, ImportPlanningService, ImportRecoveryMode,
-    ImportRecoveryService, ImportReviewRequest, OperationInspectionService, OperationProgress,
-    PreparedImport, RecoveryOutcome,
+    ImportCancellation, ImportDateSource as ApplicationDateSource,
+    ImportDateState as ApplicationDateState, ImportExecutionRequest, ImportExecutionResult,
+    ImportExecutionService, ImportPlanningService, ImportRecoveryMode, ImportRecoveryService,
+    ImportReviewRequest, OperationInspectionService, OperationProgress, PreparedImport,
+    RecoveryOutcome,
 };
 use souvenirs_protocol::{
     CatalogIntent, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
@@ -22,88 +26,216 @@ use souvenirs_protocol::{
     START_OPERATION_METHOD,
 };
 
-pub fn run_engine(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
-    let mut connection = Connection::default();
-    let mut line = Vec::new();
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EngineOptions {
+    pub progress_delay: Duration,
+}
 
-    loop {
-        line.clear();
-        if input.read_until(b'\n', &mut line)? == 0 {
-            break;
-        }
-        trim_line_ending(&mut line);
-        match connection.handle_line(&line) {
-            EngineAction::Message(message) => write_message(&mut output, &message)?,
-            EngineAction::Execute {
-                request_id,
-                prepared,
-            } => {
-                let operation_id = prepared.operation_id().to_owned();
-                connection
-                    .operation_catalogs
-                    .insert(operation_id.clone(), prepared_catalog(&prepared));
-                write_message(
-                    &mut output,
-                    &EngineMessage::success(
+pub fn run_engine(input: impl BufRead, output: impl Write + Send) -> io::Result<()> {
+    run_engine_with_options(input, output, EngineOptions::default())
+}
+
+pub fn run_engine_with_options(
+    mut input: impl BufRead,
+    output: impl Write + Send,
+    options: EngineOptions,
+) -> io::Result<()> {
+    let output = Arc::new(Mutex::new(OutputSink::new(output)));
+    let result: io::Result<()> = thread::scope(|scope| {
+        let mut connection = Connection::default();
+        let mut active: Option<ActiveOperation<'_>> = None;
+        let mut line = Vec::new();
+
+        let loop_result = (|| {
+            loop {
+                line.clear();
+                if input.read_until(b'\n', &mut line)? == 0 {
+                    break;
+                }
+                reap_active(&mut active, &mut connection)?;
+                trim_line_ending(&mut line);
+                let active_operation_id = active
+                    .as_ref()
+                    .map(|operation| operation.operation_id.as_str());
+                match connection.handle_line(&line, active_operation_id) {
+                    EngineAction::Message(message) => write_message(&output, &message)?,
+                    EngineAction::Cancel {
                         request_id,
-                        ResponseResult::OperationAccepted(OperationAccepted {
-                            operation_id: operation_id.clone(),
-                        }),
-                    ),
-                )?;
-                write_operation_event(
-                    &mut output,
-                    &operation_id,
-                    0,
-                    OperationEventPayload::Started {
-                        name: "import.execute".to_owned(),
-                    },
-                )?;
-                let mut sequence = 1_u64;
-                let result = ImportExecutionService::execute(*prepared, |progress| {
-                    let _ = write_progress(&mut output, &operation_id, &mut sequence, progress);
-                });
-                write_execution_result(&mut output, &operation_id, sequence, result)?;
-            }
-            EngineAction::Recover {
-                request_id,
-                catalog_path,
-                operation_id,
-            } => {
-                connection
-                    .operation_catalogs
-                    .insert(operation_id.clone(), catalog_path.clone());
-                write_message(
-                    &mut output,
-                    &EngineMessage::success(
+                        operation_id,
+                    } => {
+                        let message = if let Some(operation) = active
+                            .as_ref()
+                            .filter(|operation| operation.operation_id == operation_id)
+                        {
+                            if operation.cancellation.request() {
+                                cancellation_accepted(request_id, operation_id)
+                            } else {
+                                operation_finished(request_id, operation_id)
+                            }
+                        } else {
+                            connection.cancel_inactive(request_id, operation_id)
+                        };
+                        write_message(&output, &message)?;
+                    }
+                    EngineAction::Execute {
                         request_id,
-                        ResponseResult::OperationAccepted(OperationAccepted {
-                            operation_id: operation_id.clone(),
-                        }),
-                    ),
-                )?;
-                write_operation_event(
-                    &mut output,
-                    &operation_id,
-                    0,
-                    OperationEventPayload::Started {
-                        name: "operation.recover".to_owned(),
-                    },
-                )?;
-                let mut sequence = 1_u64;
-                let result = ImportRecoveryService::recover(
-                    catalog_path,
-                    &operation_id,
-                    ImportRecoveryMode::Resume,
-                    |progress| {
-                        let _ = write_progress(&mut output, &operation_id, &mut sequence, progress);
-                    },
-                );
-                write_recovery_result(&mut output, &operation_id, sequence, result)?;
+                        prepared,
+                    } => {
+                        if let Some(operation) = active.as_ref() {
+                            write_message(
+                                &output,
+                                &operation_in_progress(request_id, &operation.operation_id),
+                            )?;
+                            continue;
+                        }
+                        let operation_id = prepared.operation_id().to_owned();
+                        connection
+                            .operation_catalogs
+                            .insert(operation_id.clone(), prepared_catalog(&prepared));
+                        write_message(
+                            &output,
+                            &EngineMessage::success(
+                                request_id,
+                                ResponseResult::OperationAccepted(OperationAccepted {
+                                    operation_id: operation_id.clone(),
+                                }),
+                            ),
+                        )?;
+                        write_operation_event(
+                            &output,
+                            &operation_id,
+                            0,
+                            OperationEventPayload::Started {
+                                name: "import.execute".to_owned(),
+                            },
+                        )?;
+                        let cancellation = ImportCancellation::default();
+                        let worker_cancellation = cancellation.clone();
+                        let worker_output = Arc::clone(&output);
+                        let worker_operation_id = operation_id.clone();
+                        let handle = scope.spawn(move || {
+                            let mut sequence = 1_u64;
+                            let result = ImportExecutionService::execute(
+                                *prepared,
+                                &worker_cancellation,
+                                |progress| {
+                                    let _ = write_progress(
+                                        &worker_output,
+                                        &worker_operation_id,
+                                        &mut sequence,
+                                        progress,
+                                    );
+                                    if !options.progress_delay.is_zero() {
+                                        thread::sleep(options.progress_delay);
+                                    }
+                                },
+                            );
+                            worker_cancellation.finish();
+                            let _ = write_execution_result(
+                                &worker_output,
+                                &worker_operation_id,
+                                sequence,
+                                result,
+                            );
+                        });
+                        active = Some(ActiveOperation {
+                            operation_id,
+                            cancellation,
+                            handle,
+                        });
+                    }
+                    EngineAction::Recover {
+                        request_id,
+                        catalog_path,
+                        operation_id,
+                    } => {
+                        if let Some(operation) = active.as_ref() {
+                            write_message(
+                                &output,
+                                &operation_in_progress(request_id, &operation.operation_id),
+                            )?;
+                            continue;
+                        }
+                        connection
+                            .operation_catalogs
+                            .insert(operation_id.clone(), catalog_path.clone());
+                        write_message(
+                            &output,
+                            &EngineMessage::success(
+                                request_id,
+                                ResponseResult::OperationAccepted(OperationAccepted {
+                                    operation_id: operation_id.clone(),
+                                }),
+                            ),
+                        )?;
+                        write_operation_event(
+                            &output,
+                            &operation_id,
+                            0,
+                            OperationEventPayload::Started {
+                                name: "operation.recover".to_owned(),
+                            },
+                        )?;
+                        let mut sequence = 1_u64;
+                        let result = ImportRecoveryService::recover(
+                            catalog_path,
+                            &operation_id,
+                            ImportRecoveryMode::Resume,
+                            |progress| {
+                                let _ =
+                                    write_progress(&output, &operation_id, &mut sequence, progress);
+                            },
+                        );
+                        write_recovery_result(&output, &operation_id, sequence, result)?;
+                    }
+                }
             }
+            Ok(())
+        })();
+
+        if let Some(operation) = active.take() {
+            let _ = operation.cancellation.request();
+            finish_active(operation, &mut connection)?;
         }
+        loop_result
+    });
+    result?;
+    let result = output
+        .lock()
+        .expect("engine output mutex should not be poisoned")
+        .finish();
+    result
+}
+
+struct ActiveOperation<'scope> {
+    operation_id: String,
+    cancellation: ImportCancellation,
+    handle: ScopedJoinHandle<'scope, ()>,
+}
+
+fn reap_active(
+    active: &mut Option<ActiveOperation<'_>>,
+    connection: &mut Connection,
+) -> io::Result<()> {
+    if active
+        .as_ref()
+        .is_some_and(|operation| operation.handle.is_finished())
+    {
+        finish_active(
+            active.take().expect("active operation should exist"),
+            connection,
+        )?;
     }
+    Ok(())
+}
 
+fn finish_active(operation: ActiveOperation<'_>, connection: &mut Connection) -> io::Result<()> {
+    let operation_id = operation.operation_id;
+    operation
+        .handle
+        .join()
+        .map_err(|_| io::Error::other("import execution worker panicked"))?;
+    connection.operation_catalogs.remove(&operation_id);
     Ok(())
 }
 
@@ -114,7 +246,7 @@ struct Connection {
 }
 
 impl Connection {
-    fn handle_line(&mut self, line: &[u8]) -> EngineAction {
+    fn handle_line(&mut self, line: &[u8], active_operation_id: Option<&str>) -> EngineAction {
         let (request_id, protocol_version) = match request_envelope(line) {
             Ok(envelope) => envelope,
             Err(error) => {
@@ -193,36 +325,10 @@ impl Connection {
                 return self.start_operation(request.id, parameters);
             }
             RequestPayload::CancelOperation(parameters) => {
-                let Some(catalog_path) = self.operation_catalogs.get(&parameters.operation_id)
-                else {
-                    return EngineAction::Message(EngineMessage::error(
-                        Some(request.id),
-                        ProtocolError::new(
-                            "operation_not_found",
-                            format!("operation {:?} was not found", parameters.operation_id),
-                        )
-                        .with_data(json!({"operation_id": parameters.operation_id})),
-                    ));
+                return EngineAction::Cancel {
+                    request_id: request.id,
+                    operation_id: parameters.operation_id,
                 };
-                match ImportRecoveryService::recover(
-                    catalog_path,
-                    &parameters.operation_id,
-                    ImportRecoveryMode::Cancel,
-                    |_| {},
-                ) {
-                    Ok(_) => EngineMessage::success(
-                        request.id,
-                        ResponseResult::CancellationAccepted(
-                            souvenirs_protocol::CancellationAccepted {
-                                operation_id: parameters.operation_id,
-                            },
-                        ),
-                    ),
-                    Err(error) => EngineMessage::error(
-                        Some(request.id),
-                        ProtocolError::new(error.code(), error.to_string()),
-                    ),
-                }
             }
             RequestPayload::ValidateCatalog(parameters) => catalog_response(
                 request.id,
@@ -267,6 +373,9 @@ impl Connection {
             RequestPayload::InspectOperation(parameters) => {
                 match OperationInspectionService::unfinished(&parameters.path) {
                     Ok(operation) => {
+                        let operation = operation.filter(|operation| {
+                            active_operation_id != Some(operation.operation_id.as_str())
+                        });
                         if let Some(operation) = &operation {
                             self.operation_catalogs
                                 .insert(operation.operation_id.clone(), parameters.path.clone());
@@ -322,10 +431,32 @@ impl Connection {
             },
         }
     }
+
+    fn cancel_inactive(&self, request_id: String, operation_id: String) -> EngineMessage {
+        let Some(catalog_path) = self.operation_catalogs.get(&operation_id) else {
+            return operation_not_found(request_id, operation_id);
+        };
+        match ImportRecoveryService::recover(
+            catalog_path,
+            &operation_id,
+            ImportRecoveryMode::Cancel,
+            |_| {},
+        ) {
+            Ok(_) => cancellation_accepted(request_id, operation_id),
+            Err(error) => EngineMessage::error(
+                Some(request_id),
+                ProtocolError::new(error.code(), error.to_string()),
+            ),
+        }
+    }
 }
 
 enum EngineAction {
     Message(EngineMessage),
+    Cancel {
+        request_id: String,
+        operation_id: String,
+    },
     Execute {
         request_id: String,
         prepared: Box<PreparedImport>,
@@ -341,14 +472,96 @@ fn prepared_catalog(prepared: &PreparedImport) -> String {
     prepared.catalog_path().to_string_lossy().into_owned()
 }
 
-fn write_message(output: &mut impl Write, message: &EngineMessage) -> io::Result<()> {
-    serde_json::to_writer(&mut *output, message).map_err(io::Error::other)?;
-    output.write_all(b"\n")?;
-    output.flush()
+fn cancellation_accepted(request_id: String, operation_id: String) -> EngineMessage {
+    EngineMessage::success(
+        request_id,
+        ResponseResult::CancellationAccepted(souvenirs_protocol::CancellationAccepted {
+            operation_id,
+        }),
+    )
+}
+
+fn operation_finished(request_id: String, operation_id: String) -> EngineMessage {
+    EngineMessage::error(
+        Some(request_id),
+        ProtocolError::new(
+            "operation_finished",
+            format!("operation {operation_id:?} already reached its terminal boundary"),
+        )
+        .with_data(json!({"operation_id": operation_id})),
+    )
+}
+
+fn operation_not_found(request_id: String, operation_id: String) -> EngineMessage {
+    EngineMessage::error(
+        Some(request_id),
+        ProtocolError::new(
+            "operation_not_found",
+            format!("operation {operation_id:?} was not found"),
+        )
+        .with_data(json!({"operation_id": operation_id})),
+    )
+}
+
+fn operation_in_progress(request_id: String, operation_id: &str) -> EngineMessage {
+    EngineMessage::error(
+        Some(request_id),
+        ProtocolError::new(
+            "operation_in_progress",
+            format!("operation {operation_id:?} is already running"),
+        )
+        .with_data(json!({"operation_id": operation_id})),
+    )
+}
+
+struct OutputSink<W> {
+    writer: W,
+    error: Option<(io::ErrorKind, String)>,
+}
+
+impl<W: Write> OutputSink<W> {
+    fn new(writer: W) -> Self {
+        Self {
+            writer,
+            error: None,
+        }
+    }
+
+    fn write(&mut self, message: &EngineMessage) -> io::Result<()> {
+        if let Some((kind, message)) = &self.error {
+            return Err(io::Error::new(*kind, message.clone()));
+        }
+        let result = (|| {
+            serde_json::to_writer(&mut self.writer, message).map_err(io::Error::other)?;
+            self.writer.write_all(b"\n")?;
+            self.writer.flush()
+        })();
+        if let Err(error) = &result {
+            self.error = Some((error.kind(), error.to_string()));
+        }
+        result
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        match &self.error {
+            Some((kind, message)) => Err(io::Error::new(*kind, message.clone())),
+            None => Ok(()),
+        }
+    }
+}
+
+fn write_message(
+    output: &Arc<Mutex<OutputSink<impl Write>>>,
+    message: &EngineMessage,
+) -> io::Result<()> {
+    output
+        .lock()
+        .expect("engine output mutex should not be poisoned")
+        .write(message)
 }
 
 fn write_operation_event(
-    output: &mut impl Write,
+    output: &Arc<Mutex<OutputSink<impl Write>>>,
     operation_id: &str,
     sequence: u64,
     payload: OperationEventPayload,
@@ -365,7 +578,7 @@ fn write_operation_event(
 }
 
 fn write_progress(
-    output: &mut impl Write,
+    output: &Arc<Mutex<OutputSink<impl Write>>>,
     operation_id: &str,
     sequence: &mut u64,
     progress: OperationProgress,
@@ -385,21 +598,29 @@ fn write_progress(
 }
 
 fn write_execution_result(
-    output: &mut impl Write,
+    output: &Arc<Mutex<OutputSink<impl Write>>>,
     operation_id: &str,
     sequence: u64,
     result: Result<
-        souvenirs_application::ImportExecutionOutcome,
+        souvenirs_application::ImportExecutionResult,
         souvenirs_application::ImportExecutionError,
     >,
 ) -> io::Result<()> {
     match result {
-        Ok(outcome) => write_operation_event(
+        Ok(ImportExecutionResult::Completed(outcome)) => write_operation_event(
             output,
             operation_id,
             sequence,
             OperationEventPayload::Completed {
                 result: serde_json::to_value(outcome).map_err(io::Error::other)?,
+            },
+        ),
+        Ok(ImportExecutionResult::Cancelled(outcome)) => write_operation_event(
+            output,
+            operation_id,
+            sequence,
+            OperationEventPayload::Cancelled {
+                copied_count: outcome.copied_count,
             },
         ),
         Err(error) => write_operation_event(
@@ -414,7 +635,7 @@ fn write_execution_result(
 }
 
 fn write_recovery_result(
-    output: &mut impl Write,
+    output: &Arc<Mutex<OutputSink<impl Write>>>,
     operation_id: &str,
     sequence: u64,
     result: Result<
@@ -434,11 +655,13 @@ fn write_recovery_result(
                 result: serde_json::to_value(outcome).map_err(io::Error::other)?,
             },
         ),
-        Ok((RecoveryOutcome::Cancelled, _)) => write_operation_event(
+        Ok((RecoveryOutcome::Cancelled, outcome)) => write_operation_event(
             output,
             operation_id,
             sequence,
-            OperationEventPayload::Cancelled,
+            OperationEventPayload::Cancelled {
+                copied_count: outcome.copied_count,
+            },
         ),
         Err(error) => write_operation_event(
             output,
