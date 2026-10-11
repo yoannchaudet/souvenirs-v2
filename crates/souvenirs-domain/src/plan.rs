@@ -7,13 +7,14 @@ use schemars::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use time::Date;
+use time::{Date, PrimitiveDateTime, Time, UtcOffset};
 
+use crate::datetime::{DateTimeCandidate, DateTimeSource, DateTimeValue};
 use crate::names::{PathCollisionKey, PortableRelativePath};
 use crate::source::SourcePath;
 
-/// Versions 1 and 2 hash the normalized `PlanDocument` compact JSON representation.
-pub const IMPORT_PLAN_SCHEMA_VERSION: u32 = 2;
+/// Versions 1 through 3 hash the normalized `PlanDocument` compact JSON representation.
+pub const IMPORT_PLAN_SCHEMA_VERSION: u32 = 3;
 
 #[derive(
     Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema,
@@ -203,6 +204,224 @@ pub enum PlanDateTimeSource {
     FilenamePattern,
 }
 
+impl From<DateTimeSource> for PlanDateTimeSource {
+    fn from(source: DateTimeSource) -> Self {
+        match source {
+            DateTimeSource::ExifDateTimeOriginal => Self::ExifDateTimeOriginal,
+            DateTimeSource::ExifDateTimeDigitized => Self::ExifDateTimeDigitized,
+            DateTimeSource::QuickTimeCreationDate => Self::QuickTimeCreationDate,
+            DateTimeSource::XmpDateCreated => Self::XmpDateCreated,
+            DateTimeSource::XmpExifDateTimeOriginal => Self::XmpExifDateTimeOriginal,
+            DateTimeSource::ContainerCreationTime => Self::ContainerCreationTime,
+            DateTimeSource::GoogleTakeoutPhotoTakenTime => Self::GoogleTakeoutPhotoTakenTime,
+            DateTimeSource::FilenamePattern => Self::FilenamePattern,
+        }
+    }
+}
+
+impl From<PlanDateTimeSource> for DateTimeSource {
+    fn from(source: PlanDateTimeSource) -> Self {
+        match source {
+            PlanDateTimeSource::ExifDateTimeOriginal => Self::ExifDateTimeOriginal,
+            PlanDateTimeSource::ExifDateTimeDigitized => Self::ExifDateTimeDigitized,
+            PlanDateTimeSource::QuickTimeCreationDate => Self::QuickTimeCreationDate,
+            PlanDateTimeSource::XmpDateCreated => Self::XmpDateCreated,
+            PlanDateTimeSource::XmpExifDateTimeOriginal => Self::XmpExifDateTimeOriginal,
+            PlanDateTimeSource::ContainerCreationTime => Self::ContainerCreationTime,
+            PlanDateTimeSource::GoogleTakeoutPhotoTakenTime => Self::GoogleTakeoutPhotoTakenTime,
+            PlanDateTimeSource::FilenamePattern => Self::FilenamePattern,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PlanDateTimeValue {
+    Local {
+        #[schemars(range(min = -9999, max = 9999))]
+        year: i32,
+        #[schemars(range(min = 1, max = 366))]
+        ordinal: u16,
+        #[schemars(range(min = 0, max = 23))]
+        hour: u8,
+        #[schemars(range(min = 0, max = 59))]
+        minute: u8,
+        #[schemars(range(min = 0, max = 59))]
+        second: u8,
+    },
+    LocalWithOffset {
+        #[schemars(range(min = -9999, max = 9999))]
+        year: i32,
+        #[schemars(range(min = 1, max = 366))]
+        ordinal: u16,
+        #[schemars(range(min = 0, max = 23))]
+        hour: u8,
+        #[schemars(range(min = 0, max = 59))]
+        minute: u8,
+        #[schemars(range(min = 0, max = 59))]
+        second: u8,
+        #[schemars(range(min = -86399, max = 86399))]
+        recorded_offset_seconds: i32,
+    },
+    UtcWithoutLocalContext {
+        #[schemars(range(min = -9999, max = 9999))]
+        year: i32,
+        #[schemars(range(min = 1, max = 366))]
+        ordinal: u16,
+        #[schemars(range(min = 0, max = 23))]
+        hour: u8,
+        #[schemars(range(min = 0, max = 59))]
+        minute: u8,
+        #[schemars(range(min = 0, max = 59))]
+        second: u8,
+    },
+    AmbiguousContainer {
+        #[schemars(range(min = -9999, max = 9999))]
+        year: i32,
+        #[schemars(range(min = 1, max = 366))]
+        ordinal: u16,
+        #[schemars(range(min = 0, max = 23))]
+        hour: u8,
+        #[schemars(range(min = 0, max = 59))]
+        minute: u8,
+        #[schemars(range(min = 0, max = 59))]
+        second: u8,
+    },
+    DateOnly {
+        #[schemars(range(min = -9999, max = 9999))]
+        year: i32,
+        #[schemars(range(min = 1, max = 366))]
+        ordinal: u16,
+    },
+}
+
+impl PlanDateTimeValue {
+    fn from_datetime(value: DateTimeValue) -> Self {
+        match value {
+            DateTimeValue::Local(value) => {
+                let (year, ordinal, hour, minute, second) = datetime_fields(value);
+                Self::Local {
+                    year,
+                    ordinal,
+                    hour,
+                    minute,
+                    second,
+                }
+            }
+            DateTimeValue::LocalWithOffset { local, offset } => {
+                let (year, ordinal, hour, minute, second) = datetime_fields(local);
+                Self::LocalWithOffset {
+                    year,
+                    ordinal,
+                    hour,
+                    minute,
+                    second,
+                    recorded_offset_seconds: offset.whole_seconds(),
+                }
+            }
+            DateTimeValue::UtcWithoutLocalContext(value) => {
+                let (year, ordinal, hour, minute, second) = datetime_fields(value);
+                Self::UtcWithoutLocalContext {
+                    year,
+                    ordinal,
+                    hour,
+                    minute,
+                    second,
+                }
+            }
+            DateTimeValue::AmbiguousContainer(value) => {
+                let (year, ordinal, hour, minute, second) = datetime_fields(value);
+                Self::AmbiguousContainer {
+                    year,
+                    ordinal,
+                    hour,
+                    minute,
+                    second,
+                }
+            }
+            DateTimeValue::DateOnly(value) => Self::DateOnly {
+                year: value.year(),
+                ordinal: value.ordinal(),
+            },
+        }
+    }
+
+    fn into_datetime(self) -> Result<DateTimeValue, PlanError> {
+        Ok(match self {
+            Self::Local {
+                year,
+                ordinal,
+                hour,
+                minute,
+                second,
+            } => DateTimeValue::Local(plan_primitive_datetime(
+                year, ordinal, hour, minute, second,
+            )?),
+            Self::LocalWithOffset {
+                year,
+                ordinal,
+                hour,
+                minute,
+                second,
+                recorded_offset_seconds,
+            } => DateTimeValue::LocalWithOffset {
+                local: plan_primitive_datetime(year, ordinal, hour, minute, second)?,
+                offset: UtcOffset::from_whole_seconds(recorded_offset_seconds)
+                    .map_err(|_| PlanError::InvalidDateTimeCandidate)?,
+            },
+            Self::UtcWithoutLocalContext {
+                year,
+                ordinal,
+                hour,
+                minute,
+                second,
+            } => DateTimeValue::UtcWithoutLocalContext(plan_primitive_datetime(
+                year, ordinal, hour, minute, second,
+            )?),
+            Self::AmbiguousContainer {
+                year,
+                ordinal,
+                hour,
+                minute,
+                second,
+            } => DateTimeValue::AmbiguousContainer(plan_primitive_datetime(
+                year, ordinal, hour, minute, second,
+            )?),
+            Self::DateOnly { year, ordinal } => DateTimeValue::DateOnly(
+                Date::from_ordinal_date(year, ordinal)
+                    .map_err(|_| PlanError::InvalidDateTimeCandidate)?,
+            ),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDateTimeCandidate {
+    pub source: PlanDateTimeSource,
+    pub value: PlanDateTimeValue,
+}
+
+impl From<DateTimeCandidate> for PlanDateTimeCandidate {
+    fn from(candidate: DateTimeCandidate) -> Self {
+        Self {
+            source: candidate.source.into(),
+            value: PlanDateTimeValue::from_datetime(candidate.value),
+        }
+    }
+}
+
+impl TryFrom<PlanDateTimeCandidate> for DateTimeCandidate {
+    type Error = PlanError;
+
+    fn try_from(candidate: PlanDateTimeCandidate) -> Result<Self, Self::Error> {
+        Ok(Self {
+            source: candidate.source.into(),
+            value: candidate.value.into_datetime()?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PlanDateTimeProvenance {
@@ -245,6 +464,8 @@ pub struct PlanItem {
     pub item_id: String,
     pub files: Vec<PlanFile>,
     pub accepted_datetime: Option<PlanDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datetime_disagreements: Option<Vec<PlanDateTimeCandidate>>,
     pub disposition: PlanItemDisposition,
 }
 
@@ -297,7 +518,7 @@ pub struct PlanStep {
 #[serde(deny_unknown_fields)]
 /// Field order is part of the version 1 digest contract.
 pub struct PlanDocument {
-    #[schemars(range(min = 1, max = 1))]
+    #[schemars(range(min = 1, max = 3))]
     pub schema_version: u32,
     pub plan_id: PlanId,
     pub created_at: PlanTimestamp,
@@ -506,6 +727,24 @@ pub fn constrain_import_plan_schema(
         serde_json::json!(f64::from(version));
     value["definitions"]["PlanDocument"]["properties"]["schema_version"]["maximum"] =
         serde_json::json!(f64::from(version));
+    let plan_item = &mut value["definitions"]["PlanItem"];
+    if version < 3 {
+        plan_item["properties"]
+            .as_object_mut()
+            .expect("plan item properties exist")
+            .remove("datetime_disagreements");
+        let definitions = value["definitions"]
+            .as_object_mut()
+            .expect("schema definitions exist");
+        definitions.remove("PlanDateTimeCandidate");
+        definitions.remove("PlanDateTimeValue");
+    } else {
+        plan_item["required"]
+            .as_array_mut()
+            .expect("plan item required fields exist")
+            .push(serde_json::json!("datetime_disagreements"));
+        plan_item["properties"]["datetime_disagreements"]["type"] = serde_json::json!("array");
+    }
     if version == 1 {
         let values = value["definitions"]["PlanItemFinding"]["enum"]
             .as_array_mut()
@@ -541,6 +780,11 @@ fn normalize_document(document: &mut PlanDocument) {
             (&left.source_path, &left.source_file_id)
                 .cmp(&(&right.source_path, &right.source_file_id))
         });
+        if let Some(disagreements) = &mut item.datetime_disagreements {
+            disagreements.sort_by(|left, right| {
+                datetime_candidate_order_key(left).cmp(&datetime_candidate_order_key(right))
+            });
+        }
     }
     document.unhandled_content.sort_by(|left, right| {
         (&left.source_path, &left.source_file_id).cmp(&(&right.source_path, &right.source_file_id))
@@ -622,6 +866,21 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
         {
             return Err(PlanError::TransferWithoutDate(item.item_id.clone()));
         }
+        match (document.schema_version, &item.datetime_disagreements) {
+            (1 | 2, None) | (3, Some(_)) => {}
+            (1 | 2, Some(_)) => {
+                return Err(PlanError::DateTimeDisagreementsRequireSchemaVersion {
+                    item_id: item.item_id.clone(),
+                    minimum_version: 3,
+                });
+            }
+            (3, None) => {
+                return Err(PlanError::MissingDateTimeDisagreements(
+                    item.item_id.clone(),
+                ));
+            }
+            _ => unreachable!("schema version is validated before plan items"),
+        }
         if document.schema_version == 1
             && matches!(
                 item.disposition,
@@ -670,6 +929,16 @@ fn validate_document(document: &PlanDocument) -> Result<(), PlanError> {
         }
         if let Some(datetime) = &item.accepted_datetime {
             validate_datetime(datetime)?;
+        }
+        if let Some(disagreements) = &item.datetime_disagreements {
+            // Identical evidence can come from different owned files and remains significant.
+            ensure_sorted(
+                disagreements.iter().map(datetime_candidate_order_key),
+                "datetime disagreements",
+            )?;
+            for disagreement in disagreements {
+                validate_datetime_candidate(disagreement)?;
+            }
         }
     }
 
@@ -838,6 +1107,44 @@ fn validate_datetime(datetime: &PlanDateTime) -> Result<(), PlanError> {
     }
 }
 
+fn validate_datetime_candidate(candidate: &PlanDateTimeCandidate) -> Result<(), PlanError> {
+    candidate.clone().try_into().map(|_: DateTimeCandidate| ())
+}
+
+fn datetime_fields(value: PrimitiveDateTime) -> (i32, u16, u8, u8, u8) {
+    (
+        value.year(),
+        value.ordinal(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+    )
+}
+
+fn plan_primitive_datetime(
+    year: i32,
+    ordinal: u16,
+    hour: u8,
+    minute: u8,
+    second: u8,
+) -> Result<PrimitiveDateTime, PlanError> {
+    let date =
+        Date::from_ordinal_date(year, ordinal).map_err(|_| PlanError::InvalidDateTimeCandidate)?;
+    let time =
+        Time::from_hms(hour, minute, second).map_err(|_| PlanError::InvalidDateTimeCandidate)?;
+    Ok(date.with_time(time))
+}
+
+fn datetime_candidate_order_key(
+    candidate: &PlanDateTimeCandidate,
+) -> (u8, PlanDateTimeSource, &PlanDateTimeValue) {
+    (
+        DateTimeSource::from(candidate.source).rank(),
+        candidate.source,
+        &candidate.value,
+    )
+}
+
 fn provenance_is_valid(provenance: &PlanDateTimeProvenance) -> bool {
     match provenance {
         PlanDateTimeProvenance::Corrected {
@@ -865,6 +1172,21 @@ where
     let mut previous = None;
     for value in values {
         if previous.is_some_and(|previous| previous >= value) {
+            return Err(PlanError::NonCanonicalOrder(field));
+        }
+        previous = Some(value);
+    }
+    Ok(())
+}
+
+fn ensure_sorted<T, I>(values: I, field: &'static str) -> Result<(), PlanError>
+where
+    T: Ord,
+    I: IntoIterator<Item = T>,
+{
+    let mut previous = None;
+    for value in values {
+        if previous.is_some_and(|previous| previous > value) {
             return Err(PlanError::NonCanonicalOrder(field));
         }
         previous = Some(value);
@@ -906,6 +1228,7 @@ pub enum PlanError {
     },
     InvalidSourcePath,
     InvalidAcceptedDateTime,
+    InvalidDateTimeCandidate,
     DuplicateSourceFileId(String),
     DuplicateSourcePath(Vec<String>),
     ItemWithoutFiles(String),
@@ -919,6 +1242,11 @@ pub enum PlanError {
         minimum_version: u32,
     },
     TransferWithoutDate(String),
+    DateTimeDisagreementsRequireSchemaVersion {
+        item_id: String,
+        minimum_version: u32,
+    },
+    MissingDateTimeDisagreements(String),
     SourceFileNotTransferable(String),
     DuplicateCopyStep(String),
     MissingCopyStep(String),
@@ -962,6 +1290,7 @@ impl fmt::Display for PlanError {
             }
             Self::InvalidSourcePath => formatter.write_str("source path must contain a filename"),
             Self::InvalidAcceptedDateTime => formatter.write_str("accepted datetime is invalid"),
+            Self::InvalidDateTimeCandidate => formatter.write_str("datetime candidate is invalid"),
             Self::DuplicateSourceFileId(id) => write!(formatter, "duplicate source file identifier '{id}'"),
             Self::DuplicateSourcePath(path) => write!(formatter, "duplicate source path '{}'", path.join("/")),
             Self::ItemWithoutFiles(id) => write!(formatter, "plan item '{id}' has no files"),
@@ -979,6 +1308,17 @@ impl fmt::Display for PlanError {
             Self::TransferWithoutDate(id) => {
                 write!(formatter, "transferred plan item '{id}' has no accepted datetime")
             }
+            Self::DateTimeDisagreementsRequireSchemaVersion {
+                item_id,
+                minimum_version,
+            } => write!(
+                formatter,
+                "plan item '{item_id}' datetime disagreements require schema version {minimum_version}"
+            ),
+            Self::MissingDateTimeDisagreements(item_id) => write!(
+                formatter,
+                "plan item '{item_id}' is missing version 3 datetime disagreements"
+            ),
             Self::SourceFileNotTransferable(id) => {
                 write!(formatter, "copy step references non-transferable source file '{id}'")
             }
@@ -1101,6 +1441,7 @@ mod tests {
                         role: PlanFileRole::Primary,
                     }],
                     accepted_datetime: None,
+                    datetime_disagreements: Some(Vec::new()),
                     disposition: PlanItemDisposition::Excluded {
                         reason: "duplicate".into(),
                     },
@@ -1137,6 +1478,46 @@ mod tests {
                             offset_seconds: 120,
                         },
                     }),
+                    datetime_disagreements: Some(vec![
+                        PlanDateTimeCandidate {
+                            source: PlanDateTimeSource::QuickTimeCreationDate,
+                            value: PlanDateTimeValue::LocalWithOffset {
+                                year: 2024,
+                                ordinal: 221,
+                                hour: 11,
+                                minute: 34,
+                                second: 56,
+                                recorded_offset_seconds: -10_800,
+                            },
+                        },
+                        PlanDateTimeCandidate {
+                            source: PlanDateTimeSource::XmpDateCreated,
+                            value: PlanDateTimeValue::Local {
+                                year: 2024,
+                                ordinal: 221,
+                                hour: 13,
+                                minute: 34,
+                                second: 56,
+                            },
+                        },
+                        PlanDateTimeCandidate {
+                            source: PlanDateTimeSource::ContainerCreationTime,
+                            value: PlanDateTimeValue::UtcWithoutLocalContext {
+                                year: 2024,
+                                ordinal: 221,
+                                hour: 10,
+                                minute: 34,
+                                second: 56,
+                            },
+                        },
+                        PlanDateTimeCandidate {
+                            source: PlanDateTimeSource::FilenamePattern,
+                            value: PlanDateTimeValue::DateOnly {
+                                year: 2024,
+                                ordinal: 222,
+                            },
+                        },
+                    ]),
                     disposition: PlanItemDisposition::Transfer,
                 },
             ],
@@ -1206,6 +1587,9 @@ mod tests {
         reversed.items.reverse();
         for item in &mut reversed.items {
             item.files.reverse();
+            if let Some(disagreements) = &mut item.datetime_disagreements {
+                disagreements.reverse();
+            }
         }
         reversed.unhandled_content.reverse();
         reversed.steps.reverse();
@@ -1221,6 +1605,7 @@ mod tests {
             reverse_manifests in any::<bool>(),
             reverse_items in any::<bool>(),
             reverse_files in any::<bool>(),
+            reverse_disagreements in any::<bool>(),
             reverse_steps in any::<bool>(),
         ) {
             let expected = ImportPlan::new(document()).unwrap();
@@ -1237,6 +1622,13 @@ mod tests {
                     item.files.reverse();
                 }
             }
+            if reverse_disagreements {
+                for item in &mut reordered.items {
+                    if let Some(disagreements) = &mut item.datetime_disagreements {
+                        disagreements.reverse();
+                    }
+                }
+            }
             if reverse_steps {
                 reordered.steps.reverse();
             }
@@ -1244,6 +1636,84 @@ mod tests {
             let actual = ImportPlan::new(reordered).unwrap();
 
             prop_assert_eq!(actual.to_json().unwrap(), expected.to_json().unwrap());
+        }
+    }
+
+    #[test]
+    fn legacy_plan_versions_preserve_their_original_item_shape() {
+        for version in [1, 2] {
+            let mut legacy = document();
+            legacy.schema_version = version;
+            for item in &mut legacy.items {
+                item.datetime_disagreements = None;
+            }
+            let plan = ImportPlan::new(legacy).unwrap();
+            let value = serde_json::to_value(plan).unwrap();
+
+            assert!(value["document"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item.get("datetime_disagreements").is_none()));
+        }
+    }
+
+    #[test]
+    fn version_three_requires_datetime_disagreement_evidence_on_every_item() {
+        let mut missing = document();
+        missing.items[0].datetime_disagreements = None;
+
+        assert!(matches!(
+            ImportPlan::new(missing),
+            Err(PlanError::MissingDateTimeDisagreements(item_id)) if item_id == "item-b"
+        ));
+    }
+
+    #[test]
+    fn datetime_candidate_wire_values_round_trip_to_domain_interpretations() {
+        let candidates = [
+            PlanDateTimeCandidate {
+                source: PlanDateTimeSource::ExifDateTimeOriginal,
+                value: PlanDateTimeValue::Local {
+                    year: 2024,
+                    ordinal: 10,
+                    hour: 1,
+                    minute: 2,
+                    second: 3,
+                },
+            },
+            PlanDateTimeCandidate {
+                source: PlanDateTimeSource::QuickTimeCreationDate,
+                value: PlanDateTimeValue::UtcWithoutLocalContext {
+                    year: 2024,
+                    ordinal: 11,
+                    hour: 4,
+                    minute: 5,
+                    second: 6,
+                },
+            },
+            PlanDateTimeCandidate {
+                source: PlanDateTimeSource::ContainerCreationTime,
+                value: PlanDateTimeValue::AmbiguousContainer {
+                    year: 2024,
+                    ordinal: 12,
+                    hour: 7,
+                    minute: 8,
+                    second: 9,
+                },
+            },
+            PlanDateTimeCandidate {
+                source: PlanDateTimeSource::GoogleTakeoutPhotoTakenTime,
+                value: PlanDateTimeValue::DateOnly {
+                    year: 2024,
+                    ordinal: 13,
+                },
+            },
+        ];
+
+        for candidate in candidates {
+            let domain: DateTimeCandidate = candidate.clone().try_into().unwrap();
+            assert_eq!(PlanDateTimeCandidate::from(domain), candidate);
         }
     }
 
@@ -1320,6 +1790,7 @@ mod tests {
                 role: PlanFileRole::Primary,
             }],
             accepted_datetime: None,
+            datetime_disagreements: None,
             disposition: PlanItemDisposition::Excluded {
                 reason: "not selected\nline".into(),
             },
@@ -1357,6 +1828,9 @@ mod tests {
     fn version_one_rich_document_digest_is_stable() {
         let mut document = document();
         document.schema_version = 1;
+        for item in &mut document.items {
+            item.datetime_disagreements = None;
+        }
         let plan = ImportPlan::new(document).unwrap();
 
         assert_eq!(
@@ -1706,5 +2180,36 @@ mod tests {
             schema["definitions"]["ContentDigest"]["pattern"],
             serde_json::json!("^[0-9a-f]{64}$")
         );
+        assert_eq!(
+            schema["definitions"]["PlanItem"]["properties"]["datetime_disagreements"]["type"],
+            serde_json::json!("array")
+        );
+        assert!(schema["definitions"]["PlanItem"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("datetime_disagreements")));
+        let candidate_values = schema["definitions"]["PlanDateTimeValue"]["oneOf"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            candidate_values[0]["properties"]["hour"]["maximum"],
+            serde_json::json!(23.0)
+        );
+        assert_eq!(
+            candidate_values[1]["properties"]["recorded_offset_seconds"]["minimum"],
+            serde_json::json!(-86_399.0)
+        );
+        assert_eq!(
+            candidate_values[4]["properties"]["ordinal"]["minimum"],
+            serde_json::json!(1.0)
+        );
+
+        let version_two = serde_json::to_value(import_plan_schema_for_version(2).unwrap()).unwrap();
+        assert!(version_two["definitions"]["PlanItem"]["properties"]
+            .get("datetime_disagreements")
+            .is_none());
+        assert!(version_two["definitions"]
+            .get("PlanDateTimeCandidate")
+            .is_none());
     }
 }

@@ -15,12 +15,14 @@ use souvenirs_domain::catalog::{
     allocate_collection_counters, year_directory, CanonicalFilename, CanonicalStem,
     DatedCollectionRange, NewItemCounterRequest,
 };
+use souvenirs_domain::datetime::{resolve_datetime, DateTimeResolution};
 use souvenirs_domain::names::CatalogLabel;
 use souvenirs_domain::plan::{
     constrain_import_plan_schema, CatalogSnapshot, ContentDigest, ImportPlan, ManifestFingerprint,
-    PlanDateTime, PlanDateTimeProvenance, PlanDocument, PlanFile, PlanFileRole, PlanId, PlanItem,
-    PlanItemDisposition, PlanItemFinding, PlanStep, PlanStepKind, PlanTimestamp, SourceSnapshot,
-    UnhandledContent, UnhandledContentFinding, IMPORT_PLAN_SCHEMA_VERSION,
+    PlanDateTime, PlanDateTimeCandidate, PlanDateTimeProvenance, PlanDocument, PlanFile,
+    PlanFileRole, PlanId, PlanItem, PlanItemDisposition, PlanItemFinding, PlanStep, PlanStepKind,
+    PlanTimestamp, SourceSnapshot, UnhandledContent, UnhandledContentFinding,
+    IMPORT_PLAN_SCHEMA_VERSION,
 };
 use souvenirs_domain::relationships::{
     resolve_directory_relationships, sidecar_suffix_for_item, RelationshipFinding,
@@ -38,7 +40,7 @@ use souvenirs_storage::{
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
-const SOURCE_SCAN_SCHEMA_VERSION: u32 = 2;
+const SOURCE_SCAN_SCHEMA_VERSION: u32 = 3;
 
 pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
@@ -234,11 +236,13 @@ pub struct ScannedFile {
 pub struct ScannedMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apple_content_identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub datetime_candidates: Vec<PlanDateTimeCandidate>,
 }
 
 impl ScannedMetadata {
     fn is_empty(&self) -> bool {
-        self.apple_content_identifier.is_none()
+        self.apple_content_identifier.is_none() && self.datetime_candidates.is_empty()
     }
 }
 
@@ -253,7 +257,7 @@ pub enum ScannedFileKind {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredPlan {
-    #[schemars(range(min = 1, max = 2))]
+    #[schemars(range(min = 1, max = 3))]
     pub schema_version: u32,
     pub confirmed: bool,
     #[schemars(with = "String")]
@@ -653,6 +657,12 @@ fn import_plan(
         .map_err(|error| CliError::invalid_data(format!("invalid collection: {error}")))?;
     let scan: SourceScan = read_json(snapshot)?;
     validate_scan(&scan)?;
+    if scan.schema_version < SOURCE_SCAN_SCHEMA_VERSION {
+        return Err(CliError::invalid_data(format!(
+            "source scan schema version {} does not retain datetime candidates; run import scan again",
+            scan.schema_version
+        )));
+    }
     let current_scan = scan_source(&scan.source_root, scan.schema_version)?;
     if current_scan.fingerprint != scan.fingerprint {
         return Err(CliError::conflict(
@@ -716,6 +726,38 @@ fn import_plan(
     }
     let mut unresolved_items = BTreeMap::new();
     let mut unhandled_content = Vec::new();
+    let mut datetime_disagreements = relationships
+        .items
+        .iter()
+        .map(|item| {
+            let disagreements = if item.status == RelationshipStatus::Resolved {
+                match resolve_datetime(
+                    std::iter::once(&item.primary)
+                        .chain(item.sidecars.iter())
+                        .flat_map(|id| {
+                            source_by_id[id]
+                                .metadata
+                                .datetime_candidates
+                                .iter()
+                                .cloned()
+                        }),
+                ) {
+                    DateTimeResolution::Accepted { disagreements, .. } => disagreements,
+                    DateTimeResolution::NeedsConfirmation(pending) => pending.disagreements,
+                    DateTimeResolution::Missing => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            (
+                item.primary.as_str().to_owned(),
+                disagreements
+                    .into_iter()
+                    .map(PlanDateTimeCandidate::from)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     for finding in &relationships.findings {
         match finding {
             RelationshipFinding::AmbiguousRawJpeg(files) => {
@@ -913,6 +955,16 @@ fn import_plan(
             item_id: item.primary.as_str().to_owned(),
             files,
             accepted_datetime: Some(plan_datetime(accepted_at)),
+            datetime_disagreements: Some(
+                datetime_disagreements
+                    .remove(item.primary.as_str())
+                    .ok_or_else(|| {
+                        CliError::invalid_data(format!(
+                            "logical item '{}' has no datetime disagreement evidence",
+                            item.primary.as_str()
+                        ))
+                    })?,
+            ),
             disposition,
         });
     }
@@ -2054,11 +2106,23 @@ fn scan_file(
     schema_version: u32,
 ) -> Result<ScannedFile, CliError> {
     let (digest, size_bytes) = digest_file(absolute)?;
-    let metadata = if schema_version >= 2 {
+    let metadata = if schema_version >= 3 {
+        let metadata = souvenirs_metadata::normalized_metadata(absolute)
+            .map_err(|error| CliError::invalid_data(error.to_string()))?;
+        ScannedMetadata {
+            apple_content_identifier: metadata.apple_content_identifier,
+            datetime_candidates: metadata
+                .datetime_candidates
+                .into_iter()
+                .map(PlanDateTimeCandidate::from)
+                .collect(),
+        }
+    } else if schema_version >= 2 {
         let metadata = souvenirs_metadata::relationship_metadata(absolute)
             .map_err(|error| CliError::invalid_data(error.to_string()))?;
         ScannedMetadata {
             apple_content_identifier: metadata.apple_content_identifier,
+            datetime_candidates: Vec::new(),
         }
     } else {
         ScannedMetadata::default()
@@ -2161,7 +2225,14 @@ fn source_file(
         extension,
         kind,
         metadata: SourceMetadata {
-            datetime_candidates: Vec::new(),
+            datetime_candidates: metadata
+                .datetime_candidates
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()
+                .map_err(|error: souvenirs_domain::plan::PlanError| {
+                    CliError::invalid_data(error.to_string())
+                })?,
             camera: CameraIdentity {
                 make: None,
                 model: None,
