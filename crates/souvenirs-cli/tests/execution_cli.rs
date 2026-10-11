@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -106,6 +107,56 @@ fn operation_journal_count(catalog: &Path, operation_id: &str) -> usize {
                 .is_some_and(|line| line.contains(operation_id))
         })
         .count()
+}
+
+fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn collect(root: &Path, directory: &Path, snapshot: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                snapshot.insert(relative, None);
+                collect(root, &path, snapshot);
+            } else {
+                snapshot.insert(relative, Some(fs::read(path).unwrap()));
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    collect(root, root, &mut snapshot);
+    snapshot
+}
+
+fn operation_id_from_plan(plan: &Path) -> String {
+    let plan: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
+    plan["import_plan"]["document"]["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn first_planned_destination(catalog: &Path, plan: &Path) -> PathBuf {
+    let plan: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
+    let components = plan["import_plan"]["document"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|step| step["action"]["path"].as_array())
+        .unwrap();
+    components.iter().fold(catalog.to_path_buf(), |path, part| {
+        path.join(part.as_str().unwrap())
+    })
+}
+
+fn assert_conflict(output: &Output) -> Value {
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "conflict");
+    error
 }
 
 fn simulate_interruption_after_first_copy(catalog: &Path, path: &Path) {
@@ -354,6 +405,215 @@ fn rejects_portable_directory_drift_without_creating_a_journal() {
 }
 
 #[test]
+fn rejects_import_progress_paths_without_mutating_inputs_or_catalog_state() {
+    for case in ["catalog_lock", "planned_destination", "plan", "source"] {
+        let temporary = TempDir::new().unwrap();
+        let (catalog, source, plan) = prepare_plan(&temporary, true);
+        let operation_id = operation_id_from_plan(&plan);
+        let progress = match case {
+            "catalog_lock" => catalog.join(".souvenirs").join("lock"),
+            "planned_destination" => first_planned_destination(&catalog, &plan),
+            "plan" => plan.clone(),
+            "source" => source.join("progress.jsonl"),
+            _ => unreachable!(),
+        };
+        let progress_existed = progress.exists();
+        let catalog_before = tree_snapshot(&catalog);
+        let source_before = tree_snapshot(&source);
+        let plan_before = fs::read(&plan).unwrap();
+
+        let output = run(&[
+            "import",
+            "execute",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--plan",
+            plan.to_str().unwrap(),
+            "--progress",
+            progress.to_str().unwrap(),
+        ]);
+
+        let error = assert_conflict(&output);
+        let expected_message = match case {
+            "catalog_lock" => "progress path is inside the catalog",
+            "planned_destination" => "progress path overlaps a planned destination",
+            "plan" => "progress path overlaps the saved plan",
+            "source" => "progress path overlaps the source",
+            _ => unreachable!(),
+        };
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected_message),
+            "case: {case}"
+        );
+        assert_eq!(tree_snapshot(&catalog), catalog_before, "case: {case}");
+        assert_eq!(tree_snapshot(&source), source_before, "case: {case}");
+        assert_eq!(fs::read(&plan).unwrap(), plan_before, "case: {case}");
+        assert_eq!(progress.exists(), progress_existed, "case: {case}");
+        assert_eq!(operation_journal_count(&catalog, &operation_id), 0);
+        assert!(!catalog.join(".souvenirs").join("lock").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_an_existing_progress_symlink_to_the_plan_without_truncating_it() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = TempDir::new().unwrap();
+    let (catalog, source, plan) = prepare_plan(&temporary, true);
+    let progress = temporary.path().join("progress.jsonl");
+    symlink(&plan, &progress).unwrap();
+    let catalog_before = tree_snapshot(&catalog);
+    let source_before = tree_snapshot(&source);
+    let plan_before = fs::read(&plan).unwrap();
+
+    let output = run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--progress",
+        progress.to_str().unwrap(),
+    ]);
+
+    let error = assert_conflict(&output);
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("progress path overlaps the saved plan"));
+    assert_eq!(tree_snapshot(&catalog), catalog_before);
+    assert_eq!(tree_snapshot(&source), source_before);
+    assert_eq!(fs::read(&plan).unwrap(), plan_before);
+    assert_eq!(fs::read(&progress).unwrap(), plan_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_a_dangling_progress_symlink_as_a_conflict() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = TempDir::new().unwrap();
+    let (catalog, source, plan) = prepare_plan(&temporary, true);
+    let progress = temporary.path().join("progress.jsonl");
+    symlink(temporary.path().join("missing.jsonl"), &progress).unwrap();
+    let catalog_before = tree_snapshot(&catalog);
+    let source_before = tree_snapshot(&source);
+    let plan_before = fs::read(&plan).unwrap();
+
+    let output = run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--progress",
+        progress.to_str().unwrap(),
+    ]);
+
+    let error = assert_conflict(&output);
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("existing output path cannot be resolved"));
+    assert_eq!(tree_snapshot(&catalog), catalog_before);
+    assert_eq!(tree_snapshot(&source), source_before);
+    assert_eq!(fs::read(&plan).unwrap(), plan_before);
+    assert!(progress.is_symlink());
+}
+
+#[test]
+fn preserves_not_found_for_a_missing_progress_directory() {
+    let temporary = TempDir::new().unwrap();
+    let (catalog, source, plan) = prepare_plan(&temporary, true);
+    let progress = temporary.path().join("missing").join("progress.jsonl");
+    let catalog_before = tree_snapshot(&catalog);
+    let source_before = tree_snapshot(&source);
+    let plan_before = fs::read(&plan).unwrap();
+
+    let output = run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--progress",
+        progress.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "not_found");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("output directory does not exist"));
+    assert_eq!(tree_snapshot(&catalog), catalog_before);
+    assert_eq!(tree_snapshot(&source), source_before);
+    assert_eq!(fs::read(&plan).unwrap(), plan_before);
+    assert!(!catalog.join(".souvenirs").join("lock").exists());
+}
+
+#[test]
+fn recovery_commands_reject_catalog_progress_before_acquiring_the_lock() {
+    for command in ["recover", "cancel"] {
+        let temporary = TempDir::new().unwrap();
+        let (catalog, source, plan) = prepare_plan(&temporary, true);
+        let executed = json_stdout(&run(&[
+            "import",
+            "execute",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--plan",
+            plan.to_str().unwrap(),
+        ]));
+        let operation_id = executed["result"]["operation_id"].as_str().unwrap();
+        simulate_interruption_after_first_copy(
+            &catalog,
+            &operation_journal(&catalog, operation_id),
+        );
+        let progress = catalog.join(".souvenirs").join("lock");
+        let catalog_before = tree_snapshot(&catalog);
+        let source_before = tree_snapshot(&source);
+        let plan_before = fs::read(&plan).unwrap();
+
+        let output = run(&[
+            "operation",
+            command,
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--operation-id",
+            operation_id,
+            "--plan",
+            plan.to_str().unwrap(),
+            "--progress",
+            progress.to_str().unwrap(),
+        ]);
+
+        let error = assert_conflict(&output);
+        assert!(error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("progress path is inside the catalog"));
+        assert_eq!(
+            tree_snapshot(&catalog),
+            catalog_before,
+            "command: {command}"
+        );
+        assert_eq!(tree_snapshot(&source), source_before, "command: {command}");
+        assert_eq!(fs::read(&plan).unwrap(), plan_before, "command: {command}");
+        assert!(!progress.exists());
+    }
+}
+
+#[test]
 fn recovers_and_cancels_interrupted_operation_journals() {
     for (command, expected) in [("recover", "completed"), ("cancel", "cancelled")] {
         let temporary = TempDir::new().unwrap();
@@ -371,6 +631,7 @@ fn recovers_and_cancels_interrupted_operation_journals() {
             &catalog,
             &operation_journal(&catalog, operation_id),
         );
+        let progress = temporary.path().join(format!("{command}-progress.jsonl"));
 
         let result = json_stdout(&run(&[
             "operation",
@@ -381,8 +642,13 @@ fn recovers_and_cancels_interrupted_operation_journals() {
             operation_id,
             "--plan",
             plan.to_str().unwrap(),
+            "--progress",
+            progress.to_str().unwrap(),
         ]));
         assert_eq!(result["result"]["outcome"], expected);
+        let events = fs::read_to_string(progress).unwrap();
+        assert!(events.contains("\"event\":\"recovery_started\""));
+        assert!(events.contains(&format!("\"event\":\"{expected}\"")));
 
         let status = json_stdout(&run(&[
             "operation",
@@ -480,6 +746,43 @@ fn cancellation_does_not_manifest_a_missing_verified_stage() {
     ]));
     assert_eq!(integrity["result"]["valid"], true);
     assert_eq!(integrity["result"]["checked_files"], 0);
+}
+
+#[test]
+fn cancellation_accepts_a_safe_progress_path_when_the_source_root_is_missing() {
+    let temporary = TempDir::new().unwrap();
+    let (catalog, source, plan) = prepare_plan(&temporary, true);
+    let executed = json_stdout(&run(&[
+        "import",
+        "execute",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+    ]));
+    let operation_id = executed["result"]["operation_id"].as_str().unwrap();
+    simulate_interruption_after_first_copy(&catalog, &operation_journal(&catalog, operation_id));
+    for entry in fs::read_dir(&source).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    fs::remove_dir(&source).unwrap();
+    let progress = temporary.path().join("cancel-progress.jsonl");
+
+    let result = json_stdout(&run(&[
+        "operation",
+        "cancel",
+        "--catalog",
+        catalog.to_str().unwrap(),
+        "--operation-id",
+        operation_id,
+        "--plan",
+        plan.to_str().unwrap(),
+        "--progress",
+        progress.to_str().unwrap(),
+    ]));
+
+    assert_eq!(result["result"]["outcome"], "cancelled");
+    assert!(progress.is_file());
 }
 
 #[test]
