@@ -4,13 +4,15 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
 use souvenirs_protocol::{
-    CancellationAccepted, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
+    CancellationAccepted, CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart,
+    CatalogCollectionsResult, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
     ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportReviewResult,
     ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
     OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
-    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
-    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
-    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_COLLECTIONS_METHOD,
+    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD,
+    IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
+    START_OPERATION_METHOD,
 };
 
 fn main() {
@@ -172,6 +174,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 capabilities: vec![
                     START_OPERATION_METHOD.to_owned(),
                     CANCEL_OPERATION_METHOD.to_owned(),
+                    CATALOG_COLLECTIONS_METHOD.to_owned(),
                     CATALOG_VALIDATE_METHOD.to_owned(),
                     CATALOG_CREATE_METHOD.to_owned(),
                     CATALOG_OPEN_METHOD.to_owned(),
@@ -302,6 +305,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     }
                     RequestPayload::OpenCatalog(parameters) => {
                         catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::ListCatalogCollections(_) => {
+                        catalog_collections(&mut output, request.id)?;
                     }
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
@@ -549,6 +555,39 @@ fn accept_operation(output: &mut impl Write, request_id: String) -> io::Result<(
     )
 }
 
+fn catalog_collections(output: &mut impl Write, request_id: String) -> io::Result<()> {
+    write_message(
+        output,
+        &EngineMessage::success(
+            request_id,
+            ResponseResult::CatalogCollections(CatalogCollectionsResult {
+                collections: vec![
+                    CatalogCollection::Dated {
+                        identity: CatalogCollectionIdentity::Dated {
+                            year: "2019".to_owned(),
+                            directory: "2019-07-14 +6d Brittany".to_owned(),
+                        },
+                        label: "Brittany".to_owned(),
+                        start_date: "2019-07-14".to_owned(),
+                        end_date: "2019-07-20".to_owned(),
+                    },
+                    CatalogCollection::Ongoing {
+                        identity: CatalogCollectionIdentity::Ongoing {
+                            key: "kids".to_owned(),
+                        },
+                        label: "Kids".to_owned(),
+                        parts: vec![CatalogCollectionPart {
+                            year: 2019,
+                            year_directory: "2019".to_owned(),
+                            collection_directory: "z Kids".to_owned(),
+                        }],
+                    },
+                ],
+            }),
+        ),
+    )
+}
+
 fn write_event(
     output: &mut impl Write,
     sequence: u64,
@@ -596,6 +635,7 @@ fn reject_request(output: &mut impl Write, request: Request) -> io::Result<()> {
         RequestPayload::ValidateCatalog(_)
         | RequestPayload::CreateCatalog(_)
         | RequestPayload::OpenCatalog(_)
+        | RequestPayload::ListCatalogCollections(_)
         | RequestPayload::ScanImport(_)
         | RequestPayload::ReviewImport(_)
         | RequestPayload::InspectOperation(_) => write_protocol_error(

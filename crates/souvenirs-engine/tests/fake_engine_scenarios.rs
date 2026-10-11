@@ -40,6 +40,33 @@ fn ready_scenario_rejects_requests_and_exits_cleanly_on_eof() {
 }
 
 #[test]
+fn catalog_flow_serves_collection_query_capability() {
+    let output = run(
+        "catalog-flow",
+        &[
+            handshake(),
+            request(
+                "request-2",
+                "catalog.collections",
+                json!({"path": "/catalog"}),
+            ),
+        ],
+    );
+
+    assert!(output.status.success());
+    let messages = messages(&output);
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("catalog.collections")));
+    assert_eq!(messages[1]["result"]["type"], "catalog_collections");
+    assert_eq!(
+        messages[1]["result"]["collections"][1]["identity"]["key"],
+        "kids"
+    );
+}
+
+#[test]
 fn successful_operation_emits_ordered_terminal_events() {
     let output = run("successful-operation", &[handshake(), start_request()]);
 
