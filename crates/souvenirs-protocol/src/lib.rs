@@ -344,6 +344,8 @@ pub struct ImportDateSourceSummary {
     pub source: ImportDateSource,
     pub state: ImportDateState,
     pub item_count: usize,
+    #[serde(default)]
+    pub requires_clock: bool,
     pub as_shown_time: Option<String>,
     pub converted_from_utc_time: Option<String>,
 }

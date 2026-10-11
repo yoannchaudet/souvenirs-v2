@@ -849,6 +849,7 @@ fn import_scan_result(scan: souvenirs_application::ImportScanSummary) -> ImportS
                     ApplicationDateState::NeedsConfirmation => ImportDateState::NeedsConfirmation,
                 },
                 item_count: summary.item_count,
+                requires_clock: summary.requires_clock,
                 as_shown_time: summary.as_shown_time,
                 converted_from_utc_time: summary.converted_from_utc_time,
             })

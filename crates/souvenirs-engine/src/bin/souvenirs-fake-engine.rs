@@ -714,6 +714,7 @@ fn fake_scan(source_path: String) -> ImportScanResult {
             source: ImportDateSource::ContainerCreationTime,
             state: ImportDateState::NeedsConfirmation,
             item_count: 4,
+            requires_clock: false,
             as_shown_time: Some("12:14".to_owned()),
             converted_from_utc_time: Some("14:14".to_owned()),
         }],

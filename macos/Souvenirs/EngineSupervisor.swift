@@ -222,6 +222,7 @@ public actor EngineSupervisor {
         public let source: ImportDateSource
         public let state: ImportDateState
         public let itemCount: Int
+        public let requiresClock: Bool
         public let asShownTime: String?
         public let convertedFromUTCTime: String?
 
@@ -229,6 +230,7 @@ public actor EngineSupervisor {
             case source
             case state
             case itemCount = "item_count"
+            case requiresClock = "requires_clock"
             case asShownTime = "as_shown_time"
             case convertedFromUTCTime = "converted_from_utc_time"
         }

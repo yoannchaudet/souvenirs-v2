@@ -559,6 +559,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
                     source: .containerCreationTime,
                     state: .needsConfirmation,
                     itemCount: 4,
+                    requiresClock: false,
                     asShownTime: "12:14",
                     convertedFromUTCTime: "14:14"
                 )

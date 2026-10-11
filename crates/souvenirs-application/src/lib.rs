@@ -362,6 +362,7 @@ pub struct ImportDateSourceSummary {
     pub source: ImportDateSource,
     pub state: ImportDateState,
     pub item_count: usize,
+    pub requires_clock: bool,
     pub as_shown_time: Option<String>,
     pub converted_from_utc_time: Option<String>,
 }
@@ -750,12 +751,17 @@ pub(crate) fn inspect_source(
             DateTimeResolution::Accepted { accepted, .. } => {
                 let source = accepted_source(&accepted.source);
                 *source_counts
-                    .entry((source, ImportDateState::Accepted))
+                    .entry((source, ImportDateState::Accepted, false))
                     .or_insert(0) += 1;
                 Some(accepted)
             }
             DateTimeResolution::NeedsConfirmation(pending) => {
                 let source = import_date_source(pending.candidate.source);
+                let requires_clock = pending
+                    .batch_key()
+                    .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?
+                    .requirement
+                    == ConfirmationRequirement::AssignClock;
                 if decision.is_some() {
                     let accepted = confirmed_by_item.get(item.primary.as_str()).cloned();
                     let state = if accepted.is_some() {
@@ -764,12 +770,14 @@ pub(crate) fn inspect_source(
                         pending_item_count += 1;
                         ImportDateState::NeedsConfirmation
                     };
-                    *source_counts.entry((source, state)).or_insert(0) += 1;
+                    *source_counts
+                        .entry((source, state, requires_clock))
+                        .or_insert(0) += 1;
                     accepted
                 } else {
                     pending_item_count += 1;
                     *source_counts
-                        .entry((source, ImportDateState::NeedsConfirmation))
+                        .entry((source, ImportDateState::NeedsConfirmation, requires_clock))
                         .or_insert(0) += 1;
                     None
                 }
@@ -830,25 +838,31 @@ pub(crate) fn inspect_source(
         range_end,
         datetime_sources: source_counts
             .into_iter()
-            .map(|((source, state), item_count)| ImportDateSourceSummary {
-                source,
-                state,
-                item_count,
-                as_shown_time: (state == ImportDateState::NeedsConfirmation)
-                    .then(|| {
+            .map(
+                |((source, state, requires_clock), item_count)| ImportDateSourceSummary {
+                    source,
+                    state,
+                    item_count,
+                    requires_clock,
+                    as_shown_time: if state == ImportDateState::NeedsConfirmation && !requires_clock
+                    {
                         interpretation_previews
                             .get(&source)
                             .map(|preview| preview.0.clone())
-                    })
-                    .flatten(),
-                converted_from_utc_time: (state == ImportDateState::NeedsConfirmation)
-                    .then(|| {
+                    } else {
+                        None
+                    },
+                    converted_from_utc_time: if state == ImportDateState::NeedsConfirmation
+                        && !requires_clock
+                    {
                         interpretation_previews
                             .get(&source)
                             .map(|preview| preview.1.clone())
-                    })
-                    .flatten(),
-            })
+                    } else {
+                        None
+                    },
+                },
+            )
             .collect(),
         source_snapshot,
         items,
@@ -873,9 +887,6 @@ fn interpretation_preview(
         .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?;
     let converted = confirm_candidate(first.pending.clone(), converted)
         .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?;
-    if as_shown.wall_clock == converted.wall_clock {
-        return Ok(None);
-    }
     Ok(Some((
         display_time(as_shown.wall_clock.time()),
         display_time(converted.wall_clock.time()),
@@ -1285,6 +1296,10 @@ mod tests {
             super::interpretation_preview(&batch, time::UtcOffset::from_hms(2, 0, 0).unwrap())
                 .unwrap(),
             Some(("12:14".to_owned(), "14:14".to_owned()))
+        );
+        assert_eq!(
+            super::interpretation_preview(&batch, time::UtcOffset::UTC).unwrap(),
+            Some(("12:14".to_owned(), "12:14".to_owned()))
         );
     }
 

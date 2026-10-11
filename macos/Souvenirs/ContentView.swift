@@ -1209,7 +1209,7 @@ private struct ImportPlanningSheet: View {
             }
             if model.deferredDateCount > 0 {
                 Label(
-                    "\(itemCount(model.deferredDateCount)) need a time and will stay on the source.",
+                    "\(itemCount(model.deferredDateCount)) \(model.deferredDateCount == 1 ? "needs" : "need") a time and will stay on the source.",
                     systemImage: "clock.badge.exclamationmark"
                 )
             }
@@ -1495,6 +1495,7 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
                     source: .containerCreationTime,
                     state: .needsConfirmation,
                     itemCount: 4,
+                    requiresClock: false,
                     asShownTime: "12:14",
                     convertedFromUTCTime: "14:14"
                 )

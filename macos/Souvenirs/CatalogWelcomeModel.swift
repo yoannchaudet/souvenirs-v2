@@ -282,13 +282,13 @@ final class ImportPlanningModel: ObservableObject {
 
     var deferredDateCount: Int {
         dateChoiceSources
-            .filter { $0.asShownTime == nil || $0.convertedFromUTCTime == nil }
+            .filter(\.requiresClock)
             .reduce(0) { $0 + $1.itemCount }
     }
 
     var interpretationChoiceSources: [EngineSupervisor.ImportDateSourceSummary] {
         dateChoiceSources.filter {
-            $0.asShownTime != nil && $0.convertedFromUTCTime != nil
+            !$0.requiresClock
         }
     }
 

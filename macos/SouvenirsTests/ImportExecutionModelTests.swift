@@ -298,6 +298,7 @@ final class ImportExecutionModelTests: XCTestCase {
                         source: .containerCreationTime,
                         state: .needsConfirmation,
                         itemCount: 4,
+                        requiresClock: false,
                         asShownTime: "12:14",
                         convertedFromUTCTime: "14:14"
                     )

@@ -142,6 +142,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
                     source: .containerCreationTime,
                     state: .needsConfirmation,
                     itemCount: 4,
+                    requiresClock: false,
                     asShownTime: "12:14",
                     convertedFromUTCTime: "14:14"
                 )
@@ -151,6 +152,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
                         source: .filenamePattern,
                         state: .needsConfirmation,
                         itemCount: 1,
+                        requiresClock: true,
                         asShownTime: nil,
                         convertedFromUTCTime: nil
                     )

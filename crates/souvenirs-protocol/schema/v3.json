@@ -463,6 +463,10 @@
           "format": "uint",
           "minimum": 0.0
         },
+        "requires_clock": {
+          "default": false,
+          "type": "boolean"
+        },
         "source": {
           "$ref": "#/definitions/ImportDateSource"
         },
