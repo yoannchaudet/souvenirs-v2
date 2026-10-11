@@ -52,6 +52,46 @@ final class CatalogWelcomeModelTests: XCTestCase {
         XCTAssertEqual(model.recents.map(\.path), ["/Volumes/photos/Family"])
     }
 
+    func testCancelCreatePreservesWelcomeRecents() {
+        let recent = RecentCatalog(
+            path: "/Volumes/photos/Existing",
+            name: "Existing",
+            volumeName: "photos"
+        )
+        let model = CatalogWelcomeModel(
+            engine: FakeCatalogEngine(),
+            defaults: isolatedDefaults(),
+            recents: [recent]
+        )
+
+        model.beginCreate()
+        model.cancelCreate()
+
+        XCTAssertEqual(model.route, .welcome)
+        XCTAssertEqual(model.recents, [recent])
+        XCTAssertNil(model.selectedPath)
+        XCTAssertEqual(model.validation, .none)
+    }
+
+    func testCreateFailureKeepsSheetStateAndShowsReason() async {
+        let engine = FakeCatalogEngine()
+        let model = CatalogWelcomeModel(
+            engine: engine,
+            defaults: isolatedDefaults(),
+            recents: []
+        )
+
+        model.beginCreate()
+        await model.chooseCreateLocation("/Volumes/photos/Family")
+        engine.createError = TestError(message: "The archive could not be created.")
+        await model.createCatalog()
+
+        XCTAssertEqual(model.route, .create)
+        XCTAssertEqual(model.presentedErrorTitle, "Souvenirs couldn’t create this catalog")
+        XCTAssertEqual(model.presentedError, "The archive could not be created.")
+        XCTAssertTrue(model.canCreate)
+    }
+
     func testValidationErrorBlocksCreation() async {
         let engine = FakeCatalogEngine()
         engine.error = EngineSupervisor.SupervisorError.protocolError(
@@ -152,6 +192,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
 @MainActor
 private final class FakeCatalogEngine: CatalogEngineClient {
     var error: Error?
+    var createError: Error?
 
     func validateCatalog(path: String, intent: String) async throws
         -> EngineSupervisor.CatalogLocation {
@@ -162,7 +203,8 @@ private final class FakeCatalogEngine: CatalogEngineClient {
         path: String,
         displayName: String
     ) async throws -> EngineSupervisor.CatalogLocation {
-        try result(path)
+        if let createError { throw createError }
+        return try result(path)
     }
 
     func openCatalog(path: String) async throws -> EngineSupervisor.CatalogLocation {
