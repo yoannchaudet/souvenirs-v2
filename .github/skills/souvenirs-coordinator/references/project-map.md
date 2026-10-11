@@ -2,10 +2,7 @@
 
 The private `yoannchaudet/souvenirs-v2-context` repository stores durable coordination
 state. Read its `AGENTS.md` before changing that state. Use a session artifact only as a
-temporary cache. Use it as a fallback source only when the context repository is
-unreadable. If the configured Copilot project is unavailable, continue reading durable
-state through GitHub and cache pending updates in the artifact until persistence is
-available.
+temporary cache or fallback when the repository is unavailable.
 
 Store the project map at `project-map.md` and the current handoff at
 `handoffs/current.md`. Preserve completed integration summaries under `checkpoints/` and
@@ -14,9 +11,9 @@ accepted decisions under `decisions/`. Add integration summaries to
 it in `decisions/README.md`. Treat the record and its required index update as one focused
 change.
 
-Keep each entry concise and derived from an authoritative Souvenirs source. Use stable
-GitHub links instead of copying issue or pull request bodies. State the evidence date for
-time-sensitive summaries. Use `Unknown` when evidence is unavailable.
+Keep each entry concise and derived from an authoritative Souvenirs source. Link instead
+of copying source text. Add an evidence date only to time-sensitive summaries, and use
+`Unknown` when evidence is unavailable.
 
 If `project-map.md` is missing, create it with this starting structure through a focused
 pull request:
@@ -82,5 +79,8 @@ Evidence checked with GitHub: <ISO date>
 <Ordered actions and prerequisites>
 ```
 
+Update the map only when a material decision, dependency, integration result, or next
+action changes. Do not record routine progress.
+
 Do not store credentials, secrets, personal data, local absolute paths, raw logs,
-generated media, copied source code, or full duplicated issue or pull request bodies.
+generated media, copied source code, or duplicated issue or pull request bodies.

@@ -1,22 +1,25 @@
 # Specialist review gates
 
-Classify both the intended behavior and the resulting diff.
+The required `rubber-duck` review is the default. Add a specialist only for a material
+risk that needs domain-specific evidence.
 
 ```text
-Does the work change architecture, shared policy, a contract, or durable state?
+Is there an unresolved architecture risk involving shared policy, contracts, or durable
+state that the general review cannot adequately cover?
   yes -> invoke souvenirs-architecture-reviewer
   no  -> continue
 
-Does the work change anything users see, understand, navigate, or interact with?
+Is there an unresolved UX or accessibility risk that requires assembled-application or
+platform-specific evidence?
   yes -> invoke souvenirs-ux-reviewer
   no  -> continue
 
-If neither gate applies, use only the required rubber-duck review.
+If neither specialist applies, use only the required rubber-duck review.
 ```
 
 ## Architecture gate
 
-Invoke `souvenirs-architecture-reviewer` when the work changes:
+Consider `souvenirs-architecture-reviewer` when the work materially changes:
 
 - component or crate boundaries
 - shared domain policy or ownership of a rule
@@ -31,13 +34,13 @@ preserve existing contracts. These changes need normal correctness review but do
 benefit from architecture analysis. These exclusions take precedence over the trigger
 list.
 
-Run architecture review during planning when a consequential technical choice remains
-open. Run it again before publication only when implementation differs materially from
-the reviewed plan or exposes new consequences.
+Run architecture review during planning when a consequential choice remains open. Run it
+before publication when no plan review covered the choice, or when implementation changes
+that choice or exposes a new consequence.
 
 ## UX gate
 
-Invoke `souvenirs-ux-reviewer` when the work changes:
+Consider `souvenirs-ux-reviewer` when the work materially changes:
 
 - SwiftUI views, navigation, sheets, overlays, or window behavior
 - user-visible states, workflows, errors, progress, cancellation, or recovery
@@ -50,15 +53,14 @@ Do not invoke it for internal changes that preserve all user-visible states and
 interactions. These changes cannot produce UX findings without speculative reasoning.
 This exclusion takes precedence over the trigger list.
 
-Run UX review against the assembled application when practical. A source diff alone
-cannot establish visual composition, focus behavior, window sizing, or transitions.
+Run UX review only when the relevant behavior cannot be established from the diff,
+focused tests, and current visual evidence.
 
 ## Shared rules
 
 Test-only work does not require specialist review unless it changes or codifies product
 or architecture behavior.
 
-The reviewers do not modify repository source or publish changes. They may build, run,
-and observe the application when evidence requires it. The implementation session owns
-fixes. The coordinator reconciles conflicting findings and prevents unapproved scope
-expansion.
+One specialist is normally enough. Invoke both only for distinct material architecture
+and UX risks. Reviewers reuse current evidence and run only the smallest additional check
+needed for a verdict.

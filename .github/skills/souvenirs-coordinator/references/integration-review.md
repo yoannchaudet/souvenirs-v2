@@ -5,35 +5,24 @@ first becomes usable.
 
 ## Prepare
 
-1. Identify the complete user journey and every affected state.
-2. List the merged pull requests and unresolved issues in that journey.
-3. Select applicable fake-engine scenarios.
-4. Identify boundaries that require the production engine or real storage.
+1. Identify the changed journey and material affected states.
+2. List the pull requests and unresolved issues that can affect the verdict.
+3. Select the minimum fake-engine and real-boundary evidence needed.
 
 ## Review
 
-Inspect:
+Inspect the assembled journey and the states changed by the batch. Include window,
+accessibility, failure, recovery, or real-engine evidence only when those boundaries
+changed or remain uncertain. Reuse current screenshots and test results.
 
-- the complete journey in the running macOS application
-- default, minimum, resized, and restored window states
-- loading, empty, ready, error, cancellation, recovery, and completion states
-- fake-engine scenarios for deterministic interface behavior
-- real-engine smoke coverage for filesystem and protocol boundaries
-- visual hierarchy, terminology, accessibility, and error recovery
-- consistency between implementation, specifications, issues, and project status
-- duplicated policy or temporary shortcuts that have become permanent
+Do not rerun every state or platform boundary as a fixed checklist.
 
 Use screenshots and direct interaction when visual composition matters.
 
 ## Reconcile
 
-For each confirmed finding:
-
-1. Identify the violated requirement or user consequence.
-2. Check whether an existing issue already covers it.
-3. Update or close obsolete and duplicate issues.
-4. Create a focused issue only when the finding is evidenced and distinct.
-5. Update dependencies and later child-session context.
+For each confirmed finding, identify the requirement or consequence, reconcile it with an
+existing issue when possible, and update only the dependencies and later work it affects.
 
 Do not create speculative backlog items from preference-only observations.
 
