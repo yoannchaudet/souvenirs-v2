@@ -294,10 +294,6 @@ impl CatalogLayout {
                 return Ok(());
             }
             Some(DiscoveredJournal::Preparation(path)) => {
-                stop_at!(
-                    failpoint,
-                    InitializationRecoveryCleanupObservedBeforePersistence
-                )?;
                 fs::remove_file(&path).map_err(|source| {
                     io_error(
                         "remove interrupted bootstrap journal preparation",
@@ -305,6 +301,10 @@ impl CatalogLayout {
                         source,
                     )
                 })?;
+                stop_at!(
+                    failpoint,
+                    InitializationRecoveryCleanupObservedBeforePersistence
+                )?;
                 persist(
                     path.parent().expect("bootstrap preparation has a parent"),
                     "persist bootstrap preparation cleanup",
