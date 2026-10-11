@@ -1235,6 +1235,16 @@ private struct ImportPlanningSheet: View {
                 )
             }
             if let review = model.review {
+                let unappliedDateCount = max(
+                    0,
+                    review.skippedCount - model.deferredDateCount
+                )
+                if model.dateResolution != nil, unappliedDateCount > 0 {
+                    Label(
+                        "\(itemCount(unappliedDateCount)) could not use the selected interpretation and will stay on the source.",
+                        systemImage: "calendar.badge.exclamationmark"
+                    )
+                }
                 Label(
                     "\(review.operationCount) verified operations · \(bytes(review.requiredSpaceBytes))",
                     systemImage: "checkmark.circle"
