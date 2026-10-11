@@ -873,6 +873,9 @@ fn interpretation_preview(
         .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?;
     let converted = confirm_candidate(first.pending.clone(), converted)
         .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?;
+    if as_shown.wall_clock == converted.wall_clock {
+        return Ok(None);
+    }
     Ok(Some((
         display_time(as_shown.wall_clock.time()),
         display_time(converted.wall_clock.time()),
@@ -1252,8 +1255,8 @@ mod tests {
 
     use super::{
         CatalogInitializationError, CatalogIntent, CatalogService, CatalogServiceError,
-        DateResolution, DestinationMode, ImportDateState, ImportPlanningError,
-        ImportPlanningService, ImportReviewRequest, OperationInspectionService,
+        DateResolution, DestinationMode, ImportPlanningError, ImportPlanningService,
+        ImportReviewRequest, OperationInspectionService,
     };
 
     #[test]
@@ -1562,13 +1565,6 @@ mod tests {
         let scan = ImportPlanningService::scan(&source).unwrap();
         assert_eq!(scan.uncertain_time_count, 2);
         assert_eq!(scan.unresolved_item_count, 1);
-        assert!(scan
-            .datetime_sources
-            .iter()
-            .filter(|summary| summary.state == ImportDateState::NeedsConfirmation)
-            .all(|summary| {
-                summary.as_shown_time.is_some() && summary.converted_from_utc_time.is_some()
-            }));
         let unresolved = ImportPlanningService::review(ImportReviewRequest {
             catalog_path: catalog.clone(),
             source_path: source.clone(),

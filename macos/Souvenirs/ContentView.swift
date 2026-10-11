@@ -1061,7 +1061,9 @@ private struct ImportPlanningSheet: View {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Optional date choice · \(model.dateChoiceCount) items")
+                    Text(
+                        "Optional date choice · \(itemCount(model.dateChoiceCount))"
+                    )
                         .font(.caption.bold())
                         .foregroundStyle(.orange)
                         .accessibilityIdentifier("import-date-decision")
@@ -1072,7 +1074,10 @@ private struct ImportPlanningSheet: View {
                             .frame(width: 22, height: 22)
                             .background(.orange.opacity(0.15), in: Circle())
                         VStack(alignment: .leading, spacing: 7) {
-                            ForEach(model.dateChoiceSources, id: \.source) { summary in
+                            ForEach(
+                                model.interpretationChoiceSources,
+                                id: \.source
+                            ) { summary in
                                 Text(pendingDateSummary(summary))
                                     .font(.callout.bold())
                             }
@@ -1089,6 +1094,7 @@ private struct ImportPlanningSheet: View {
                                 decisionButton(
                                     "Convert from UTC",
                                     resultingTime: model.convertedFromUTCTime,
+                                    detail: "Using \(model.utcOffsetDescription)",
                                     value: .convertFromUTC,
                                     focus: .convertFromUTC
                                 )
@@ -1109,6 +1115,7 @@ private struct ImportPlanningSheet: View {
     private func decisionButton(
         _ title: String,
         resultingTime: String?,
+        detail: String? = nil,
         value: EngineSupervisor.ImportDateResolution,
         focus: FocusTarget
     ) -> some View {
@@ -1126,12 +1133,23 @@ private struct ImportPlanningSheet: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                if let detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .buttonStyle(.bordered)
         .tint(.secondary)
         .accessibilityLabel(
-            resultingTime.map { "\(title), example resulting time \($0)" } ?? title
+            [
+                title,
+                resultingTime.map { "example resulting time \($0)" },
+                detail
+            ]
+            .compactMap { $0 }
+            .joined(separator: ", ")
         )
         .accessibilityIdentifier(
             value == .asShown ? "date-as-shown" : "date-convert-utc"
@@ -1187,6 +1205,12 @@ private struct ImportPlanningSheet: View {
                 Label(
                     "\(scan.unresolvedItemCount) items have no usable date and will stay on the source.",
                     systemImage: "calendar.badge.exclamationmark"
+                )
+            }
+            if model.deferredDateCount > 0 {
+                Label(
+                    "\(itemCount(model.deferredDateCount)) need a time and will stay on the source.",
+                    systemImage: "clock.badge.exclamationmark"
                 )
             }
             if let review = model.review {
@@ -1296,6 +1320,10 @@ private struct ImportPlanningSheet: View {
 
     private func bytes(_ count: UInt64) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)
+    }
+
+    private func itemCount(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "item" : "items")"
     }
 }
 

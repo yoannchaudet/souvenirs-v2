@@ -73,6 +73,17 @@ final class ImportPlanningModelTests: XCTestCase {
         XCTAssertFalse(model.canStart)
     }
 
+    func testClocklessItemsRemainDisclosedWithoutInterpretationButtons() async {
+        let engine = FakeImportPlanningEngine()
+        engine.includesDeferredDate = true
+        let model = makeModel(engine: engine)
+
+        await model.load()
+
+        XCTAssertEqual(model.dateChoiceCount, 4)
+        XCTAssertEqual(model.deferredDateCount, 1)
+    }
+
     func testSummaryUsesEngineOwnedCountsAndDestination() async {
         let engine = FakeImportPlanningEngine()
         let model = makeModel(engine: engine)
@@ -107,6 +118,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
     var error: Error?
     var lastCollectionName: String?
     var lastDestinationMode: EngineSupervisor.ImportDestinationMode?
+    var includesDeferredDate = false
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
         if let error { throw error }
@@ -118,12 +130,12 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             photoCount: 8,
             videoCount: 4,
             unsupportedCount: 2,
-            uncertainTimeCount: 4,
+            uncertainTimeCount: includesDeferredDate ? 5 : 4,
             totalBytes: 41_000_000_000,
             suggestedCollectionName: "Dolomites",
             suggestedAcceptedDate: "2026-10-10",
             suggestedRangeEnd: "2026-10-12",
-            pendingItemCount: 4,
+            pendingItemCount: includesDeferredDate ? 5 : 4,
             unresolvedItemCount: 0,
             datetimeSources: [
                 .init(
@@ -133,7 +145,17 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
                     asShownTime: "12:14",
                     convertedFromUTCTime: "14:14"
                 )
-            ]
+            ] + (includesDeferredDate
+                ? [
+                    .init(
+                        source: .filenamePattern,
+                        state: .needsConfirmation,
+                        itemCount: 1,
+                        asShownTime: nil,
+                        convertedFromUTCTime: nil
+                    )
+                ]
+                : [])
         )
     }
 
@@ -149,6 +171,7 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
         lastCollectionName = collectionName
         lastDestinationMode = destinationMode
         let scan = try await scanImport(sourcePath: sourcePath)
+        let deferred = includesDeferredDate ? 1 : 0
         return .init(
             scan: scan,
             collectionName: collectionName,
@@ -157,10 +180,10 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             acceptedDate: acceptedDate,
             dateResolution: dateResolution,
             requiredDecisionCount: dateResolution == nil ? 1 : 0,
-            transferCount: dateResolution == nil ? 8 : 12,
-            skippedCount: dateResolution == nil ? 4 : 0,
-            leftOnSourceCount: dateResolution == nil ? 6 : 2,
-            operationCount: dateResolution == nil ? 10 : 14,
+            transferCount: dateResolution == nil ? 8 - deferred : 12 - deferred,
+            skippedCount: dateResolution == nil ? 4 + deferred : deferred,
+            leftOnSourceCount: dateResolution == nil ? 6 + deferred : 2 + deferred,
+            operationCount: dateResolution == nil ? 10 - deferred : 14 - deferred,
             requiredSpaceBytes: 41_000_000_000,
             canStart: true,
             reviewedPlan: "reviewed-plan"

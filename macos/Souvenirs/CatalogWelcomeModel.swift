@@ -277,7 +277,19 @@ final class ImportPlanningModel: ObservableObject {
     }
 
     var dateChoiceCount: Int {
-        dateChoiceSources.reduce(0) { $0 + $1.itemCount }
+        interpretationChoiceSources.reduce(0) { $0 + $1.itemCount }
+    }
+
+    var deferredDateCount: Int {
+        dateChoiceSources
+            .filter { $0.asShownTime == nil || $0.convertedFromUTCTime == nil }
+            .reduce(0) { $0 + $1.itemCount }
+    }
+
+    var interpretationChoiceSources: [EngineSupervisor.ImportDateSourceSummary] {
+        dateChoiceSources.filter {
+            $0.asShownTime != nil && $0.convertedFromUTCTime != nil
+        }
     }
 
     var asShownTime: String? {
@@ -295,13 +307,28 @@ final class ImportPlanningModel: ObservableObject {
     }
 
     var startImportAccessibilityHint: String {
+        if isPrepared {
+            return "The import plan is ready."
+        }
         if let errorMessage {
             return "Import cannot start. \(errorMessage)"
         }
-        if isStartBlocked {
-            return "Import cannot start because no reviewed files can be copied."
+        if !canStart {
+            return "Import cannot start until the review is ready."
         }
         return "Starts the reviewed import."
+    }
+
+    var utcOffsetDescription: String {
+        let seconds = TimeZone.current.secondsFromGMT()
+        let sign = seconds < 0 ? "−" : "+"
+        let magnitude = abs(seconds)
+        return String(
+            format: "UTC%@%02d:%02d",
+            sign,
+            magnitude / 3_600,
+            (magnitude % 3_600) / 60
+        )
     }
 
     var title: String {
@@ -322,8 +349,6 @@ final class ImportPlanningModel: ObservableObject {
             self.scan = scan
             dateChoiceSources = scan.datetimeSources.filter {
                 $0.state == .needsConfirmation
-                    && $0.asShownTime != nil
-                    && $0.convertedFromUTCTime != nil
             }
             collectionName = scan.suggestedCollectionName
             acceptedDate = scan.suggestedAcceptedDate ?? ""
