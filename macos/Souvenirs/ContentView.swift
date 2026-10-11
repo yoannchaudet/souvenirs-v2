@@ -1033,6 +1033,9 @@ private struct ImportPlanningSheet: View {
                                 )
                                 .accessibilityIdentifier("retry-import-scan")
                                 .focused($keyboardFocus, equals: .retry)
+                                .onAppear {
+                                    keyboardFocus = .retry
+                                }
                             }
                         }
                         .padding(12)
@@ -1084,11 +1087,6 @@ private struct ImportPlanningSheet: View {
             } else {
                 keyboardFocus = model.scan == nil ? .cancel : .collectionName
                 titleFocused = true
-            }
-        }
-        .onChange(of: model.canRetryScan) {
-            if $1 {
-                keyboardFocus = .retry
             }
         }
         .onChange(of: model.scan != nil) {
