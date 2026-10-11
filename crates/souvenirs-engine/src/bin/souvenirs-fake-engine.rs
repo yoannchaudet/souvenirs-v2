@@ -6,13 +6,13 @@ use serde_json::{json, Value};
 use souvenirs_protocol::{
     CancellationAccepted, CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart,
     CatalogCollectionsResult, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
-    ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportPreflightCheck,
-    ImportPreflightEvidence, ImportReviewResult, ImportScanResult, OperationAccepted,
-    OperationEvent, OperationEventPayload, OperationInspectionResult, ProtocolError, Request,
-    RequestPayload, ResponseResult, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
-    CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
-    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
-    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
+    ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportDestination,
+    ImportPreflightCheck, ImportPreflightEvidence, ImportReviewResult, ImportScanResult,
+    OperationAccepted, OperationEvent, OperationEventPayload, OperationInspectionResult,
+    ProtocolError, Request, RequestPayload, ResponseResult, UnfinishedOperationResult,
+    CANCEL_OPERATION_METHOD, CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD,
+    CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD,
+    MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 fn main() {
@@ -43,6 +43,7 @@ enum Scenario {
     CatalogFlow,
     CatalogError,
     ImportFlow,
+    ImportDestinationUnavailable,
     ImportError,
     ImportExecution,
     ImportSourceUnavailable,
@@ -74,6 +75,7 @@ fn parse_scenario() -> Result<Scenario, String> {
         Some("catalog-flow") => Scenario::CatalogFlow,
         Some("catalog-error") => Scenario::CatalogError,
         Some("import-flow") => Scenario::ImportFlow,
+        Some("import-destination-unavailable") => Scenario::ImportDestinationUnavailable,
         Some("import-error") => Scenario::ImportError,
         Some("import-execution") => Scenario::ImportExecution,
         Some("import-source-unavailable") => Scenario::ImportSourceUnavailable,
@@ -103,6 +105,7 @@ fn usage() -> String {
         "  catalog-flow",
         "  catalog-error",
         "  import-flow",
+        "  import-destination-unavailable",
         "  import-error",
         "  import-execution",
         "  import-source-unavailable",
@@ -329,7 +332,8 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 }
             }
         }
-        Scenario::ImportFlow => {
+        Scenario::ImportFlow | Scenario::ImportDestinationUnavailable => {
+            let unavailable = matches!(scenario, Scenario::ImportDestinationUnavailable);
             while let Some(request) = next_request(&mut input, &mut output)? {
                 match request.payload {
                     RequestPayload::OpenCatalog(parameters) => {
@@ -341,24 +345,35 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
                     }
+                    RequestPayload::ListCatalogCollections(_) => {
+                        catalog_collections(&mut output, request.id)?;
+                    }
                     RequestPayload::ReviewImport(parameters) => {
+                        if unavailable
+                            && matches!(&parameters.destination, ImportDestination::Existing { .. })
+                        {
+                            write_protocol_error(
+                                &mut output,
+                                request.id,
+                                "destination_unavailable",
+                                "The selected collection is no longer available. Choose it again.",
+                            )?;
+                            continue;
+                        }
                         let scan = fake_scan(parameters.source_path);
                         let resolved = parameters.date_resolution.is_some();
+                        let (collection_name, destination_path) =
+                            fake_destination(&parameters.catalog_path, &parameters.destination);
                         write_message(
                             &mut output,
                             &EngineMessage::success(
                                 request.id,
                                 ResponseResult::ImportReview(Box::new(ImportReviewResult {
                                     scan,
-                                    collection_name: parameters.collection_name.clone(),
-                                    destination_mode: parameters.destination_mode,
-                                    destination_path: format!(
-                                        "{}/2026/{} {}",
-                                        parameters.catalog_path,
-                                        parameters.accepted_date,
-                                        parameters.collection_name
-                                    ),
-                                    accepted_date: parameters.accepted_date,
+                                    collection_name,
+                                    destination: parameters.destination,
+                                    destination_path,
+                                    accepted_date: "2026-10-10".to_owned(),
                                     date_resolution: parameters.date_resolution,
                                     required_decision_count: usize::from(!resolved),
                                     transfer_count: if resolved { 12 } else { 8 },
@@ -687,19 +702,18 @@ fn import_review(
 ) -> io::Result<()> {
     let scan = fake_scan(parameters.source_path);
     let resolved = parameters.date_resolution.is_some();
+    let (collection_name, destination_path) =
+        fake_destination(&parameters.catalog_path, &parameters.destination);
     write_message(
         output,
         &EngineMessage::success(
             request_id,
             ResponseResult::ImportReview(Box::new(ImportReviewResult {
                 scan,
-                collection_name: parameters.collection_name.clone(),
-                destination_mode: parameters.destination_mode,
-                destination_path: format!(
-                    "{}/2026/{} {}",
-                    parameters.catalog_path, parameters.accepted_date, parameters.collection_name
-                ),
-                accepted_date: parameters.accepted_date,
+                collection_name,
+                destination: parameters.destination,
+                destination_path,
+                accepted_date: "2026-10-10".to_owned(),
                 date_resolution: parameters.date_resolution,
                 required_decision_count: usize::from(!resolved),
                 transfer_count: if resolved { 12 } else { 8 },
@@ -712,6 +726,38 @@ fn import_review(
             })),
         ),
     )
+}
+
+fn fake_destination(catalog_path: &str, destination: &ImportDestination) -> (String, String) {
+    match destination {
+        ImportDestination::Create { collection_name } => (
+            collection_name.clone(),
+            format!("{catalog_path}/2026/2026-10-10 {collection_name}"),
+        ),
+        ImportDestination::Existing {
+            identity: CatalogCollectionIdentity::Dated { year, directory },
+        } => (
+            directory
+                .split_once(' ')
+                .map_or(directory.as_str(), |(_, label)| {
+                    label.split_once(' ').map_or(label, |(token, rest)| {
+                        if token.starts_with('+') {
+                            rest
+                        } else {
+                            label
+                        }
+                    })
+                })
+                .to_owned(),
+            format!("{catalog_path}/{year}/{directory}"),
+        ),
+        ImportDestination::Existing {
+            identity: CatalogCollectionIdentity::Ongoing { key },
+        } => (
+            if key == "kids" { "Kids" } else { key }.to_owned(),
+            format!("{catalog_path}/2019/z Kids"),
+        ),
+    }
 }
 
 fn fake_preflight() -> ImportPreflightEvidence {

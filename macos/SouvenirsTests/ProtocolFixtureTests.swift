@@ -30,6 +30,8 @@ final class ProtocolFixtureTests: XCTestCase {
                 .successResponse(id: "request-4", result: "operation_inspection"),
                 .request(id: "request-collections", method: "catalog.collections"),
                 .successResponse(id: "request-collections", result: "catalog_collections"),
+                .request(id: "request-review", method: "import.review"),
+                .successResponse(id: "request-review", result: "import_review"),
                 .errorResponse(id: "request-5", code: "operation_not_found"),
                 .event(operationID: "operation-1", event: "started"),
                 .event(operationID: "operation-1", event: "progress"),
@@ -43,7 +45,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsNonCanonicalFieldName() {
         assertRejected(
             """
-            {"id":"macos-handshake-1","protocol_version":5,"method":"handshake","params":{"clientVersion":"0.2.0"}}
+            {"id":"macos-handshake-1","protocol_version":6,"method":"handshake","params":{"clientVersion":"0.2.0"}}
             """,
             containing: "keys were"
         )
@@ -52,7 +54,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsUnknownEnumValue() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":5,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
+            {"kind":"event","protocol_version":6,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
             """,
             containing: "unsupported event type"
         )
@@ -61,7 +63,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsIncompatibleMessageShape() {
         assertRejected(
             """
-            {"kind":"response","id":"request-2","protocol_version":5,"status":"success","result":[]}
+            {"kind":"response","id":"request-2","protocol_version":6,"status":"success","result":[]}
             """,
             containing: "must be an object"
         )
@@ -70,7 +72,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsJSONTypeDrift() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":5,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
+            {"kind":"event","protocol_version":6,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
             """,
             containing: "must be an integer"
         )
@@ -81,7 +83,7 @@ final class ProtocolFixtureTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v5.jsonl")
+            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v6.jsonl")
     }
 
     private func assertRejected(
@@ -133,15 +135,15 @@ final class ProtocolFixtureTests: XCTestCase {
             )
             XCTAssertEqual(response.kind, "response")
             XCTAssertEqual(response.id, "macos-handshake-1")
-            XCTAssertEqual(response.protocolVersion, 5)
+            XCTAssertEqual(response.protocolVersion, 6)
             XCTAssertEqual(response.status, "success")
             XCTAssertEqual(response.result.type, "handshake")
             XCTAssertEqual(response.result.engineVersion, "0.1.0")
-            XCTAssertEqual(response.result.protocolVersion, 5)
+            XCTAssertEqual(response.result.protocolVersion, 6)
             XCTAssertEqual(response.result.compatibleClientVersion, "0.2.0")
             XCTAssertEqual(
                 response.result.capabilities,
-                ["operation.cancel", "catalog.collections"]
+                ["operation.cancel", "catalog.collections", "import.review"]
             )
         case 2:
             try assertRequest(
@@ -278,10 +280,51 @@ final class ProtocolFixtureTests: XCTestCase {
                 ]
             )
         case 11:
+            try assertRequest(
+                data,
+                equals: RequestEnvelope(
+                    id: "request-review",
+                    protocolVersion: EngineSupervisor.protocolVersion,
+                    method: "import.review",
+                    params: ImportReviewParameters(
+                        catalogPath: "/Volumes/photos/Family Catalog",
+                        sourcePath: "/Volumes/EOS_DIGITAL",
+                        destination: .existing(
+                            identity: .dated(
+                                year: "2019",
+                                directory: "2019-07-14 +6d Brittany"
+                            )
+                        ),
+                        dateResolution: .asShown,
+                        utcOffsetSeconds: 7_200
+                    )
+                )
+            )
+        case 12:
+            let response = try JSONDecoder().decode(
+                SuccessResponse<ImportReviewResult>.self,
+                from: data
+            )
+            XCTAssertEqual(response.result.type, "import_review")
+            XCTAssertEqual(
+                response.result.review.destination,
+                .existing(
+                    identity: .dated(
+                        year: "2019",
+                        directory: "2019-07-14 +6d Brittany"
+                    )
+                )
+            )
+            XCTAssertEqual(response.result.review.collectionName, "Brittany")
+            XCTAssertEqual(
+                response.result.review.destinationPath,
+                "/Volumes/photos/Family Catalog/2019/2019-07-14 +6d Brittany"
+            )
+        case 13:
             let response = try JSONDecoder().decode(ErrorResponse.self, from: data)
             XCTAssertEqual(response.error.code, "operation_not_found")
             XCTAssertEqual(response.error.message, "The operation was not found.")
-        case 12:
+        case 14:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -290,7 +333,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     payload: .started(name: "import.scan")
                 )
             )
-        case 13:
+        case 15:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -303,7 +346,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     )
                 )
             )
-        case 14:
+        case 16:
             let event = try EngineSupervisor.decodeOperationEvent(data)
             guard case .completed(let result) = event.payload else {
                 return XCTFail("Expected a completed event")
@@ -314,7 +357,7 @@ final class ProtocolFixtureTests: XCTestCase {
                 try JSONSerialization.jsonObject(with: result) as? [String: Int],
                 ["item_count": 1]
             )
-        case 15:
+        case 17:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -326,7 +369,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     )
                 )
             )
-        case 16:
+        case 18:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -421,6 +464,27 @@ private enum ProtocolFixtureValidator {
         case "catalog.collections":
             try requireKeys(parameters, exactly: ["path"], at: "\(path).params")
             _ = try requireString(parameters, key: "path", at: "\(path).params")
+        case "import.review":
+            try requireKeys(
+                parameters,
+                exactly: [
+                    "catalog_path", "source_path", "destination",
+                    "date_resolution", "utc_offset_seconds",
+                ],
+                at: "\(path).params"
+            )
+            _ = try requireString(parameters, key: "catalog_path", at: "\(path).params")
+            _ = try requireString(parameters, key: "source_path", at: "\(path).params")
+            try validateDestination(
+                try requireObject(parameters, key: "destination", at: "\(path).params"),
+                at: "\(path).params.destination"
+            )
+            _ = try requireString(parameters, key: "date_resolution", at: "\(path).params")
+            _ = try requireInteger(
+                parameters,
+                key: "utc_offset_seconds",
+                at: "\(path).params"
+            )
         case "operation.start":
             try validateStartParameters(parameters, at: "\(path).params")
         default:
@@ -568,10 +632,66 @@ private enum ProtocolFixtureValidator {
             for (index, value) in collections.enumerated() {
                 try validateCollection(value, at: "\(path).collections[\(index)]")
             }
+        case "import_review":
+            try requireKeys(
+                result,
+                exactly: [
+                    "type", "scan", "collection_name", "destination", "destination_path",
+                    "accepted_date", "date_resolution", "required_decision_count",
+                    "transfer_count", "skipped_count", "left_on_source_count",
+                    "operation_count", "preflight", "can_start", "reviewed_plan",
+                ],
+                at: path
+            )
+            _ = try requireObject(result, key: "scan", at: path)
+            _ = try requireString(result, key: "collection_name", at: path)
+            try validateDestination(
+                try requireObject(result, key: "destination", at: path),
+                at: "\(path).destination"
+            )
+            _ = try requireString(result, key: "destination_path", at: path)
+            _ = try requireString(result, key: "accepted_date", at: path)
+            _ = try requireObject(result, key: "preflight", at: path)
+            _ = try requireBoolean(result, key: "can_start", at: path)
         default:
             throw ValidationError("\(path) has an unsupported result type")
         }
         return type
+    }
+
+    private static func validateDestination(
+        _ destination: [String: Any],
+        at path: String
+    ) throws {
+        switch try requireString(destination, key: "kind", at: path) {
+        case "create":
+            try requireKeys(destination, exactly: ["kind", "collection_name"], at: path)
+            _ = try requireString(destination, key: "collection_name", at: path)
+        case "existing":
+            try requireKeys(destination, exactly: ["kind", "identity"], at: path)
+            let identity = try requireObject(destination, key: "identity", at: path)
+            switch try requireString(identity, key: "kind", at: "\(path).identity") {
+            case "dated":
+                try requireKeys(
+                    identity,
+                    exactly: ["kind", "year", "directory"],
+                    at: "\(path).identity"
+                )
+                _ = try requireString(identity, key: "year", at: "\(path).identity")
+                _ = try requireString(identity, key: "directory", at: "\(path).identity")
+            case "ongoing":
+                try requireKeys(
+                    identity,
+                    exactly: ["kind", "key"],
+                    at: "\(path).identity"
+                )
+                _ = try requireString(identity, key: "key", at: "\(path).identity")
+            default:
+                throw ValidationError("\(path).identity has an unsupported identity kind")
+            }
+        default:
+            throw ValidationError("\(path) has an unsupported destination kind")
+        }
     }
 
     private static func validateCollection(_ value: Any, at path: String) throws {

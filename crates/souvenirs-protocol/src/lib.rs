@@ -7,7 +7,7 @@ use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 // This is the oldest macOS client version supported by the engine.
 pub const MINIMUM_CLIENT_VERSION: &str = "0.2.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
@@ -168,19 +168,17 @@ pub struct ImportScanParameters {
 pub struct ImportReviewParameters {
     pub catalog_path: String,
     pub source_path: String,
-    pub collection_name: String,
-    pub destination_mode: ImportDestinationMode,
-    pub accepted_date: String,
+    pub destination: ImportDestination,
     pub date_resolution: Option<ImportDateResolution>,
     #[serde(default)]
     pub utc_offset_seconds: i32,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportDestinationMode {
-    Create,
-    Existing,
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ImportDestination {
+    Create { collection_name: String },
+    Existing { identity: CatalogCollectionIdentity },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -374,7 +372,7 @@ pub enum ImportDateState {
 pub struct ImportReviewResult {
     pub scan: ImportScanResult,
     pub collection_name: String,
-    pub destination_mode: ImportDestinationMode,
+    pub destination: ImportDestination,
     pub destination_path: String,
     pub accepted_date: String,
     pub date_resolution: Option<ImportDateResolution>,
@@ -644,7 +642,7 @@ mod tests {
 
     #[test]
     fn golden_fixture_matches_rust_types() {
-        let fixture = fixture_path("protocol-v5.jsonl");
+        let fixture = fixture_path("protocol-v6.jsonl");
         let contents = fs::read_to_string(fixture).expect("fixture should be readable");
         let values: Vec<Value> = contents
             .lines()
@@ -673,6 +671,7 @@ mod tests {
                         | RequestPayload::CreateCatalog(_)
                         | RequestPayload::OpenCatalog(_)
                         | RequestPayload::ListCatalogCollections(_)
+                        | RequestPayload::ReviewImport(_)
                         | RequestPayload::InspectOperation(_)
                 ));
                 request_count += 1;
@@ -685,8 +684,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(request_count, 6);
-        assert_eq!(engine_message_count, 11);
+        assert_eq!(request_count, 7);
+        assert_eq!(engine_message_count, 12);
 
         let schema_value =
             serde_json::to_value(protocol_schema()).expect("schema should serialize");
@@ -704,7 +703,7 @@ mod tests {
         let expected = serde_json::to_string_pretty(&protocol_schema())
             .expect("protocol schema should serialize")
             + "\n";
-        let actual = fs::read_to_string(fixture_path("../schema/v5.json"))
+        let actual = fs::read_to_string(fixture_path("../schema/v6.json"))
             .expect("committed schema should be readable");
 
         assert_eq!(actual, expected, "regenerate the committed protocol schema");

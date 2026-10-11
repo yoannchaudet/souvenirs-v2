@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public actor EngineSupervisor {
-    public static let protocolVersion: UInt32 = 5
+    public static let protocolVersion: UInt32 = 6
     public static let protocolClientVersion = "0.2.0"
 
     public struct Handshake: Equatable, Sendable {
@@ -35,7 +35,7 @@ public actor EngineSupervisor {
         public let detail: String
     }
 
-    public enum CatalogCollectionIdentity: Codable, Equatable, Sendable {
+    public enum CatalogCollectionIdentity: Codable, Equatable, Hashable, Sendable {
         case dated(year: String, directory: String)
         case ongoing(key: String)
 
@@ -80,7 +80,7 @@ public actor EngineSupervisor {
         }
     }
 
-    public struct CatalogCollectionPart: Codable, Equatable, Sendable {
+    public struct CatalogCollectionPart: Codable, Equatable, Hashable, Sendable {
         public let year: Int
         public let yearDirectory: String
         public let collectionDirectory: String
@@ -197,6 +197,60 @@ public actor EngineSupervisor {
         case existing
     }
 
+    public enum ImportDestination: Codable, Equatable, Sendable {
+        case create(collectionName: String)
+        case existing(identity: CatalogCollectionIdentity)
+
+        public var mode: ImportDestinationMode {
+            switch self {
+            case .create:
+                return .create
+            case .existing:
+                return .existing
+            }
+        }
+
+        private enum Kind: String, Codable {
+            case create
+            case existing
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case collectionName = "collection_name"
+            case identity
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            switch try container.decode(Kind.self, forKey: .kind) {
+            case .create:
+                self = try .create(
+                    collectionName: container.decode(String.self, forKey: .collectionName)
+                )
+            case .existing:
+                self = try .existing(
+                    identity: container.decode(
+                        CatalogCollectionIdentity.self,
+                        forKey: .identity
+                    )
+                )
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .create(let collectionName):
+                try container.encode(Kind.create, forKey: .kind)
+                try container.encode(collectionName, forKey: .collectionName)
+            case .existing(let identity):
+                try container.encode(Kind.existing, forKey: .kind)
+                try container.encode(identity, forKey: .identity)
+            }
+        }
+    }
+
     public enum ImportDateResolution: String, Codable, Equatable, Sendable {
         case asShown = "as_shown"
         case convertFromUTC = "convert_from_utc"
@@ -277,7 +331,7 @@ public actor EngineSupervisor {
     public struct ImportReview: Codable, Equatable, Sendable {
         public let scan: ImportScan
         public let collectionName: String
-        public let destinationMode: ImportDestinationMode
+        public let destination: ImportDestination
         public let destinationPath: String
         public let acceptedDate: String
         public let dateResolution: ImportDateResolution?
@@ -293,7 +347,7 @@ public actor EngineSupervisor {
         enum CodingKeys: String, CodingKey {
             case scan
             case collectionName = "collection_name"
-            case destinationMode = "destination_mode"
+            case destination
             case destinationPath = "destination_path"
             case acceptedDate = "accepted_date"
             case dateResolution = "date_resolution"
@@ -866,9 +920,7 @@ public actor EngineSupervisor {
     public func reviewImport(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String,
-        destinationMode: ImportDestinationMode,
-        acceptedDate: String,
+        destination: ImportDestination,
         dateResolution: ImportDateResolution?
     ) async throws -> ImportReview {
         let result: ImportReviewResult = try await sendRequest(
@@ -876,9 +928,7 @@ public actor EngineSupervisor {
             parameters: ImportReviewParameters(
                 catalogPath: catalogPath,
                 sourcePath: sourcePath,
-                collectionName: collectionName,
-                destinationMode: destinationMode,
-                acceptedDate: acceptedDate,
+                destination: destination,
                 dateResolution: dateResolution,
                 utcOffsetSeconds: TimeZone.current.secondsFromGMT()
             ),
@@ -1950,21 +2000,17 @@ private struct ImportScanParameters: Encodable, Sendable {
     }
 }
 
-private struct ImportReviewParameters: Encodable, Sendable {
+struct ImportReviewParameters: Encodable, Sendable {
     let catalogPath: String
     let sourcePath: String
-    let collectionName: String
-    let destinationMode: EngineSupervisor.ImportDestinationMode
-    let acceptedDate: String
+    let destination: EngineSupervisor.ImportDestination
     let dateResolution: EngineSupervisor.ImportDateResolution?
     let utcOffsetSeconds: Int
 
     enum CodingKeys: String, CodingKey {
         case catalogPath = "catalog_path"
         case sourcePath = "source_path"
-        case collectionName = "collection_name"
-        case destinationMode = "destination_mode"
-        case acceptedDate = "accepted_date"
+        case destination
         case dateResolution = "date_resolution"
         case utcOffsetSeconds = "utc_offset_seconds"
     }
@@ -2105,11 +2151,11 @@ private struct ImportScanResult: Decodable, Sendable {
     }
 }
 
-private struct ImportReviewResult: Decodable, Sendable {
+struct ImportReviewResult: Decodable, Sendable {
     let type: String
     let scan: EngineSupervisor.ImportScan
     let collectionName: String
-    let destinationMode: EngineSupervisor.ImportDestinationMode
+    let destination: EngineSupervisor.ImportDestination
     let destinationPath: String
     let acceptedDate: String
     let dateResolution: EngineSupervisor.ImportDateResolution?
@@ -2126,7 +2172,7 @@ private struct ImportReviewResult: Decodable, Sendable {
         .init(
             scan: scan,
             collectionName: collectionName,
-            destinationMode: destinationMode,
+            destination: destination,
             destinationPath: destinationPath,
             acceptedDate: acceptedDate,
             dateResolution: dateResolution,
@@ -2145,7 +2191,7 @@ private struct ImportReviewResult: Decodable, Sendable {
         case type
         case scan
         case collectionName = "collection_name"
-        case destinationMode = "destination_mode"
+        case destination
         case destinationPath = "destination_path"
         case acceptedDate = "accepted_date"
         case dateResolution = "date_resolution"

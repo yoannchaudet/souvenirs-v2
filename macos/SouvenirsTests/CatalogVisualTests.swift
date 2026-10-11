@@ -544,6 +544,12 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
         location(path)
     }
 
+    func catalogCollections(
+        path: String
+    ) async throws -> [EngineSupervisor.CatalogCollection] {
+        []
+    }
+
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
         if scanSuspended {
             await withCheckedContinuation { continuation in
@@ -582,21 +588,26 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
     func reviewImport(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
+        destination: EngineSupervisor.ImportDestination,
         dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> EngineSupervisor.ImportReview {
         if let reviewError {
             throw reviewError
         }
         let scan = try await scanImport(sourcePath: sourcePath)
+        let collectionName: String
+        switch destination {
+        case .create(let name):
+            collectionName = name
+        case .existing:
+            collectionName = "Existing"
+        }
         return .init(
             scan: scan,
             collectionName: collectionName,
-            destinationMode: destinationMode,
-            destinationPath: "\(catalogPath)/2026/\(acceptedDate) \(collectionName)",
-            acceptedDate: acceptedDate,
+            destination: destination,
+            destinationPath: "\(catalogPath)/2026/2026-10-10 \(collectionName)",
+            acceptedDate: "2026-10-10",
             dateResolution: dateResolution,
             requiredDecisionCount: dateResolution == nil ? 1 : 0,
             transferCount: dateResolution == nil ? 8 : 12,
@@ -664,9 +675,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
         try await reviewImport(
             catalogPath: "/Volumes/photos/Family Catalog",
             sourcePath: "/Volumes/EOS_DIGITAL",
-            collectionName: "Dolomites",
-            destinationMode: .create,
-            acceptedDate: "2026-10-10",
+            destination: .create(collectionName: "Dolomites"),
             dateResolution: .asShown
         )
     }

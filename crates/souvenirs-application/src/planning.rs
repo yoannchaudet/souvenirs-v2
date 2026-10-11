@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use souvenirs_domain::catalog::{
-    allocate_collection_counters, CanonicalFilename, CanonicalStem, NewItemCounterRequest,
+    allocate_collection_counters, ongoing_collection_directory, year_directory, CanonicalFilename,
+    CanonicalStem, CollectionIdentity, NewItemCounterRequest,
 };
 use souvenirs_domain::names::{CatalogLabel, PortableComponent};
 use souvenirs_domain::plan::PlanFileRole;
@@ -16,8 +17,8 @@ use crate::execution::{
 };
 use crate::{
     dated_collection_components, directory_identity, inspect_source, scan_summary, CatalogService,
-    DestinationMode, ImportPlanningError, ImportPreflightCheck, ImportPreflightEvidence,
-    ImportReview, ImportReviewRequest, SourceSnapshotEntry,
+    ExistingCollectionIdentity, ImportDestination, ImportPlanningError, ImportPreflightCheck,
+    ImportPreflightEvidence, ImportReview, ImportReviewRequest, SourceSnapshotEntry,
 };
 
 #[derive(Clone, Debug)]
@@ -63,6 +64,188 @@ pub(crate) struct PlannedManifest {
     pub(crate) contents: Vec<u8>,
 }
 
+enum ResolvedDestination {
+    Create {
+        label: CatalogLabel,
+    },
+    Dated {
+        label: CatalogLabel,
+        year: String,
+        directory: String,
+        start_date: time::Date,
+        end_date: time::Date,
+    },
+    Ongoing {
+        label: CatalogLabel,
+        parts: Vec<crate::CatalogCollectionPart>,
+    },
+}
+
+struct ResolvedTarget {
+    year: String,
+    collection_directory: String,
+    create_collection: bool,
+    existing_selection: bool,
+}
+
+impl ResolvedDestination {
+    fn collection_name(&self) -> &str {
+        match self {
+            Self::Create { label } | Self::Dated { label, .. } | Self::Ongoing { label, .. } => {
+                label.as_str()
+            }
+        }
+    }
+
+    fn target(
+        &self,
+        range_start: time::Date,
+        range_end: time::Date,
+        dates: &BTreeSet<time::Date>,
+    ) -> Result<ResolvedTarget, ImportPlanningError> {
+        match self {
+            Self::Create { label } => {
+                let (year, collection_directory) =
+                    dated_collection_components(range_start, range_end, label)?;
+                Ok(ResolvedTarget {
+                    year,
+                    collection_directory,
+                    create_collection: true,
+                    existing_selection: false,
+                })
+            }
+            Self::Dated {
+                year,
+                directory,
+                start_date,
+                end_date,
+                ..
+            } => {
+                if dates
+                    .iter()
+                    .any(|date| date < start_date || date > end_date)
+                {
+                    return Err(ImportPlanningError::DestinationUnavailable(format!(
+                        "The selected collection covers {start_date} through {end_date}. Choose a collection that includes every import date."
+                    )));
+                }
+                Ok(ResolvedTarget {
+                    year: year.clone(),
+                    collection_directory: directory.clone(),
+                    create_collection: false,
+                    existing_selection: true,
+                })
+            }
+            Self::Ongoing { label, parts } => {
+                let years = dates
+                    .iter()
+                    .map(|date| date.year())
+                    .collect::<BTreeSet<_>>();
+                let Some(year) = years.first().copied() else {
+                    return Err(ImportPlanningError::DestinationUnavailable(
+                        "The selected ongoing collection has no resolved import year.".to_owned(),
+                    ));
+                };
+                if years.len() != 1 {
+                    return Err(ImportPlanningError::DestinationUnavailable(
+                        "This import spans more than one year. Import one year at a time into an ongoing collection."
+                            .to_owned(),
+                    ));
+                }
+                if let Some(part) = parts.iter().find(|part| part.year == year) {
+                    return Ok(ResolvedTarget {
+                        year: part.year_directory.clone(),
+                        collection_directory: part.collection_directory.clone(),
+                        create_collection: false,
+                        existing_selection: true,
+                    });
+                }
+                let date = *dates.first().expect("an ongoing target has a date");
+                Ok(ResolvedTarget {
+                    year: year_directory(date)
+                        .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?
+                        .to_string(),
+                    collection_directory: ongoing_collection_directory(label)
+                        .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?
+                        .to_string(),
+                    create_collection: true,
+                    existing_selection: true,
+                })
+            }
+        }
+    }
+}
+
+fn resolve_destination(
+    catalog_path: &Path,
+    destination: &ImportDestination,
+) -> Result<ResolvedDestination, ImportPlanningError> {
+    match destination {
+        ImportDestination::Create { collection_name } => Ok(ResolvedDestination::Create {
+            label: CatalogLabel::new(collection_name)
+                .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?,
+        }),
+        ImportDestination::Existing { identity } => {
+            let collections =
+                CatalogService::collections(catalog_path).map_err(ImportPlanningError::Catalog)?;
+            collections
+                .into_iter()
+                .find_map(|collection| match (identity, collection) {
+                    (
+                        ExistingCollectionIdentity::Dated {
+                            year: requested_year,
+                            directory: requested_directory,
+                        },
+                        crate::CatalogCollection::Dated {
+                            identity: CollectionIdentity::Dated { year, directory },
+                            label,
+                            start_date,
+                            end_date,
+                        },
+                    ) if year.as_str() == requested_year
+                        && directory.as_str() == requested_directory =>
+                    {
+                        Some(
+                            CatalogLabel::new(&label)
+                                .map(|label| ResolvedDestination::Dated {
+                                    label,
+                                    year: year.to_string(),
+                                    directory: directory.to_string(),
+                                    start_date,
+                                    end_date,
+                                })
+                                .map_err(|error| {
+                                    ImportPlanningError::InvalidCollection(error.to_string())
+                                }),
+                        )
+                    }
+                    (
+                        ExistingCollectionIdentity::Ongoing { key: requested_key },
+                        crate::CatalogCollection::Ongoing {
+                            identity: CollectionIdentity::Ongoing { key },
+                            label,
+                            parts,
+                        },
+                    ) if key.as_str() == requested_key => Some(
+                        CatalogLabel::new(&label)
+                            .map(|label| ResolvedDestination::Ongoing { label, parts })
+                            .map_err(|error| {
+                                ImportPlanningError::InvalidCollection(error.to_string())
+                            }),
+                    ),
+                    _ => None,
+                })
+                .transpose()?
+                .ok_or_else(|| {
+                    ImportPlanningError::DestinationUnavailable(
+                        "The selected collection is no longer available. Choose it again."
+                            .to_owned(),
+                    )
+                })
+        }
+    }
+}
+
 pub(crate) fn review_import(
     request: ImportReviewRequest,
 ) -> Result<ImportReview, ImportPlanningError> {
@@ -86,8 +269,8 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
         return Err(ImportPlanningError::NoSupportedMedia);
     }
 
-    let collection = CatalogLabel::new(&request.collection_name)
-        .map_err(|error| ImportPlanningError::InvalidCollection(error.to_string()))?;
+    let resolved_destination = resolve_destination(&request.catalog_path, &request.destination)?;
+    let collection_name = resolved_destination.collection_name().to_owned();
     let required_decision_count = inspected.pending_item_count;
     let Some(range_start) = inspected
         .items
@@ -97,8 +280,8 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
     else {
         return Ok(PlannedImport {
             review: ImportReview {
-                collection_name: collection.to_string(),
-                destination_mode: request.destination_mode,
+                collection_name: collection_name.clone(),
+                destination: request.destination.clone(),
                 destination_path: request.catalog_path.clone(),
                 accepted_date: String::new(),
                 date_resolution: request.date_resolution,
@@ -122,7 +305,7 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
             },
             catalog_path: request.catalog_path,
             source_path: request.source_path,
-            collection_name: request.collection_name,
+            collection_name,
             source_snapshot: inspected.source_snapshot,
             directories: Vec::new(),
             items: Vec::new(),
@@ -140,31 +323,42 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
         .map(|item| item.accepted.wall_clock.date())
         .max()
         .expect("a range start has a range end");
-    let (year, collection_directory) =
-        dated_collection_components(range_start, range_end, &collection)?;
-    let collection_path = request.catalog_path.join(&year).join(&collection_directory);
-    match request.destination_mode {
-        DestinationMode::Create if collection_path.exists() => {
-            return Err(ImportPlanningError::DestinationAlreadyExists(
-                collection_path,
-            ));
-        }
-        DestinationMode::Existing if !collection_path.is_dir() => {
-            return Err(ImportPlanningError::DestinationMissing(collection_path));
-        }
-        DestinationMode::Create | DestinationMode::Existing => {}
-    }
-    if request.destination_mode == DestinationMode::Existing {
-        let layout = CatalogLayout::new(&request.catalog_path);
-        validate_directory(&layout, &PathBuf::from(&year).join(&collection_directory))
-            .map_err(|error| ImportPlanningError::InvalidPlan(error.to_string()))?;
-    }
-
     let dates = inspected
         .items
         .iter()
         .map(|item| item.accepted.wall_clock.date())
         .collect::<BTreeSet<_>>();
+    let target = resolved_destination.target(range_start, range_end, &dates)?;
+    let year = target.year;
+    let collection_directory = target.collection_directory;
+    let collection_path = request.catalog_path.join(&year).join(&collection_directory);
+    if target.create_collection {
+        if collection_path.exists() {
+            return Err(if target.existing_selection {
+                ImportPlanningError::DestinationUnavailable(
+                    "The selected collection's annual destination is unavailable. Choose the collection again."
+                        .to_owned(),
+                )
+            } else {
+                ImportPlanningError::DestinationAlreadyExists(collection_path)
+            });
+        }
+    } else {
+        if !collection_path.is_dir() {
+            return Err(ImportPlanningError::DestinationUnavailable(
+                "The selected collection is no longer available. Choose it again.".to_owned(),
+            ));
+        }
+        let layout = CatalogLayout::new(&request.catalog_path);
+        validate_directory(&layout, &PathBuf::from(&year).join(&collection_directory)).map_err(
+            |error| {
+                ImportPlanningError::InvalidPlan(format!(
+                    "The selected collection cannot be used: {error}"
+                ))
+            },
+        )?;
+    }
+
     let existing = dates
         .iter()
         .map(|date| {
@@ -259,8 +453,8 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
         None
     };
     let review = ImportReview {
-        collection_name: collection.to_string(),
-        destination_mode: request.destination_mode,
+        collection_name: collection_name.clone(),
+        destination: request.destination.clone(),
         destination_path: collection_path.clone(),
         accepted_date: range_start.to_string(),
         date_resolution: request.date_resolution,
@@ -282,8 +476,8 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
         reviewed_plan: None,
         scan,
     };
-    let directories = match request.destination_mode {
-        DestinationMode::Create => vec![
+    let directories = if target.create_collection {
+        vec![
             PlannedDirectory {
                 path: PathBuf::from(&year),
                 create: !request.catalog_path.join(&year).exists(),
@@ -294,21 +488,22 @@ fn build_import(request: ImportReviewRequest) -> Result<PlannedImport, ImportPla
                 create: true,
                 identity: None,
             },
-        ],
-        DestinationMode::Existing => vec![PlannedDirectory {
+        ]
+    } else {
+        vec![PlannedDirectory {
             path: PathBuf::from(&year).join(&collection_directory),
             create: false,
             identity: Some(directory_identity(&collection_path.metadata().map_err(
                 |error| ImportPlanningError::InvalidPlan(error.to_string()),
             )?)),
-        }],
+        }]
     };
 
     let mut planned = PlannedImport {
         review,
         catalog_path: request.catalog_path,
         source_path: request.source_path,
-        collection_name: request.collection_name,
+        collection_name,
         source_snapshot: inspected.source_snapshot,
         directories,
         items,

@@ -961,6 +961,7 @@ private struct ImportPlanningSheet: View {
         case cancel
         case retry
         case collectionName
+        case destination
         case dateSummary
         case asShown
         case convertFromUTC
@@ -971,10 +972,12 @@ private struct ImportPlanningSheet: View {
     let onStart: () -> Void
     @FocusState private var keyboardFocus: FocusTarget?
     @AccessibilityFocusState private var titleFocused: Bool
+    @AccessibilityFocusState private var destinationFocused: Bool
     @AccessibilityFocusState private var dateFocused: FocusTarget?
     @AccessibilityFocusState private var recoveryFocused: FocusTarget?
     @State private var requestedDateFocus: FocusTarget?
     @State private var requestedRecoveryFocus: FocusTarget?
+    @State private var showsExistingCollections = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1101,48 +1104,89 @@ private struct ImportPlanningSheet: View {
                 keyboardFocus = .collectionName
             }
         }
+        .sheet(isPresented: $showsExistingCollections) {
+            ExistingCollectionSelector(
+                collections: model.availableCollections,
+                selectedIdentity: model.selectedExistingCollection?.identity,
+                isLoading: model.isLoadingCollections,
+                errorMessage: model.collectionSelectionError,
+                onCancel: {
+                    showsExistingCollections = false
+                },
+                onSelect: { collection in
+                    showsExistingCollections = false
+                    Task { await model.selectExistingCollection(collection) }
+                }
+            )
+        }
+        .onChange(of: showsExistingCollections) {
+            if !$1 {
+                keyboardFocus = .destination
+                destinationFocused = true
+            }
+        }
     }
 
     private var destinationCard: some View {
         HStack(spacing: 12) {
             thumbnailGrid
             VStack(alignment: .leading, spacing: 5) {
-                Text("Collection name")
+                Text(
+                    model.destinationMode == .create
+                        ? "Collection name" : "Selected collection"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("import-destination-summary")
                 HStack {
-                    TextField("Collection name", text: $model.collectionName)
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: model.collectionName) {
-                            model.collectionNameChanged()
-                        }
-                        .onSubmit { Task { await model.refreshReview() } }
-                        .accessibilityIdentifier("import-collection-name")
-                        .focused($keyboardFocus, equals: .collectionName)
-                        .accessibilityFocused($recoveryFocused, equals: .collectionName)
-                        .onAppear {
-                            guard requestedRecoveryFocus == .collectionName else { return }
-                            requestedRecoveryFocus = nil
-                            keyboardFocus = .collectionName
-                            recoveryFocused = .collectionName
-                        }
+                    if model.destinationMode == .create {
+                        TextField("Collection name", text: $model.collectionName)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: model.collectionName) {
+                                model.collectionNameChanged()
+                            }
+                            .onSubmit { Task { await model.refreshReview() } }
+                            .accessibilityIdentifier("import-collection-name")
+                            .focused($keyboardFocus, equals: .collectionName)
+                            .accessibilityFocused($recoveryFocused, equals: .collectionName)
+                            .onAppear {
+                                guard requestedRecoveryFocus == .collectionName else { return }
+                                requestedRecoveryFocus = nil
+                                keyboardFocus = .collectionName
+                                recoveryFocused = .collectionName
+                            }
+                    } else {
+                        Text(model.collectionName)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .frame(height: 22)
+                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 5))
+                            .accessibilityIdentifier("import-collection-name")
+                            .accessibilityLabel("Selected collection")
+                            .accessibilityValue(model.collectionName)
+                    }
                     Button(
                         model.destinationMode == .create
-                            ? "Add to Existing…" : "Create New…"
+                            ? "Add to Existing…" : "Change…"
                     ) {
-                        Task {
-                            await model.setDestinationMode(
-                                model.destinationMode == .create ? .existing : .create
-                            )
-                        }
+                        showsExistingCollections = true
+                        Task { await model.loadCollections() }
                     }
                     .accessibilityIdentifier("import-destination-mode")
+                    .focused($keyboardFocus, equals: .destination)
+                    .accessibilityFocused($destinationFocused)
+                    if model.destinationMode == .existing {
+                        Button("Create New…") {
+                            Task { await model.useCreateDestination() }
+                        }
+                        .accessibilityIdentifier("import-create-new-destination")
+                    }
                 }
                 Text(dateSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
         }
         .padding(12)
         .background(.background.opacity(0.75), in: RoundedRectangle(cornerRadius: 11))
@@ -1573,6 +1617,144 @@ private struct ImportPlanningSheet: View {
     }
 }
 
+private struct ExistingCollectionSelector: View {
+    let collections: [EngineSupervisor.CatalogCollection]
+    let selectedIdentity: EngineSupervisor.CatalogCollectionIdentity?
+    let isLoading: Bool
+    let errorMessage: String?
+    let onCancel: () -> Void
+    let onSelect: (EngineSupervisor.CatalogCollection) -> Void
+
+    @State private var selection: EngineSupervisor.CatalogCollectionIdentity?
+    @FocusState private var keyboardFocus: EngineSupervisor.CatalogCollectionIdentity?
+    @AccessibilityFocusState private var accessibilityFocus:
+        EngineSupervisor.CatalogCollectionIdentity?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add to an Existing Collection")
+                    .font(.system(size: 20, weight: .bold))
+                    .accessibilityIdentifier("existing-collection-selector")
+                Text("Choose the exact collection for this import.")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+
+            Divider()
+
+            Group {
+                if isLoading {
+                    ProgressView("Reading collections…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityIdentifier("existing-collections-loading")
+                } else if let errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .padding(20)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: .topLeading
+                        )
+                        .accessibilityIdentifier("existing-collections-error")
+                } else {
+                    List(
+                        Array(collections.enumerated()),
+                        id: \.element.identity
+                    ) { index, collection in
+                        collectionRow(collection, index: index)
+                    }
+                }
+            }
+            .frame(minHeight: 260)
+
+            Divider()
+            HStack {
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("cancel-existing-collection")
+                Spacer()
+                Button("Add to This Collection") {
+                    guard let collection = collections.first(where: {
+                        $0.identity == selection
+                    }) else { return }
+                    onSelect(collection)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(selection == nil || isLoading || errorMessage != nil)
+                .accessibilityIdentifier("confirm-existing-collection")
+            }
+            .padding(16)
+        }
+        .frame(width: 520, height: 430)
+        .onAppear {
+            focus(selectedIdentity ?? collections.first?.identity)
+        }
+        .onChange(of: collections) {
+            guard selection == nil else { return }
+            focus($1.first?.identity)
+        }
+    }
+
+    private func collectionRow(
+        _ collection: EngineSupervisor.CatalogCollection,
+        index: Int
+    ) -> some View {
+        Button {
+            selection = collection.identity
+        } label: {
+            HStack(spacing: 10) {
+                Image(
+                    systemName: selection == collection.identity
+                        ? "checkmark.circle.fill" : "circle"
+                )
+                .foregroundStyle(
+                    selection == collection.identity
+                        ? Color.accentColor : Color.secondary
+                )
+                .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(collection.label)
+                        .font(.body.bold())
+                    Text(detail(for: collection))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("existing-collection-\(index)")
+        .accessibilityLabel(collection.label)
+        .accessibilityValue(detail(for: collection))
+        .accessibilityAddTraits(
+            selection == collection.identity ? .isSelected : []
+        )
+        .focused($keyboardFocus, equals: collection.identity)
+        .accessibilityFocused($accessibilityFocus, equals: collection.identity)
+    }
+
+    private func focus(_ identity: EngineSupervisor.CatalogCollectionIdentity?) {
+        selection = identity
+        keyboardFocus = identity
+        accessibilityFocus = identity
+    }
+
+    private func detail(for collection: EngineSupervisor.CatalogCollection) -> String {
+        switch collection {
+        case .dated(_, _, let startDate, let endDate):
+            return startDate == endDate ? startDate : "\(startDate) through \(endDate)"
+        case .ongoing(_, _, let parts):
+            let years = parts.map(\.year).map(String.init).joined(separator: ", ")
+            return "Ongoing · \(years)"
+        }
+    }
+}
+
 private struct RecoverySheet: View {
     private enum FocusTarget: Hashable {
         case finish
@@ -1780,6 +1962,33 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
         )
     }
 
+    func catalogCollections(
+        path: String
+    ) async throws -> [EngineSupervisor.CatalogCollection] {
+        [
+            .dated(
+                identity: .dated(
+                    year: "2019",
+                    directory: "2019-07-14 +6d Brittany"
+                ),
+                label: "Brittany",
+                startDate: "2019-07-14",
+                endDate: "2019-07-20"
+            ),
+            .ongoing(
+                identity: .ongoing(key: "kids"),
+                label: "Kids",
+                parts: [
+                    .init(
+                        year: 2019,
+                        yearDirectory: "2019",
+                        collectionDirectory: "z Kids"
+                    )
+                ]
+            )
+        ]
+    }
+
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
         .init(
             sourcePath: sourcePath,
@@ -1813,18 +2022,29 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
     func reviewImport(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
+        destination: EngineSupervisor.ImportDestination,
         dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> EngineSupervisor.ImportReview {
         let scan = try await scanImport(sourcePath: sourcePath)
+        let collectionName: String
+        let destinationPath: String
+        switch destination {
+        case .create(let name):
+            collectionName = name
+            destinationPath = "\(catalogPath)/2026/2026-10-10 \(name)"
+        case .existing(.dated(let year, let directory)):
+            collectionName = "Brittany"
+            destinationPath = "\(catalogPath)/\(year)/\(directory)"
+        case .existing(.ongoing):
+            collectionName = "Kids"
+            destinationPath = "\(catalogPath)/2019/z Kids"
+        }
         return .init(
             scan: scan,
             collectionName: collectionName,
-            destinationMode: destinationMode,
-            destinationPath: "\(catalogPath)/2026/\(acceptedDate) \(collectionName)",
-            acceptedDate: acceptedDate,
+            destination: destination,
+            destinationPath: destinationPath,
+            acceptedDate: "2026-10-10",
             dateResolution: dateResolution,
             requiredDecisionCount: dateResolution == nil ? 1 : 0,
             transferCount: dateResolution == nil ? 8 : scan.mediaCount,

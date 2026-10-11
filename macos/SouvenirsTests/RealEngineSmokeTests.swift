@@ -69,6 +69,69 @@ final class RealEngineSmokeTests: XCTestCase {
         try await supervisor.stop()
     }
 
+    func testRealEngineReviewsExactDatedAndOngoingCollections() async throws {
+        let fixture = try makeFixture(fileCount: 1, bytesPerFile: 32)
+        let supervisor = EngineSupervisor()
+        _ = try await supervisor.start()
+        addTeardownBlock {
+            try? await supervisor.stop()
+        }
+        _ = try await supervisor.handshake()
+        _ = try await supervisor.createCatalog(
+            path: fixture.catalog.path,
+            displayName: "Existing Archive"
+        )
+        try FileManager.default.createDirectory(
+            at: fixture.catalog
+                .appendingPathComponent("2026")
+                .appendingPathComponent("2026-10-10 Existing"),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: fixture.catalog
+                .appendingPathComponent("2026")
+                .appendingPathComponent("z Kids"),
+            withIntermediateDirectories: true
+        )
+
+        let collections = try await supervisor.catalogCollections(
+            path: fixture.catalog.path
+        )
+        XCTAssertTrue(collections.contains {
+            $0.identity == .dated(
+                year: "2026",
+                directory: "2026-10-10 Existing"
+            )
+        })
+        XCTAssertTrue(collections.contains {
+            $0.identity == .ongoing(key: "kids")
+        })
+
+        let dated = try await supervisor.reviewImport(
+            catalogPath: fixture.catalog.path,
+            sourcePath: fixture.source.path,
+            destination: .existing(
+                identity: .dated(
+                    year: "2026",
+                    directory: "2026-10-10 Existing"
+                )
+            ),
+            dateResolution: .asShown
+        )
+        XCTAssertEqual(dated.collectionName, "Existing")
+        XCTAssertTrue(dated.destinationPath.hasSuffix("2026/2026-10-10 Existing"))
+
+        let ongoing = try await supervisor.reviewImport(
+            catalogPath: fixture.catalog.path,
+            sourcePath: fixture.source.path,
+            destination: .existing(identity: .ongoing(key: "kids")),
+            dateResolution: .asShown
+        )
+        XCTAssertEqual(ongoing.collectionName, "Kids")
+        XCTAssertTrue(ongoing.destinationPath.hasSuffix("2026/z Kids"))
+        try await supervisor.stop()
+    }
+
     func testRealEngineCancellationInterruptsRemainingCopies() async throws {
         let fixture = try makeFixture(fileCount: 3, bytesPerFile: 32)
         let supervisor = EngineSupervisor(
@@ -381,9 +444,7 @@ final class RealEngineSmokeTests: XCTestCase {
         return try await supervisor.reviewImport(
             catalogPath: fixture.catalog.path,
             sourcePath: fixture.source.path,
-            collectionName: collectionName,
-            destinationMode: .create,
-            acceptedDate: "2026-10-10",
+            destination: .create(collectionName: collectionName),
             dateResolution: .asShown
         )
     }

@@ -358,7 +358,7 @@ final class ImportExecutionModelTests: XCTestCase {
                 ]
             ),
             collectionName: "Dolomites",
-            destinationMode: .create,
+            destination: .create(collectionName: "Dolomites"),
             destinationPath: "/Volumes/photos/Family Catalog/2026/2026-10-10 Dolomites",
             acceptedDate: "2026-10-10",
             dateResolution: .asShown,

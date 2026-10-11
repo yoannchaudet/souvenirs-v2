@@ -51,10 +51,68 @@ final class ImportPlanningModelTests: XCTestCase {
         let model = makeModel(engine: engine)
         await model.load()
 
-        await model.setDestinationMode(.existing)
+        await model.loadCollections()
+        guard let collection = model.availableCollections.first else {
+            return XCTFail("Expected a catalog collection")
+        }
+        await model.selectExistingCollection(collection)
 
         XCTAssertEqual(engine.lastDestinationMode, .existing)
-        XCTAssertEqual(model.review?.destinationMode, .existing)
+        XCTAssertEqual(
+            model.review?.destination,
+            .existing(identity: collection.identity)
+        )
+    }
+
+    func testOngoingSelectionUsesExactIdentityAndCreateRestoresName() async {
+        let engine = FakeImportPlanningEngine()
+        let model = makeModel(engine: engine)
+        await model.load()
+        model.collectionName = "Family Trip"
+        model.collectionNameChanged()
+        await model.loadCollections()
+        guard let ongoing = model.availableCollections.last else {
+            return XCTFail("Expected an ongoing collection")
+        }
+
+        await model.selectExistingCollection(ongoing)
+
+        XCTAssertEqual(
+            engine.lastDestination,
+            .existing(identity: .ongoing(key: "kids"))
+        )
+        XCTAssertEqual(model.collectionName, "Kids")
+        XCTAssertEqual(model.selectedExistingCollection, ongoing)
+
+        await model.useCreateDestination()
+
+        XCTAssertEqual(model.collectionName, "Family Trip")
+        XCTAssertNil(model.selectedExistingCollection)
+        XCTAssertEqual(
+            engine.lastDestination,
+            .create(collectionName: "Family Trip")
+        )
+    }
+
+    func testUnavailableDestinationPreservesSelectedIdentity() async {
+        let engine = FakeImportPlanningEngine()
+        let model = makeModel(engine: engine)
+        await model.load()
+        await model.loadCollections()
+        engine.reviewError = EngineSupervisor.SupervisorError.protocolError(
+            code: "destination_unavailable",
+            message: "The selected collection is no longer available. Choose it again."
+        )
+        guard let collection = model.availableCollections.first else {
+            return XCTFail("Expected a catalog collection")
+        }
+
+        await model.selectExistingCollection(collection)
+
+        XCTAssertEqual(model.selectedExistingCollection, collection)
+        XCTAssertEqual(model.destination, .existing(identity: collection.identity))
+        XCTAssertEqual(model.errorCode, "destination_unavailable")
+        XCTAssertFalse(model.canStart)
     }
 
     func testScanFailureIsActionableAndBlocksStart() async {
@@ -201,14 +259,43 @@ final class ImportPlanningModelTests: XCTestCase {
 @MainActor
 private final class FakeImportPlanningEngine: CatalogEngineClient {
     var error: Error?
+    var reviewError: Error?
     var lastCollectionName: String?
     var lastDestinationMode: EngineSupervisor.ImportDestinationMode?
+    var lastDestination: EngineSupervisor.ImportDestination?
     var includesDeferredDate = false
     var supportsUTCConversion = true
     var scanErrors: [Error] = []
     private(set) var scannedSourcePaths: [String] = []
     var pauseNextScan = false
     private var scanContinuation: CheckedContinuation<Void, Never>?
+
+    func catalogCollections(
+        path: String
+    ) async throws -> [EngineSupervisor.CatalogCollection] {
+        [
+            .dated(
+                identity: .dated(
+                    year: "2019",
+                    directory: "2019-07-14 +6d Brittany"
+                ),
+                label: "Brittany",
+                startDate: "2019-07-14",
+                endDate: "2019-07-20"
+            ),
+            .ongoing(
+                identity: .ongoing(key: "kids"),
+                label: "Kids",
+                parts: [
+                    .init(
+                        year: 2019,
+                        yearDirectory: "2019",
+                        collectionDirectory: "z Kids"
+                    )
+                ]
+            )
+        ]
+    }
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
         scannedSourcePaths.append(sourcePath)
@@ -275,22 +362,30 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
     func reviewImport(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
+        destination: EngineSupervisor.ImportDestination,
         dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> EngineSupervisor.ImportReview {
-        if let error { throw error }
+        if let reviewError { throw reviewError }
+        let collectionName: String
+        switch destination {
+        case .create(let name):
+            collectionName = name
+        case .existing(.dated):
+            collectionName = "Brittany"
+        case .existing(.ongoing):
+            collectionName = "Kids"
+        }
         lastCollectionName = collectionName
-        lastDestinationMode = destinationMode
+        lastDestinationMode = destination.mode
+        lastDestination = destination
         let scan = scan(sourcePath: sourcePath)
         let deferred = includesDeferredDate ? 1 : 0
         return .init(
             scan: scan,
             collectionName: collectionName,
-            destinationMode: destinationMode,
-            destinationPath: "\(catalogPath)/2026/\(acceptedDate) \(collectionName)",
-            acceptedDate: acceptedDate,
+            destination: destination,
+            destinationPath: "\(catalogPath)/2026/2026-10-10 \(collectionName)",
+            acceptedDate: "2026-10-10",
             dateResolution: dateResolution,
             requiredDecisionCount: dateResolution == nil ? 1 : 0,
             transferCount: dateResolution == nil ? 8 - deferred : 12 - deferred,

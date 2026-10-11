@@ -189,6 +189,89 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
+    func testSelectsDatedCollectionAndCancelPreservesCreateDestination() throws {
+        let app = launch(scenario: "import-flow")
+        let sheet = openImportReview(app)
+        let destinationButton = sheet.buttons["import-destination-mode"]
+
+        destinationButton.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["existing-collection-selector"]
+                .waitForExistence(timeout: 3)
+        )
+        app.buttons["existing-collection-0"].click()
+        app.buttons["cancel-existing-collection"].click()
+
+        XCTAssertTrue(app.textFields["import-collection-name"].waitForExistence(timeout: 3))
+        XCTAssertEqual(
+            app.textFields["import-collection-name"].value as? String,
+            "Dolomites"
+        )
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: destinationButton
+        )
+        waitForExpectations(timeout: 3)
+
+        destinationButton.click()
+        app.buttons["existing-collection-0"].click()
+        app.buttons["confirm-existing-collection"].click()
+
+        let selected = app.staticTexts["import-collection-name"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 3))
+        XCTAssertEqual(selected.value as? String, "Brittany")
+        XCTAssertEqual(destinationButton.label, "Change…")
+
+        destinationButton.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["existing-collection-selector"]
+                .waitForExistence(timeout: 3)
+        )
+        app.buttons["cancel-existing-collection"].click()
+        XCTAssertTrue(sheet.buttons["import-create-new-destination"].exists)
+    }
+
+    @MainActor
+    func testSelectsOngoingCollection() throws {
+        let app = launch(scenario: "import-flow")
+        let sheet = openImportReview(app)
+
+        sheet.buttons["import-destination-mode"].click()
+        XCTAssertTrue(app.buttons["existing-collection-1"].waitForExistence(timeout: 3))
+        app.buttons["existing-collection-1"].click()
+        app.buttons["confirm-existing-collection"].click()
+
+        let selected = app.staticTexts["import-collection-name"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 3))
+        XCTAssertEqual(selected.value as? String, "Kids")
+        XCTAssertTrue(sheet.buttons["start-import"].isEnabled)
+    }
+
+    @MainActor
+    func testUnavailableExistingCollectionRemainsSelected() throws {
+        let app = launch(scenario: "import-destination-unavailable")
+        let sheet = openImportReview(app)
+
+        sheet.buttons["import-destination-mode"].click()
+        app.buttons["existing-collection-0"].click()
+        app.buttons["confirm-existing-collection"].click()
+
+        XCTAssertTrue(
+            sheet.staticTexts["import-planning-error"].waitForExistence(timeout: 3)
+        )
+        XCTAssertTrue(app.staticTexts["import-collection-name"].exists)
+        XCTAssertEqual(
+            app.staticTexts["import-collection-name"].value as? String,
+            "Brittany"
+        )
+        XCTAssertEqual(
+            sheet.buttons["import-destination-mode"].label,
+            "Change…"
+        )
+        XCTAssertFalse(sheet.buttons["start-import"].isEnabled)
+    }
+
+    @MainActor
     func testImportPlanningSheetContainsFocusAndEscapeRestoresLauncher() throws {
         let app = launch(scenario: "import-flow")
 

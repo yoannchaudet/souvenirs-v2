@@ -9,13 +9,12 @@ protocol CatalogEngineClient: AnyObject {
         displayName: String
     ) async throws -> EngineSupervisor.CatalogLocation
     func openCatalog(path: String) async throws -> EngineSupervisor.CatalogLocation
+    func catalogCollections(path: String) async throws -> [EngineSupervisor.CatalogCollection]
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan
     func reviewImport(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
+        destination: EngineSupervisor.ImportDestination,
         dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> EngineSupervisor.ImportReview
 }
@@ -39,6 +38,12 @@ extension EngineAppModel: CatalogEngineClient {
         try await supervisor.openCatalog(path: path)
     }
 
+    func catalogCollections(
+        path: String
+    ) async throws -> [EngineSupervisor.CatalogCollection] {
+        try await supervisor.catalogCollections(path: path)
+    }
+
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
         try await supervisor.scanImport(sourcePath: sourcePath)
     }
@@ -46,17 +51,13 @@ extension EngineAppModel: CatalogEngineClient {
     func reviewImport(
         catalogPath: String,
         sourcePath: String,
-        collectionName: String,
-        destinationMode: EngineSupervisor.ImportDestinationMode,
-        acceptedDate: String,
+        destination: EngineSupervisor.ImportDestination,
         dateResolution: EngineSupervisor.ImportDateResolution?
     ) async throws -> EngineSupervisor.ImportReview {
         try await supervisor.reviewImport(
             catalogPath: catalogPath,
             sourcePath: sourcePath,
-            collectionName: collectionName,
-            destinationMode: destinationMode,
-            acceptedDate: acceptedDate,
+            destination: destination,
             dateResolution: dateResolution
         )
     }
@@ -241,6 +242,11 @@ final class ImportPlanningModel: ObservableObject {
     @Published private(set) var review: EngineSupervisor.ImportReview?
     @Published var collectionName = ""
     @Published private(set) var destinationMode: EngineSupervisor.ImportDestinationMode = .create
+    @Published private(set) var selectedExistingCollection:
+        EngineSupervisor.CatalogCollection?
+    @Published private(set) var availableCollections: [EngineSupervisor.CatalogCollection] = []
+    @Published private(set) var isLoadingCollections = false
+    @Published private(set) var collectionSelectionError: String?
     @Published private(set) var dateResolution: EngineSupervisor.ImportDateResolution?
     @Published private(set) var dateChoiceSources:
         [EngineSupervisor.ImportDateSourceSummary] = []
@@ -255,6 +261,7 @@ final class ImportPlanningModel: ObservableObject {
     @Published private(set) var acceptedDate = ""
     private let engine: CatalogEngineClient
     private var reviewGeneration = 0
+    private var createCollectionName = ""
 
     init(
         engine: CatalogEngineClient,
@@ -271,7 +278,7 @@ final class ImportPlanningModel: ObservableObject {
         return review.canStart
             && review.reviewedPlan != nil
             && review.collectionName == collectionName
-            && review.destinationMode == destinationMode
+            && review.destination == destination
             && review.acceptedDate == acceptedDate
             && review.dateResolution == dateResolution
             && !isLoading
@@ -353,6 +360,13 @@ final class ImportPlanningModel: ObservableObject {
         return "“\(collectionName)”"
     }
 
+    var destination: EngineSupervisor.ImportDestination {
+        if let selectedExistingCollection {
+            return .existing(identity: selectedExistingCollection.identity)
+        }
+        return .create(collectionName: collectionName)
+    }
+
     func load() async {
         guard !isLoading else { return }
         scan = nil
@@ -368,6 +382,7 @@ final class ImportPlanningModel: ObservableObject {
                 $0.state == .needsConfirmation
             }
             collectionName = scan.suggestedCollectionName
+            createCollectionName = collectionName
             acceptedDate = scan.suggestedAcceptedDate ?? ""
             await refreshReview()
         } catch {
@@ -386,9 +401,7 @@ final class ImportPlanningModel: ObservableObject {
         guard scan != nil else { return }
         reviewGeneration += 1
         let generation = reviewGeneration
-        let collectionName = collectionName
-        let destinationMode = destinationMode
-        let acceptedDate = acceptedDate
+        let destination = destination
         let dateResolution = dateResolution
         isLoading = true
         errorCode = nil
@@ -398,9 +411,7 @@ final class ImportPlanningModel: ObservableObject {
             let result = try await engine.reviewImport(
                 catalogPath: catalog.path,
                 sourcePath: sourcePath,
-                collectionName: collectionName,
-                destinationMode: destinationMode,
-                acceptedDate: acceptedDate,
+                destination: destination,
                 dateResolution: dateResolution
             )
             guard generation == reviewGeneration else { return }
@@ -419,6 +430,8 @@ final class ImportPlanningModel: ObservableObject {
     }
 
     func collectionNameChanged() {
+        guard destinationMode == .create else { return }
+        createCollectionName = collectionName
         reviewGeneration += 1
         review = nil
         errorCode = nil
@@ -427,8 +440,29 @@ final class ImportPlanningModel: ObservableObject {
         isPrepared = false
     }
 
-    func setDestinationMode(_ mode: EngineSupervisor.ImportDestinationMode) async {
-        destinationMode = mode
+    func loadCollections() async {
+        guard !isLoadingCollections else { return }
+        isLoadingCollections = true
+        collectionSelectionError = nil
+        do {
+            availableCollections = try await engine.catalogCollections(path: catalog.path)
+        } catch {
+            collectionSelectionError = userMessage(for: error)
+        }
+        isLoadingCollections = false
+    }
+
+    func selectExistingCollection(_ collection: EngineSupervisor.CatalogCollection) async {
+        selectedExistingCollection = collection
+        destinationMode = .existing
+        collectionName = collection.label
+        await refreshReview()
+    }
+
+    func useCreateDestination() async {
+        selectedExistingCollection = nil
+        destinationMode = .create
+        collectionName = createCollectionName
         await refreshReview()
     }
 
