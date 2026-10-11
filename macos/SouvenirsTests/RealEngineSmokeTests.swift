@@ -69,6 +69,72 @@ final class RealEngineSmokeTests: XCTestCase {
         try await supervisor.stop()
     }
 
+    func testRealEngineCancellationInterruptsRemainingCopies() async throws {
+        let fixture = try makeFixture(fileCount: 3, bytesPerFile: 32)
+        let supervisor = EngineSupervisor(
+            arguments: ["--test-progress-delay-ms", "2000"]
+        )
+        _ = try await supervisor.start()
+        addTeardownBlock {
+            try? await supervisor.stop()
+        }
+        _ = try await supervisor.handshake()
+        _ = try await supervisor.createCatalog(
+            path: fixture.catalog.path,
+            displayName: "Cancellation Catalog"
+        )
+        let review = try await plannedImport(
+            supervisor: supervisor,
+            fixture: fixture,
+            collectionName: "Cancellation Import"
+        )
+        let operationID = try await supervisor.requestOperation(
+            method: "operation.start",
+            parameters: StartImportParameters(
+                reviewedPlan: try XCTUnwrap(review.reviewedPlan)
+            )
+        )
+        let stream = try await supervisor.events(for: operationID)
+        var events: [EngineSupervisor.OperationEvent] = []
+        var cancellationAccepted = false
+        for try await event in stream {
+            events.append(event)
+            if !cancellationAccepted,
+               case .progress(
+                   completedUnits: 1,
+                   totalUnits: _,
+                   message: _
+               ) = event.payload {
+                let activeInspection =
+                    try await supervisor.inspectUnfinishedOperation(
+                        catalogPath: fixture.catalog.path
+                    )
+                XCTAssertNil(activeInspection)
+                let accepted = try await supervisor.cancel(operationID: operationID)
+                XCTAssertEqual(accepted.operationID, operationID)
+                cancellationAccepted = true
+            }
+        }
+
+        XCTAssertTrue(cancellationAccepted)
+        XCTAssertEqual(events.map(\.sequence), Array(0..<UInt64(events.count)))
+        XCTAssertEqual(events.filter(\.isTerminal).count, 1)
+        guard case .cancelled(copiedCount: 1) = events.last?.payload else {
+            return XCTFail("Expected cancellation after the first durable copy")
+        }
+        try verifyCatalog(
+            fixture.catalog,
+            collectionName: "Cancellation Import",
+            expectedFiles: 1
+        )
+        try verifyCancelledJournal(fixture.catalog, operationID: operationID)
+        let unfinished = try await supervisor.inspectUnfinishedOperation(
+            catalogPath: fixture.catalog.path
+        )
+        XCTAssertNil(unfinished)
+        try await supervisor.stop()
+    }
+
     func testRealEnginePreservesCompoundItemAndVerifiesOriginals() async throws {
         let fixture = try makeCompoundFixture()
         let supervisor = EngineSupervisor()
@@ -377,6 +443,29 @@ final class RealEngineSmokeTests: XCTestCase {
                 .joined()
             XCTAssertEqual(entries[filename], digest)
         }
+    }
+
+    private func verifyCancelledJournal(
+        _ catalog: URL,
+        operationID: String
+    ) throws {
+        let journalDirectory = catalog
+            .appendingPathComponent(".souvenirs", isDirectory: true)
+            .appendingPathComponent("journal", isDirectory: true)
+        let journal = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: journalDirectory,
+                includingPropertiesForKeys: nil
+            ).first { $0.lastPathComponent.contains(operationID) }
+        )
+        let lines = try String(contentsOf: journal, encoding: .utf8)
+            .split(separator: "\n")
+        let lastLine = try XCTUnwrap(lines.last)
+        let outcome = try JSONSerialization.jsonObject(
+            with: Data(lastLine.utf8)
+        ) as? [String: String]
+        XCTAssertEqual(outcome?["kind"], "outcome")
+        XCTAssertEqual(outcome?["outcome"], "cancelled")
     }
 }
 

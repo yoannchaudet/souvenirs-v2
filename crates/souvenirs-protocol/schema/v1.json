@@ -231,9 +231,15 @@
             {
               "type": "object",
               "required": [
+                "copied_count",
                 "event"
               ],
               "properties": {
+                "copied_count": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0.0
+                },
                 "event": {
                   "type": "string",
                   "enum": [
