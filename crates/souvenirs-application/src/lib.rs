@@ -24,8 +24,8 @@ use souvenirs_domain::catalog::{
 };
 use souvenirs_domain::datetime::{
     confirm_batch, confirm_candidate, AcceptedDateTime, AcceptedDateTimeSource,
-    ConfirmationDecision, ConfirmationRequirement, DateTimeResolution, DateTimeSource,
-    PendingConfirmationBatch,
+    ConfirmationDecision, ConfirmationRequirement, DateTimeError, DateTimeResolution,
+    DateTimeSource, PendingConfirmationBatch,
 };
 use souvenirs_domain::names::CatalogLabel;
 use souvenirs_domain::relationships::{
@@ -906,10 +906,17 @@ fn interpretation_preview(
     else {
         return Ok(None);
     };
-    let as_shown = confirm_candidate(first.pending.clone(), as_shown)
-        .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?;
-    let converted = confirm_candidate(first.pending.clone(), converted)
-        .map_err(|error| ImportPlanningError::InvalidMetadata(error.to_string()))?;
+    let preview = |decision| match confirm_candidate(first.pending.clone(), decision) {
+        Ok(accepted) => Ok(Some(accepted)),
+        Err(DateTimeError::UtcInterpretationOutOfRange) => Ok(None),
+        Err(error) => Err(ImportPlanningError::InvalidMetadata(error.to_string())),
+    };
+    let Some(as_shown) = preview(as_shown)? else {
+        return Ok(None);
+    };
+    let Some(converted) = preview(converted)? else {
+        return Ok(None);
+    };
     Ok(Some((
         display_time(as_shown.wall_clock.time()),
         display_time(converted.wall_clock.time()),

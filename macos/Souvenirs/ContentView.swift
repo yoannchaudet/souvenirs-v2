@@ -1047,13 +1047,14 @@ private struct ImportPlanningSheet: View {
                         .accessibilityIdentifier("import-date-selection")
                         .accessibilityLabel("Selected date interpretation")
                         .accessibilityValue(selectedDateSummary(resolution))
+                        .onAppear {
+                            keyboardFocus = .dateSummary
+                            dateFocused = .dateSummary
+                        }
                     Spacer()
                     Button("Change") {
                         Task {
                             await model.changeDateResolution()
-                            await Task.yield()
-                            keyboardFocus = .asShown
-                            dateFocused = .asShown
                         }
                     }
                     .accessibilityIdentifier("change-date-selection")
@@ -1134,9 +1135,6 @@ private struct ImportPlanningSheet: View {
         Button {
             Task {
                 await model.resolveDate(value)
-                await Task.yield()
-                keyboardFocus = .dateSummary
-                dateFocused = .dateSummary
             }
         } label: {
             VStack(alignment: .leading, spacing: 2) {
@@ -1163,6 +1161,11 @@ private struct ImportPlanningSheet: View {
         )
         .focused($keyboardFocus, equals: focus)
         .accessibilityFocused($dateFocused, equals: focus)
+        .onAppear {
+            guard focus == .asShown else { return }
+            keyboardFocus = .asShown
+            dateFocused = .asShown
+        }
     }
 
     private var dateFallbackDescription: String {
@@ -1171,7 +1174,7 @@ private struct ImportPlanningSheet: View {
                 These items will stay on the source until you select an interpretation.
                 """
         }
-        if model.isStartBlocked {
+        if !model.canStart {
             return """
                 These items will be skipped, stay on the source, and remain available for a \
                 later import unless you select an interpretation.
@@ -1250,11 +1253,11 @@ private struct ImportPlanningSheet: View {
     ) -> String {
         switch summary.source {
         case .filenamePattern:
-            return "\(summary.itemCount) filename date proposals need confirmation"
+            return "\(summary.itemCount) filename date proposals"
         case .containerCreationTime:
-            return "\(summary.itemCount) ambiguous container dates need confirmation"
+            return "\(summary.itemCount) ambiguous container dates"
         default:
-            return "\(summary.itemCount) \(dateSourceName(summary.source)) dates need confirmation"
+            return "\(summary.itemCount) \(dateSourceName(summary.source)) dates"
         }
     }
 
