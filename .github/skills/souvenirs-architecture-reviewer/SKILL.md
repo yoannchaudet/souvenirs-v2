@@ -1,6 +1,6 @@
 ---
 name: souvenirs-architecture-reviewer
-description: Review consequential Souvenirs technical choices and diffs against the complete architecture. Use for changes to component boundaries, shared domain rules, protocol or schema contracts, storage semantics, concurrency, recovery, dependencies, or abstractions used by multiple flows. Do not use for isolated copy, styling, fixture, or test-maintenance changes that preserve existing contracts.
+description: Review an unresolved, consequential Souvenirs architecture risk that normal code review cannot adequately cover. Use for material questions about shared policy, contracts, durable state, concurrency, recovery, or cross-flow abstractions. Do not use for routine implementation review or changes that preserve existing boundaries.
 user-invocable: true
 ---
 
@@ -10,8 +10,8 @@ Act as an architecture reviewer. Evaluate whether a proposed design or completed
 fits the complete Souvenirs system.
 
 Do not modify repository source, publish changes, implement fixes, or redesign unrelated
-areas. Building, running tests, and executing the application are expected when they are
-needed for evidence. Report only findings supported by repository evidence.
+areas. Use existing test and build results when they are current. Run the smallest
+additional check needed to confirm a material finding.
 
 ## When not to use
 
@@ -25,17 +25,13 @@ Do not invoke this reviewer for:
 
 ## Review inputs
 
-Read:
+Start with the task, approved plan, and complete diff. Read only the specification
+sections and adjacent implementations that govern a changed boundary. Check related
+issues or pull requests only when they can change the verdict.
 
-- `AGENTS.md`
-- `docs/README.md`
-- `docs/architecture.md`
-- the relevant sections of `docs/catalog.md`, `docs/operations.md`, and
-  `docs/storage.md`
-- the issue and approved plan, when present
-- the complete proposed diff, when the change is implemented
-- adjacent implementations that own or consume the affected contracts
-- related open issues and active pull requests when they affect the decision
+Do not read every architecture document by default. Do not repeat repository exploration
+or validation that the implementation session already reports with current evidence,
+unless that result is itself evidence for a blocking finding.
 
 Distinguish current implementation, accepted requirements, and future plans.
 
@@ -50,43 +46,17 @@ presenting it as a confirmed finding.
 
 ## Review questions
 
-### System fit
+Review the changed boundaries for:
 
-- Does the change preserve the product and architecture invariants?
-- Does the selected layer own this policy?
-- Does the change introduce a second implementation of an existing rule?
-- Can all clients use the behavior without reimplementing policy?
-- Does the design remain understandable after later planned work lands?
+- ownership of shared policy and avoidance of duplicate rules
+- explicit producer and consumer contracts
+- deterministic, compatible durable data
+- safe interruption, cancellation, retry, and recovery
+- an independently safe pull request boundary
+- focused tests for the affected invariant
 
-### Contracts
-
-- Are protocol, schema, command, and serialized-data changes explicit and version-safe?
-- Do producers and consumers agree on ordering, compatibility, and error semantics?
-- Does canonical data remain deterministic?
-- Does the change preserve existing saved plans, journals, manifests, and archives, or
-  provide an explicit migration or version boundary?
-
-### State and failure behavior
-
-- Are ownership, concurrency, and cancellation boundaries clear?
-- Can interruption leave an unrecoverable or falsely completed state?
-- Do journal records, filesystem state, and user-visible outcomes remain consistent?
-- Are errors structured, attributable, and actionable?
-- Does retry or recovery preserve idempotence?
-
-### Pull request boundary
-
-- Is the pull request independently safe and reviewable?
-- Does an intermediate pull request preserve a valid system state?
-- Are dependencies sequenced before their consumers?
-- Is the change below the repository's 2,000-line pull request limit?
-
-### Verification
-
-- Do tests verify the architectural invariant rather than only implementation details?
-- Are cross-language, real-storage, process, or interruption boundaries tested at the
-  appropriate level?
-- Can a regression pass because each component is tested only in isolation?
+Stop when these questions are answered. Do not expand the review into unaffected
+architecture or future cleanup.
 
 ## Finding levels
 
@@ -100,17 +70,6 @@ Classify every finding:
 
 Do not report preference-only alternatives. If the change is sound, return
 **No architecture findings**.
-
-Calibration examples:
-
-- A new Swift client reproduces Rust plan-ordering rules instead of consuming canonical
-  plan data: **Important**, because shared policy now has two owners.
-- A local helper is renamed without changing its inputs, outputs, or consumers: no
-  architecture finding, because no boundary or invariant changes.
-- A journal outcome can become durable before the corresponding filesystem state:
-  **Blocking**, because recovery can falsely report completion.
-- A useful storage abstraction would simplify unrelated later work but is unnecessary for
-  the current invariant: **Follow-up**, not a reason to expand the pull request.
 
 ## Output
 
