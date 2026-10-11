@@ -29,9 +29,9 @@ use souvenirs_domain::relationships::{
 };
 use souvenirs_domain::source::{SourceFile, SourceFileId, SourcePath};
 use souvenirs_storage::{
-    read_operation_records, CatalogConfig, CatalogInitializationError, CatalogLayout,
-    DurableTransition, OperationRecord, StorageCapabilities, StorageCapabilityError,
-    WriteSuitability, FORMAT_VERSION,
+    is_operation_journal_file_name, read_operation_records, CatalogConfig,
+    CatalogInitializationError, CatalogLayout, DurableTransition, OperationRecord,
+    StorageCapabilities, StorageCapabilityError, WriteSuitability, FORMAT_VERSION,
 };
 use time::{Date, UtcOffset};
 
@@ -248,7 +248,7 @@ impl OperationInspectionService {
             .collect::<Result<Vec<_>, _>>()?;
         paths.sort();
         for path in paths {
-            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            if !path.file_name().is_some_and(is_operation_journal_file_name) {
                 continue;
             }
             if path
@@ -1079,6 +1079,13 @@ mod tests {
             .unwrap();
         drop(journal);
         lock.release().unwrap();
+        fs::write(
+            layout
+                .journal_directory()
+                .join("._20260101-000000-import.jsonl"),
+            b"not a journal",
+        )
+        .unwrap();
         fs::remove_dir(&source).unwrap();
 
         let operation = OperationInspectionService::unfinished(&catalog)
@@ -1089,6 +1096,25 @@ mod tests {
         assert_eq!(operation.source_name, "EOS_DIGITAL");
         assert_eq!(operation.total_count, 12);
         assert!(!operation.source_available);
+    }
+
+    #[test]
+    fn reports_malformed_non_appledouble_journal() {
+        let directory = tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Family").unwrap();
+        let journals = souvenirs_storage::CatalogLayout::new(directory.path()).journal_directory();
+        fs::write(
+            journals.join("._20260101-000000-import.jsonl"),
+            b"not a journal",
+        )
+        .unwrap();
+        let malformed = journals.join("20260101-000000-import.jsonl");
+        fs::write(&malformed, b"not a journal\n").unwrap();
+
+        assert!(matches!(
+            OperationInspectionService::unfinished(directory.path()),
+            Err(CatalogServiceError::InvalidOperationJournal { path, .. }) if path == malformed
+        ));
     }
 
     #[test]

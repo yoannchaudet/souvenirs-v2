@@ -31,10 +31,10 @@ use souvenirs_domain::source::{
     SourcePath,
 };
 use souvenirs_storage::{
-    CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError, ManifestReplacementRequest,
-    OperationJournal, OperationOutcome, OperationRecord, PortableDestinationObserver, RecoveryCopy,
-    RecoveryDirectory, RecoveryManifest, RecoveryMode, RecoveryOutcome, RecoveryRequest,
-    FORMAT_VERSION,
+    is_operation_journal_file_name, CatalogConfig, CatalogLayout, CatalogLock, CatalogPathError,
+    ManifestReplacementRequest, OperationJournal, OperationOutcome, OperationRecord,
+    PortableDestinationObserver, RecoveryCopy, RecoveryDirectory, RecoveryManifest, RecoveryMode,
+    RecoveryOutcome, RecoveryRequest, FORMAT_VERSION,
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
@@ -2558,7 +2558,7 @@ fn jsonl_files(path: &Path) -> Result<Vec<PathBuf>, CliError> {
     let mut files = fs::read_dir(path)
         .map_err(|error| CliError::io(format!("read journal directory: {error}")))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("jsonl"))
+        .filter(|path| path.file_name().is_some_and(is_operation_journal_file_name))
         .collect::<Vec<_>>();
     files.sort();
     Ok(files)

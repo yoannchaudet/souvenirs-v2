@@ -13,10 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_storage::{
-    is_source_unavailable_error, read_operation_records, CatalogLayout, CatalogLock,
-    CatalogPathError, CopyExpectation, ManifestReplacementRequest, OperationJournal,
-    OperationRecord, PortableDestinationObserver, RecoveryCopy, RecoveryDirectory, RecoveryError,
-    RecoveryManifest, RecoveryMode, RecoveryRequest, VerifiedCopyError,
+    is_operation_journal_file_name, is_source_unavailable_error, read_operation_records,
+    CatalogLayout, CatalogLock, CatalogPathError, CopyExpectation, ManifestReplacementRequest,
+    OperationJournal, OperationRecord, PortableDestinationObserver, RecoveryCopy,
+    RecoveryDirectory, RecoveryError, RecoveryManifest, RecoveryMode, RecoveryRequest,
+    VerifiedCopyError,
 };
 use time::Date;
 
@@ -795,7 +796,7 @@ fn unfinished_plan(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+        if !is_operation_journal_file_name(&entry.file_name()) {
             continue;
         }
         if path
@@ -1557,6 +1558,13 @@ mod tests {
         lock.release().unwrap();
         fs::write(
             layout.journal_directory().join(".DS_Store"),
+            b"not a journal",
+        )
+        .unwrap();
+        fs::write(
+            layout
+                .journal_directory()
+                .join("._20260101-000000-import.jsonl"),
             b"not a journal",
         )
         .unwrap();
