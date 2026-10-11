@@ -130,7 +130,7 @@ final class SouvenirsUITests: XCTestCase {
         let sheet = app.sheets.firstMatch
         XCTAssertTrue(sheet.waitForExistence(timeout: 5))
         XCTAssertTrue(
-            sheet.descendants(matching: .any)["import-review-modal"]
+            sheet.descendants(matching: .any)["import-review-sheet"]
                 .waitForExistence(timeout: 5)
         )
         XCTAssertEqual(app.sheets.count, 1)
@@ -145,10 +145,7 @@ final class SouvenirsUITests: XCTestCase {
 
         app.typeKey(.escape, modifierFlags: [])
 
-        XCTAssertTrue(
-            sheet.descendants(matching: .any)["import-review-modal"]
-                .waitForNonExistence(timeout: 3)
-        )
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 3))
         expectation(
             for: NSPredicate(format: "hasKeyboardFocus == true"),
             evaluatedWith: launcher
@@ -241,7 +238,7 @@ final class SouvenirsUITests: XCTestCase {
         let sheet = app.sheets.firstMatch
         XCTAssertTrue(sheet.waitForExistence(timeout: 5))
         XCTAssertTrue(
-            sheet.descendants(matching: .any)["recovery-modal"]
+            sheet.staticTexts["recovery-title"]
                 .waitForExistence(timeout: 5)
         )
         XCTAssertEqual(app.sheets.count, 1)
@@ -253,7 +250,7 @@ final class SouvenirsUITests: XCTestCase {
         retry.click()
         XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(
-            app.sheets.firstMatch.descendants(matching: .any)["recovery-modal"]
+            app.sheets.firstMatch.staticTexts["recovery-title"]
                 .waitForExistence(timeout: 5)
         )
         app.typeKey(.escape, modifierFlags: [])

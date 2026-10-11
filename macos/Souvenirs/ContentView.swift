@@ -941,7 +941,6 @@ private struct ImportPlanningSheet: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { importActions }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityIdentifier("import-review-modal")
         .onAppear {
             keyboardFocus = model.scan == nil ? .cancel : .collectionName
             titleFocused = true
@@ -1267,7 +1266,6 @@ private struct RecoverySheet: View {
             .padding(24)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { recoveryActions }
-        .accessibilityIdentifier("recovery-modal")
         .onAppear {
             keyboardFocus = sourceAvailable ? .finish : .retry
             titleFocused = true
