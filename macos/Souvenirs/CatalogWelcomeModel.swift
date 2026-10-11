@@ -241,6 +241,8 @@ final class ImportPlanningModel: ObservableObject {
     @Published var collectionName = ""
     @Published private(set) var destinationMode: EngineSupervisor.ImportDestinationMode = .create
     @Published private(set) var dateResolution: EngineSupervisor.ImportDateResolution?
+    @Published private(set) var dateChoiceSources:
+        [EngineSupervisor.ImportDateSourceSummary] = []
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
     @Published var showsDetails = false
@@ -274,6 +276,34 @@ final class ImportPlanningModel: ObservableObject {
             && errorMessage == nil
     }
 
+    var dateChoiceCount: Int {
+        dateChoiceSources.reduce(0) { $0 + $1.itemCount }
+    }
+
+    var asShownTime: String? {
+        dateChoiceSources.lazy.compactMap(\.asShownTime).first
+    }
+
+    var convertedFromUTCTime: String? {
+        dateChoiceSources.lazy.compactMap(\.convertedFromUTCTime).first
+    }
+
+    var isStartBlocked: Bool {
+        if errorMessage != nil { return true }
+        guard let review, !isLoading else { return false }
+        return !review.canStart || review.reviewedPlan == nil
+    }
+
+    var startImportAccessibilityHint: String {
+        if let errorMessage {
+            return "Import cannot start. \(errorMessage)"
+        }
+        if isStartBlocked {
+            return "Import cannot start because no reviewed files can be copied."
+        }
+        return "Starts the reviewed import."
+    }
+
     var title: String {
         guard let scan else { return "Reading this source…" }
         return "\(review?.transferCount ?? scan.mediaCount) new photos and videos will be copied into \(destinationDescription)"
@@ -290,6 +320,11 @@ final class ImportPlanningModel: ObservableObject {
         do {
             let scan = try await engine.scanImport(sourcePath: sourcePath)
             self.scan = scan
+            dateChoiceSources = scan.datetimeSources.filter {
+                $0.state == .needsConfirmation
+                    && $0.asShownTime != nil
+                    && $0.convertedFromUTCTime != nil
+            }
             collectionName = scan.suggestedCollectionName
             acceptedDate = scan.suggestedAcceptedDate ?? ""
             await refreshReview()
@@ -348,6 +383,11 @@ final class ImportPlanningModel: ObservableObject {
 
     func resolveDate(_ resolution: EngineSupervisor.ImportDateResolution) async {
         dateResolution = resolution
+        await refreshReview()
+    }
+
+    func changeDateResolution() async {
+        dateResolution = nil
         await refreshReview()
     }
 

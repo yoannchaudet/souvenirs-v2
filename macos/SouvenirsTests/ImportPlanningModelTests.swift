@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class ImportPlanningModelTests: XCTestCase {
-    func testLoadsScanAndBlocksUntilDateDecision() async {
+    func testLoadsScanAndCanStartWithoutOptionalDateDecision() async {
         let engine = FakeImportPlanningEngine()
         let model = makeModel(engine: engine)
 
@@ -13,11 +13,20 @@ final class ImportPlanningModelTests: XCTestCase {
         XCTAssertEqual(model.collectionName, "Dolomites")
         XCTAssertEqual(model.acceptedDate, "2026-10-10")
         XCTAssertEqual(model.review?.requiredDecisionCount, 1)
-        XCTAssertFalse(model.canStart)
+        XCTAssertEqual(model.dateChoiceCount, 4)
+        XCTAssertEqual(model.asShownTime, "12:14")
+        XCTAssertEqual(model.convertedFromUTCTime, "14:14")
+        XCTAssertTrue(model.canStart)
+        XCTAssertEqual(model.review?.transferCount, 8)
+        XCTAssertEqual(model.review?.skippedCount, 4)
 
         await model.resolveDate(.asShown)
 
         XCTAssertEqual(model.review?.dateResolution, .asShown)
+        XCTAssertEqual(model.review?.transferCount, 12)
+        XCTAssertTrue(model.canStart)
+        await model.changeDateResolution()
+        XCTAssertNil(model.dateResolution)
         XCTAssertTrue(model.canStart)
         model.prepareExecution()
         XCTAssertTrue(model.isPrepared)
@@ -116,7 +125,15 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             suggestedRangeEnd: "2026-10-12",
             pendingItemCount: 4,
             unresolvedItemCount: 0,
-            datetimeSources: [.init(source: .containerCreationTime, state: .needsConfirmation, itemCount: 4)]
+            datetimeSources: [
+                .init(
+                    source: .containerCreationTime,
+                    state: .needsConfirmation,
+                    itemCount: 4,
+                    asShownTime: "12:14",
+                    convertedFromUTCTime: "14:14"
+                )
+            ]
         )
     }
 
@@ -140,13 +157,13 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
             acceptedDate: acceptedDate,
             dateResolution: dateResolution,
             requiredDecisionCount: dateResolution == nil ? 1 : 0,
-            transferCount: 12,
-            skippedCount: 0,
-            leftOnSourceCount: 2,
-            operationCount: 14,
+            transferCount: dateResolution == nil ? 8 : 12,
+            skippedCount: dateResolution == nil ? 4 : 0,
+            leftOnSourceCount: dateResolution == nil ? 6 : 2,
+            operationCount: dateResolution == nil ? 10 : 14,
             requiredSpaceBytes: 41_000_000_000,
-            canStart: dateResolution != nil,
-            reviewedPlan: dateResolution == nil ? nil : "reviewed-plan"
+            canStart: true,
+            reviewedPlan: "reviewed-plan"
         )
     }
 

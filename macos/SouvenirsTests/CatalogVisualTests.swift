@@ -554,7 +554,15 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
             suggestedRangeEnd: "2026-10-12",
             pendingItemCount: 4,
             unresolvedItemCount: 0,
-            datetimeSources: [.init(source: .containerCreationTime, state: .needsConfirmation, itemCount: 4)]
+            datetimeSources: [
+                .init(
+                    source: .containerCreationTime,
+                    state: .needsConfirmation,
+                    itemCount: 4,
+                    asShownTime: "12:14",
+                    convertedFromUTCTime: "14:14"
+                )
+            ]
         )
     }
 
@@ -578,13 +586,13 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
             acceptedDate: acceptedDate,
             dateResolution: dateResolution,
             requiredDecisionCount: dateResolution == nil ? 1 : 0,
-            transferCount: 12,
-            skippedCount: 0,
-            leftOnSourceCount: 2,
-            operationCount: 14,
+            transferCount: dateResolution == nil ? 8 : 12,
+            skippedCount: dateResolution == nil ? 4 : 0,
+            leftOnSourceCount: dateResolution == nil ? 6 : 2,
+            operationCount: dateResolution == nil ? 10 : 14,
             requiredSpaceBytes: 41_000_000_000,
-            canStart: dateResolution != nil,
-            reviewedPlan: dateResolution == nil ? nil : "reviewed-plan"
+            canStart: true,
+            reviewedPlan: "reviewed-plan"
         )
     }
 

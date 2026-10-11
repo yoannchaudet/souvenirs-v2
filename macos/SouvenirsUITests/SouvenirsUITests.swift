@@ -85,7 +85,7 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
-    func testReviewsImportAndResolvesRequiredDecision() throws {
+    func testReviewsImportWithOptionalDateDecision() throws {
         let app = launch(scenario: "import-flow")
 
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
@@ -102,15 +102,22 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-date-decision"].exists
         )
-        XCTAssertFalse(sheet.buttons["start-import"].isEnabled)
+        XCTAssertTrue(sheet.buttons["start-import"].isEnabled)
+        XCTAssertTrue(sheet.buttons["date-as-shown"].label.contains("12:14"))
+        XCTAssertTrue(sheet.buttons["date-convert-utc"].label.contains("14:14"))
 
         sheet.buttons["date-as-shown"].click()
-        let start = sheet.buttons["start-import"]
-        expectation(
-            for: NSPredicate(format: "isEnabled == true"),
-            evaluatedWith: start
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["import-date-selection"]
+                .waitForExistence(timeout: 3)
         )
-        waitForExpectations(timeout: 3)
+        XCTAssertTrue(sheet.buttons["change-date-selection"].isEnabled)
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["import-date-selection"]
+                .label.contains("As shown")
+        )
+        sheet.buttons["change-date-selection"].click()
+        XCTAssertTrue(sheet.buttons["date-convert-utc"].waitForExistence(timeout: 3))
         sheet.descendants(matching: .any)["import-details"].click()
         XCTAssertTrue(
             sheet.descendants(matching: .any)["import-operation-summary"].exists
@@ -165,14 +172,15 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             app.staticTexts["import-planning-error"].waitForExistence(timeout: 5)
         )
-        XCTAssertFalse(activeSheet(app).buttons["start-import"].isEnabled)
+        let sheet = activeSheet(app)
+        XCTAssertFalse(sheet.buttons["start-import"].isEnabled)
+        XCTAssertTrue(sheet.staticTexts["import-start-blocked"].exists)
     }
 
     @MainActor
     func testExecutesImportAndShowsCompletedOutcome() throws {
         let app = launch(scenario: "import-execution")
         let sheet = openImportReview(app)
-        sheet.buttons["date-as-shown"].click()
         let start = sheet.buttons["start-import"]
         expectation(
             for: NSPredicate(format: "isEnabled == true"),

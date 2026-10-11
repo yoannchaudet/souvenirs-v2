@@ -222,11 +222,15 @@ public actor EngineSupervisor {
         public let source: ImportDateSource
         public let state: ImportDateState
         public let itemCount: Int
+        public let asShownTime: String?
+        public let convertedFromUTCTime: String?
 
         enum CodingKeys: String, CodingKey {
             case source
             case state
             case itemCount = "item_count"
+            case asShownTime = "as_shown_time"
+            case convertedFromUTCTime = "converted_from_utc_time"
         }
     }
 
@@ -780,7 +784,10 @@ public actor EngineSupervisor {
     public func scanImport(sourcePath: String) async throws -> ImportScan {
         let result: ImportScanResult = try await sendRequest(
             method: "import.scan",
-            parameters: ImportScanParameters(sourcePath: sourcePath),
+            parameters: ImportScanParameters(
+                sourcePath: sourcePath,
+                utcOffsetSeconds: TimeZone.current.secondsFromGMT()
+            ),
             timeout: .seconds(600)
         )
         guard result.type == "import_scan" else {
@@ -807,7 +814,8 @@ public actor EngineSupervisor {
                 collectionName: collectionName,
                 destinationMode: destinationMode,
                 acceptedDate: acceptedDate,
-                dateResolution: dateResolution
+                dateResolution: dateResolution,
+                utcOffsetSeconds: TimeZone.current.secondsFromGMT()
             ),
             timeout: .seconds(600)
         )
@@ -1869,9 +1877,11 @@ private struct CreateCatalogParameters: Encodable, Sendable {
 
 private struct ImportScanParameters: Encodable, Sendable {
     let sourcePath: String
+    let utcOffsetSeconds: Int
 
     enum CodingKeys: String, CodingKey {
         case sourcePath = "source_path"
+        case utcOffsetSeconds = "utc_offset_seconds"
     }
 }
 
@@ -1882,6 +1892,7 @@ private struct ImportReviewParameters: Encodable, Sendable {
     let destinationMode: EngineSupervisor.ImportDestinationMode
     let acceptedDate: String
     let dateResolution: EngineSupervisor.ImportDateResolution?
+    let utcOffsetSeconds: Int
 
     enum CodingKeys: String, CodingKey {
         case catalogPath = "catalog_path"
@@ -1890,6 +1901,7 @@ private struct ImportReviewParameters: Encodable, Sendable {
         case destinationMode = "destination_mode"
         case acceptedDate = "accepted_date"
         case dateResolution = "date_resolution"
+        case utcOffsetSeconds = "utc_offset_seconds"
     }
 }
 

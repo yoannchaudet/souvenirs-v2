@@ -2250,6 +2250,7 @@ mod tests {
                 destination_mode,
                 accepted_date: "2026-10-10".to_owned(),
                 date_resolution: Some(DateResolution::AsShown),
+                utc_offset_seconds: 0,
             })
             .unwrap();
             ImportExecutionRequest {

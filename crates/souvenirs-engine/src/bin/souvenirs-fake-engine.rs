@@ -343,7 +343,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     }
                     RequestPayload::ReviewImport(parameters) => {
                         let scan = fake_scan(parameters.source_path);
-                        let can_start = parameters.date_resolution.is_some();
+                        let resolved = parameters.date_resolution.is_some();
                         write_message(
                             &mut output,
                             &EngineMessage::success(
@@ -360,15 +360,14 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                     ),
                                     accepted_date: parameters.accepted_date,
                                     date_resolution: parameters.date_resolution,
-                                    required_decision_count: usize::from(!can_start),
-                                    transfer_count: 12,
-                                    skipped_count: 3,
-                                    left_on_source_count: 2,
-                                    operation_count: 14,
+                                    required_decision_count: usize::from(!resolved),
+                                    transfer_count: if resolved { 12 } else { 8 },
+                                    skipped_count: if resolved { 3 } else { 7 },
+                                    left_on_source_count: if resolved { 2 } else { 6 },
+                                    operation_count: if resolved { 14 } else { 10 },
                                     required_space_bytes: 41_000_000_000,
-                                    can_start,
-                                    reviewed_plan: can_start
-                                        .then(|| "fake-reviewed-plan".to_owned()),
+                                    can_start: true,
+                                    reviewed_plan: Some("fake-reviewed-plan".to_owned()),
                                 })),
                             ),
                         )?;
@@ -653,7 +652,7 @@ fn import_review(
     parameters: souvenirs_protocol::ImportReviewParameters,
 ) -> io::Result<()> {
     let scan = fake_scan(parameters.source_path);
-    let can_start = parameters.date_resolution.is_some();
+    let resolved = parameters.date_resolution.is_some();
     write_message(
         output,
         &EngineMessage::success(
@@ -668,14 +667,14 @@ fn import_review(
                 ),
                 accepted_date: parameters.accepted_date,
                 date_resolution: parameters.date_resolution,
-                required_decision_count: usize::from(!can_start),
-                transfer_count: 12,
-                skipped_count: 3,
-                left_on_source_count: 2,
-                operation_count: 14,
+                required_decision_count: usize::from(!resolved),
+                transfer_count: if resolved { 12 } else { 8 },
+                skipped_count: if resolved { 3 } else { 7 },
+                left_on_source_count: if resolved { 2 } else { 6 },
+                operation_count: if resolved { 14 } else { 10 },
                 required_space_bytes: 41_000_000_000,
-                can_start,
-                reviewed_plan: can_start.then(|| "fake-reviewed-plan".to_owned()),
+                can_start: true,
+                reviewed_plan: Some("fake-reviewed-plan".to_owned()),
             })),
         ),
     )
@@ -715,6 +714,8 @@ fn fake_scan(source_path: String) -> ImportScanResult {
             source: ImportDateSource::ContainerCreationTime,
             state: ImportDateState::NeedsConfirmation,
             item_count: 4,
+            as_shown_time: Some("12:14".to_owned()),
+            converted_from_utc_time: Some("14:14".to_owned()),
         }],
     }
 }

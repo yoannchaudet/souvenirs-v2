@@ -446,6 +446,18 @@
         "state"
       ],
       "properties": {
+        "as_shown_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "converted_from_utc_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "item_count": {
           "type": "integer",
           "format": "uint",
@@ -507,6 +519,11 @@
         },
         "source_path": {
           "type": "string"
+        },
+        "utc_offset_seconds": {
+          "default": 0,
+          "type": "integer",
+          "format": "int32"
         }
       },
       "additionalProperties": false
@@ -519,6 +536,11 @@
       "properties": {
         "source_path": {
           "type": "string"
+        },
+        "utc_offset_seconds": {
+          "default": 0,
+          "type": "integer",
+          "format": "int32"
         }
       },
       "additionalProperties": false
