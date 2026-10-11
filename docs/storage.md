@@ -31,6 +31,11 @@ Every published file, manifest, journal append, and directory change must be per
 Souvenirs uses `F_FULLFSYNC` where the volume supports it, and `fsync` otherwise.
 A persistence failure stops the operation with a contextual error.
 
+## Catalog initialization
+
+Initialization creates a transient lock and journal in the catalog root before it creates catalog state.
+A retry verifies the requested configuration and resumes valid state under the bootstrap lock.
+
 ## Lock
 
 Every mutation holds `.souvenirs/lock`, a file created exclusively at the start and removed at the end.

@@ -219,7 +219,7 @@ The protocol version remains the wire compatibility boundary.
 
 The Rust types generate a committed JSON Schema.
 Swift protocol fixtures must validate against this schema.
-Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v1.json`.
+Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v2.json`.
 
 ### Engine
 

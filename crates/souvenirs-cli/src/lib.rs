@@ -383,6 +383,8 @@ struct ProgressEvent {
     step: Option<u32>,
 }
 
+struct ValidatedProgressPath(Option<PathBuf>);
+
 struct ProgressWriter {
     file: Option<File>,
     operation_id: String,
@@ -526,6 +528,15 @@ fn catalog_initialize(catalog: &Path) -> Result<(), CliError> {
             catalog.display()
         )));
     }
+    let pending = CatalogLayout::new(catalog)
+        .has_pending_initialization()
+        .map_err(|error| CliError::conflict(error.to_string()))?;
+    if !pending && require_catalog(catalog).is_ok() {
+        return Err(CliError::conflict(format!(
+            "catalog is already initialized: {}",
+            catalog.display()
+        )));
+    }
     CatalogLayout::initialize(catalog, &CatalogConfig::default())
         .map_err(|error| CliError::conflict(error.to_string()))?;
     write_result(
@@ -538,6 +549,14 @@ fn catalog_initialize(catalog: &Path) -> Result<(), CliError> {
 }
 
 fn catalog_inspect(catalog: &Path) -> Result<(), CliError> {
+    if !catalog.is_dir() {
+        return Err(CliError::not_found(format!(
+            "initialized catalog not found: {}",
+            catalog.display()
+        )));
+    }
+    CatalogLayout::resume_initialization(catalog)
+        .map_err(|error| CliError::conflict(error.to_string()))?;
     let layout = require_catalog(catalog)?;
     let config = fs::read_to_string(layout.config_path())
         .map_err(|error| CliError::io(format!("read catalog configuration: {error}")))?;
@@ -986,12 +1005,15 @@ fn import_execute(
         ));
     }
     validate_plan_state(&layout, &stored)?;
+    let progress_path = validate_progress_path(&layout, plan_path, &stored, progress_path)?;
+    validate_plan_destinations(&layout, &stored.import_plan)?;
     let operation_id = stored.import_plan.document().plan_id.as_str().to_owned();
-    let mut progress = ProgressWriter::new(progress_path, &operation_id)?;
+    let mut progress = ProgressWriter::new(&progress_path, &operation_id)?;
     progress.write("started", None)?;
 
     let lock = CatalogLock::acquire(&layout)
         .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
+    // Recheck under the lock to close the race after the read-only preflight.
     validate_plan_destinations(&layout, &stored.import_plan)?;
     let mut journal = OperationJournal::create(&layout, &lock, &operation_id, &stored.import_plan)
         .map_err(|error| CliError::conflict(format!("create operation journal: {error}")))?;
@@ -1175,12 +1197,13 @@ fn operation_recover(
             "operation identifier does not match the saved plan",
         ));
     }
+    let progress_path = validate_progress_path(&layout, plan_path, &stored, progress_path)?;
     let lock = CatalogLock::acquire(&layout)
         .map_err(|error| CliError::conflict(format!("acquire catalog lock: {error}")))?;
     let (journal_path, records) = find_operation_journal(&layout, operation_id)?;
     validate_recovery_state(&layout, &stored, &records, mode)?;
     let request = recovery_request(&layout, &stored, mode, &records)?;
-    let mut progress = ProgressWriter::new(progress_path, operation_id)?;
+    let mut progress = ProgressWriter::new(&progress_path, operation_id)?;
     progress.write("recovery_started", None)?;
     let outcome = layout
         .recover_operation(&lock, journal_path, request)
@@ -1333,6 +1356,92 @@ fn destination_observation_cli_error(error: CatalogPathError) -> CliError {
             CliError::io(format!("inspect planned destination: {error}"))
         }
         other => CliError::conflict(format!("invalid planned destination: {other}")),
+    }
+}
+
+fn validate_progress_path(
+    layout: &CatalogLayout,
+    plan_path: &Path,
+    stored: &StoredPlan,
+    progress_path: Option<&Path>,
+) -> Result<ValidatedProgressPath, CliError> {
+    let Some(progress_path) = progress_path else {
+        return Ok(ValidatedProgressPath(None));
+    };
+
+    let observer =
+        PortableDestinationObserver::new(layout).map_err(progress_observation_cli_error)?;
+    let observation = observer
+        .observe_output_path(progress_path)
+        .map_err(progress_observation_cli_error)?;
+
+    for step in &stored.import_plan.document().steps {
+        let planned_path = match &step.action {
+            PlanStepKind::CreateDirectory { path } | PlanStepKind::WriteManifest { path, .. } => {
+                path
+            }
+            PlanStepKind::CopyFile { destination, .. } => destination,
+        };
+        if observation
+            .overlaps_catalog_path(&pathbuf(planned_path))
+            .map_err(progress_observation_cli_error)?
+        {
+            return Err(CliError::conflict(format!(
+                "progress path overlaps a planned destination: {}",
+                progress_path.display()
+            )));
+        }
+    }
+
+    if observation.is_in_catalog() {
+        return Err(CliError::conflict(format!(
+            "progress path is inside the catalog: {}",
+            progress_path.display()
+        )));
+    }
+
+    let canonical_plan = canonical_path(plan_path)?;
+    if observation.resolved_path() == canonical_plan {
+        return Err(CliError::conflict(format!(
+            "progress path overlaps the saved plan: {}",
+            progress_path.display()
+        )));
+    }
+
+    match fs::canonicalize(&stored.source_root) {
+        Ok(canonical_source) if observation.resolved_path().starts_with(&canonical_source) => {
+            return Err(CliError::conflict(format!(
+                "progress path overlaps the source: {}",
+                progress_path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(CliError::io(format!(
+                "resolve {}: {error}",
+                stored.source_root.display()
+            )));
+        }
+    }
+
+    Ok(ValidatedProgressPath(Some(
+        observation.resolved_path().to_path_buf(),
+    )))
+}
+
+fn progress_observation_cli_error(error: CatalogPathError) -> CliError {
+    match error {
+        CatalogPathError::Io {
+            action: "resolve output directory",
+            path,
+            source,
+        } if source.kind() == io::ErrorKind::NotFound => CliError::not_found(format!(
+            "output directory does not exist: {}",
+            path.display()
+        )),
+        CatalogPathError::Io { .. } => CliError::io(format!("inspect progress path: {error}")),
+        other => CliError::conflict(format!("invalid progress path: {other}")),
     }
 }
 
@@ -1757,8 +1866,10 @@ fn find_operation_journal(
 }
 
 impl ProgressWriter {
-    fn new(path: Option<&Path>, operation_id: &str) -> Result<Self, CliError> {
+    fn new(path: &ValidatedProgressPath, operation_id: &str) -> Result<Self, CliError> {
         let file = path
+            .0
+            .as_deref()
             .map(|path| {
                 ensure_output_absent(path)?;
                 File::options()

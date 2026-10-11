@@ -269,7 +269,7 @@ impl Connection {
                     request_id,
                     ProtocolError::new(
                         "invalid_request",
-                        "request does not match protocol version 1",
+                        format!("request does not match protocol version {PROTOCOL_VERSION}"),
                     )
                     .with_data(json!({"detail": error.to_string()})),
                 ));
@@ -964,12 +964,12 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_protocol_is_rejected_with_version_data() {
+    fn previous_protocol_is_rejected_with_version_data() {
         let input = format!(
             "{}\n",
             json!({
                 "id": "request-1",
-                "protocol_version": PROTOCOL_VERSION + 1,
+                "protocol_version": PROTOCOL_VERSION - 1,
                 "method": "handshake",
                 "params": {"client_version": "0.1.0"}
             })
@@ -980,7 +980,7 @@ mod tests {
         assert_eq!(response["id"], "request-1");
         assert_eq!(response["error"]["code"], "incompatible_protocol");
         assert_eq!(response["error"]["data"]["expected"], PROTOCOL_VERSION);
-        assert_eq!(response["error"]["data"]["actual"], PROTOCOL_VERSION + 1);
+        assert_eq!(response["error"]["data"]["actual"], PROTOCOL_VERSION - 1);
     }
 
     #[test]
@@ -1053,7 +1053,7 @@ mod tests {
         assert_eq!(response["error"]["code"], "invalid_request");
         assert_eq!(
             response["error"]["message"],
-            "request does not match protocol version 1"
+            format!("request does not match protocol version {PROTOCOL_VERSION}")
         );
     }
 
@@ -1128,40 +1128,26 @@ mod tests {
     #[test]
     fn operation_start_rejects_a_removed_or_replaced_reviewed_existing_collection() {
         use std::os::unix::fs::symlink;
-        let temporary = tempfile::tempdir().unwrap();
-        let [catalog, source] = ["catalog", "source"].map(|name| temporary.path().join(name));
-        for path in [&catalog, &source] {
-            fs::create_dir(path).unwrap();
-        }
-        fs::write(source.join("IMG_20261010_101112.jpg"), b"photo").unwrap();
-        CatalogService::create(&catalog, "Catalog").unwrap();
-        let collection = catalog.join("2026/2026-10-10 Import");
-        fs::create_dir_all(&collection).unwrap();
-        let journal = catalog.join(".souvenirs/journal");
-        let request = ImportReviewRequest {
-            catalog_path: catalog.clone(),
-            source_path: source.clone(),
-            collection_name: "Import".to_owned(),
-            destination_mode: DestinationMode::Existing,
-            accepted_date: "2026-10-10".to_owned(),
-            date_resolution: Some(DateResolution::AsShown),
-        };
-        fs::remove_dir(&collection).unwrap();
-        symlink(&source, &collection).unwrap();
-        assert!(ImportPlanningService::review(request.clone()).is_err());
-        fs::remove_file(&collection).unwrap();
-        fs::create_dir(&collection).unwrap();
-        let review = ImportPlanningService::review(request).unwrap();
         for replacement in ["missing", "directory", "symlink"] {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            if collection.exists() {
-                fs::remove_dir(&collection).unwrap();
+            let temporary = tempfile::tempdir().unwrap();
+            let [catalog, source] = ["catalog", "source"].map(|name| temporary.path().join(name));
+            for path in [&catalog, &source] {
+                fs::create_dir(path).unwrap();
             }
-            match replacement {
-                "directory" => fs::create_dir(&collection).unwrap(),
-                "symlink" => symlink(&source, &collection).unwrap(),
-                _ => {}
-            }
+            fs::write(source.join("IMG_20261010_101112.jpg"), b"photo").unwrap();
+            CatalogService::create(&catalog, "Catalog").unwrap();
+            let collection = catalog.join("2026/2026-10-10 Import");
+            fs::create_dir_all(&collection).unwrap();
+            let journal = catalog.join(".souvenirs/journal");
+            let review = ImportPlanningService::review(ImportReviewRequest {
+                catalog_path: catalog,
+                source_path: source.clone(),
+                collection_name: "Import".to_owned(),
+                destination_mode: DestinationMode::Existing,
+                accepted_date: "2026-10-10".to_owned(),
+                date_resolution: Some(DateResolution::AsShown),
+            })
+            .unwrap();
             let prepared = match super::Connection::default().start_operation(
                 "request-2".to_owned(),
                 super::StartOperationParameters::ImportExecute {
@@ -1171,6 +1157,12 @@ mod tests {
                 super::EngineAction::Execute { prepared, .. } => prepared,
                 _ => panic!("operation was not prepared"),
             };
+            fs::remove_dir(&collection).unwrap();
+            match replacement {
+                "directory" => fs::create_dir(&collection).unwrap(),
+                "symlink" => symlink(&source, &collection).unwrap(),
+                _ => {}
+            }
             let error =
                 ImportExecutionService::execute(*prepared, &ImportCancellation::default(), |_| {})
                     .unwrap_err();

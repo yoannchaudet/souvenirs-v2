@@ -321,17 +321,45 @@ pub(crate) fn publish_exclusively(
     staged_path: &Path,
     destination: &CatalogEntry,
 ) -> Result<(), PublishError> {
-    match renameat_with(
-        CWD,
+    publish_with_directory(
         staged_path,
         &destination.directory,
         &destination.file_name,
+        &destination.resolved_path,
+    )
+}
+
+pub(crate) fn publish_path_exclusively(
+    staged_path: &Path,
+    destination: &Path,
+) -> Result<(), PublishError> {
+    let (Some(parent), Some(file_name)) = (destination.parent(), destination.file_name()) else {
+        return Err(PublishError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "publication destination needs a parent and file name",
+        )));
+    };
+    let directory = File::open(parent).map_err(PublishError::Io)?;
+    publish_with_directory(staged_path, &directory, file_name, destination)
+}
+
+fn publish_with_directory(
+    staged_path: &Path,
+    directory: &File,
+    file_name: &std::ffi::OsStr,
+    destination: &Path,
+) -> Result<(), PublishError> {
+    match renameat_with(
+        CWD,
+        staged_path,
+        directory,
+        file_name,
         RenameFlags::NOREPLACE,
     ) {
         Ok(()) => Ok(()),
         Err(Errno::EXIST) => Err(PublishError::Occupied),
         Err(Errno::NOTSUP | Errno::INVAL | Errno::NOSYS) => {
-            publish_with_locked_fallback(staged_path, &destination.resolved_path)
+            publish_with_locked_fallback(staged_path, destination)
         }
         Err(source) => Err(PublishError::Io(io::Error::from(source))),
     }

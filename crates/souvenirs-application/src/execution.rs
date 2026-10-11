@@ -154,6 +154,7 @@ impl ImportExecutionService {
                 "reviewed plan digest does not match its contents".to_owned(),
             ));
         }
+        validate_reviewed_destination_state(&envelope.plan)?;
         let operation_id = operation_id()?;
         Ok(PreparedImport {
             operation_id,
@@ -431,6 +432,12 @@ const MANIFEST_CHANGED: &str =
 enum SourceValidation {
     Valid,
     Cancelled,
+}
+
+fn validate_reviewed_destination_state(plan: &ExecutionPlan) -> Result<(), ImportExecutionError> {
+    CatalogService::open(&plan.catalog_path)
+        .map_err(|error| ImportExecutionError::Catalog(error.to_string()))?;
+    validate_reviewed_catalog_state(plan)
 }
 
 fn validate_reviewed_source_state(
@@ -1477,7 +1484,6 @@ mod tests {
         let fixture = fixture();
         let prepared = prep(&fixture, DestinationMode::Create);
         let destination = fixture.catalog.join(&prepared.plan.copies[1].destination);
-
         let error =
             ImportExecutionService::execute(prepared, &ImportCancellation::default(), |progress| {
                 if progress.completed_units == 1 {
@@ -2007,6 +2013,24 @@ mod tests {
     }
 
     #[test]
+    fn preparation_rejects_portable_directory_drift_before_journaling() {
+        let fixture = fixture();
+        fs::create_dir(fixture.catalog.join("2026")).unwrap();
+        let request = fixture.request(DestinationMode::Create);
+        let occupied = fixture
+            .catalog
+            .join("2026")
+            .join("2026-10-10 RECOVERY IMPORT");
+        fs::create_dir(&occupied).unwrap();
+
+        let error = ImportExecutionService::prepare(request).unwrap_err();
+
+        assert_eq!(error.code(), "operation_conflict");
+        assert_eq!(import_journal_count(&fixture), 0);
+        assert!(occupied.is_dir());
+    }
+
+    #[test]
     fn execution_rejects_portable_directory_drift_before_journaling() {
         let fixture = fixture();
         fs::create_dir(fixture.catalog.join("2026")).unwrap();
@@ -2016,7 +2040,6 @@ mod tests {
             .join("2026")
             .join("2026-10-10 RECOVERY IMPORT");
         fs::create_dir(&occupied).unwrap();
-
         let error =
             ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
                 .unwrap_err();
