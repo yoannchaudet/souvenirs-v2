@@ -532,6 +532,12 @@ fn catalog_initialize(catalog: &Path) -> Result<(), CliError> {
         .map_err(|error| CliError::conflict(error.to_string()))?
         .is_none()
     {
+        if require_catalog(catalog).is_ok() {
+            return Err(CliError::conflict(format!(
+                "catalog is already initialized: {}",
+                catalog.display()
+            )));
+        }
         CatalogLayout::initialize(catalog, &CatalogConfig::default())
             .map_err(|error| CliError::conflict(error.to_string()))?;
     }

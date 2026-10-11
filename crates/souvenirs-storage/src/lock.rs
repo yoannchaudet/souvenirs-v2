@@ -176,7 +176,9 @@ impl CatalogLock {
                 LockError::TakeoverBusy => report_takeover_busy(&path),
                 error => error,
             })?;
-        let lock = Self::acquire_under_takeover(path, holder, environment)?;
+        let lock = Self::acquire_under_takeover(path, holder, environment).inspect_err(|_| {
+            let _ = takeover.remove();
+        })?;
         Ok((lock, Some(takeover)))
     }
 
@@ -398,7 +400,7 @@ impl TakeoverGuard {
         })
     }
 
-    pub(crate) fn remove(self) -> Result<(), LockError> {
+    pub(crate) fn remove(&self) -> Result<(), LockError> {
         if !file_identifies_path(&self.file, &self.path)? {
             return Err(LockError::Io {
                 action: "remove owned lock takeover guard",
@@ -1058,6 +1060,7 @@ mod tests {
     #[test]
     fn unavailable_same_boot_identity_refuses_automatic_removal() {
         let (_temporary, layout) = initialized_catalog("lock-identity-unavailable");
+        let takeover = layout.root().join(".souvenirs-initialize.lock.takeover");
         let original = holder("boot-a", 41, Some("original-process"));
         write_holder(&layout, &original);
         let environment = environment(
@@ -1067,10 +1070,12 @@ mod tests {
             &[(41, None), (42, Some("contender-process"))],
         );
 
-        let error = CatalogLock::acquire_with(&layout, &environment).unwrap_err();
+        let error = CatalogLock::acquire_paths(layout.lock_path(), takeover.clone(), &environment)
+            .unwrap_err();
 
         assert!(matches!(error, LockError::Busy(actual) if *actual == original));
         assert!(layout.lock_path().exists());
+        assert!(!takeover.exists());
     }
 
     #[test]

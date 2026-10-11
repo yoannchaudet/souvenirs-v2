@@ -327,7 +327,7 @@ impl CatalogLayout {
             || plan.config_sha256 != digest_bytes(config_bytes)
         {
             return Err(CatalogInitializationError::ConfigurationMismatch {
-                confirmed_display_name: plan.display_name(),
+                confirmed_display_name: config_display_name(&plan.config_yaml),
                 confirmed_config_yaml: plan.config_yaml.clone(),
             });
         }
@@ -488,9 +488,6 @@ impl InitializationPlan {
         Ok(())
     }
 
-    fn display_name(&self) -> Option<String> {
-        config_display_name(&self.config_yaml)
-    }
     fn journal_relative_path(&self) -> PathBuf {
         Path::new(".souvenirs")
             .join("journal")

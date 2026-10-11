@@ -45,14 +45,13 @@ fn initializes_inspects_scans_and_writes_a_confirmed_plan() {
     ]));
     assert_eq!(initialized["command"], "catalog.initialize");
     assert_eq!(initialized["result"]["format_version"], 2);
-    let journal = fs::read_dir(catalog.join(".souvenirs/journal"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
     fs::write(
-        journal,
+        fs::read_dir(catalog.join(".souvenirs/journal"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path(),
         b"{\"kind\":\"plan\",\"operation\":\"initialize\",\"format_version\":2}\n",
     )
     .unwrap();
@@ -792,30 +791,21 @@ fn sha256_hex(contents: &[u8]) -> String {
     format!("{:x}", Sha256::digest(contents))
 }
 
-fn write_initialization_plan(catalog: &Path) {
-    let config = "format_version: 2\nmedia_extensions: [jpg]\nsidecar_extensions: [xmp]\n";
-    fs::write(
-        catalog.join(".souvenirs-initialize.jsonl"),
-        format!(
-            "{{\"kind\":\"plan\",\"operation_id\":\"initialize\",\"plan\":{{\"format_version\":2,\"config_yaml\":{},\"config_sha256\":\"{}\",\"journal_file_name\":\"recovery-initialize.jsonl\",\"staged_config_path\":\".souvenirs/staging/initialize-config.yml.stage\"}}}}\n",
-            serde_json::to_string(config).unwrap(),
-            sha256_hex(config.as_bytes())
-        ),
-    )
-    .unwrap();
-}
-
 #[test]
 fn help_is_successful_and_human_readable() {
     let temporary = TempDir::new().unwrap();
-    write_initialization_plan(temporary.path());
-    json_stdout(&run(&[
+    fs::write(temporary.path().join(".souvenirs-initialize.jsonl"), "{\"kind\":\"plan\",\"operation_id\":\"initialize\",\"plan\":{\"format_version\":2,\"config_yaml\":\"format_version: 2\\nmedia_extensions: [jpg]\\nsidecar_extensions: [xmp]\\n\",\"config_sha256\":\"a987473adf5f2fab8b266f31120185aa28f4d72b1e9237888082dd7a32f4a749\",\"journal_file_name\":\"recovery-initialize.jsonl\",\"staged_config_path\":\".souvenirs/staging/initialize-config.yml.stage\"}}\n").unwrap();
+    let initialize = [
         "catalog",
         "initialize",
         "--catalog",
         temporary.path().to_str().unwrap(),
-    ]));
-    assert!(temporary.path().join(".souvenirs.yml").exists());
+    ];
+    json_stdout(&run(&initialize));
+    let repeated = run(&initialize);
+    assert_eq!(repeated.status.code(), Some(4));
+    let error: Value = serde_json::from_slice(&repeated.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "conflict");
     let output = run(&["--help"]);
     assert!(output.status.success());
     assert!(!output.stdout.is_empty());
