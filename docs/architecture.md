@@ -469,6 +469,41 @@ Each test can:
 
 The CLI is the primary automation interface for development agents.
 
+### Import performance measurements
+
+`just measure-import-performance` measures warmed release builds of import scan and import planning.
+The command uses a deterministic temporary source and catalog.
+
+The source contains 512 media files, 128 sidecars, and 64 unsupported files.
+It contains 2,146,432 bytes.
+The source includes 32 catalog duplicates and 32 source duplicate groups.
+The catalog contains 32 files in eight manifests and uses 133,728 bytes.
+
+The command runs one warm-up sample and five measured samples.
+It reports the median, minimum, and maximum duration for each operation.
+Each result includes the source size, catalog size, workload identifier, host conditions, and operation counts.
+The workload identifier covers every relative path and file digest.
+
+The scan duration measures the complete `import scan` command.
+The plan duration measures the complete `import plan` command.
+The plan command includes the required source revalidation scan.
+This scope measures user-visible command performance without bypassing drift protection.
+
+The measurement is informational because shared and virtualized runners have variable CPU, storage, and thermal behavior.
+The nightly macOS job stores each JSON Lines result as a workflow artifact for 90 days.
+Nightly results are comparable only with results from the same runner environment.
+Pull requests do not enforce an environment-dependent duration threshold.
+
+The initial development baseline uses workload `3096319b5a2f893e73f21e10bcbab74abd48007e6daca9b1e0e605bf2a9a8c1c`.
+It runs on a Mac14,12 with macOS 26.5.2, APFS storage, and Rust 1.81.0.
+Two independent runs produce scan medians from 333 to 337 milliseconds.
+The same runs produce plan medians from 666 to 675 milliseconds.
+
+A timing change is actionable when all comparison results use the same workload identifier.
+The host must also use the same Mac model, macOS major version, Rust toolchain, and filesystem type.
+A median increase of at least 20 percent must reproduce in two independent command runs.
+The host must not have known thermal pressure or competing storage work.
+
 ### Swift state tests
 
 Swift state tests use a fake engine client.
