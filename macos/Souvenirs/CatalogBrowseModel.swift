@@ -71,11 +71,9 @@ final class CatalogBrowseModel: ObservableObject {
                 return []
             }
             return [OverviewGroup(year: year, entries: entries)]
-        case .earlier(let selectedThroughYear):
+        case .earlier:
             guard let scope = navigation.first(where: {
-                if case .earlier(let throughYear, _) = $0 {
-                    return throughYear == selectedThroughYear
-                }
+                if case .earlier = $0 { return true }
                 return false
             }), case .earlier(_, let years) = scope else {
                 return []
@@ -106,9 +104,11 @@ final class CatalogBrowseModel: ObservableObject {
     }
 
     func selectScope(_ scope: Scope) {
-        guard !isLoadingOverview, scopeExists(scope) else { return }
-        generation += 1
-        selectedScope = scope
+        guard scopeExists(scope) else { return }
+        if !isLoadingOverview {
+            generation += 1
+        }
+        selectedScope = resolvedScope(scope) ?? scope
         selection = .overview
         detail = nil
         isLoadingDetail = false
@@ -173,10 +173,13 @@ final class CatalogBrowseModel: ObservableObject {
             navigation = result.navigation
             collections = result.collections
             isLoadingOverview = false
-            selectedScope = scopeExists(scope) ? scope : .allPhotos
+            let liveScope = keepingSnapshot ? selectedScope : scope
+            let liveSelection = selection
+            selectedScope = resolvedScope(liveScope) ?? .allPhotos
             selection = .overview
             detail = nil
             guard let occurrence,
+                  !keepingSnapshot || liveSelection == .collection(occurrence),
                   occurrenceExists(occurrence),
                   result.collections.contains(where: {
                       $0.identity == occurrence.identity
@@ -215,26 +218,29 @@ final class CatalogBrowseModel: ObservableObject {
     }
 
     private func scopeExists(_ scope: Scope) -> Bool {
+        resolvedScope(scope) != nil
+    }
+
+    private func resolvedScope(_ scope: Scope) -> Scope? {
         switch scope {
         case .allPhotos:
             return navigation.contains(where: {
                 if case .allPhotos = $0 { return true }
                 return false
-            })
+            }) ? .allPhotos : nil
         case .year(let selectedYear):
             return navigation.contains(where: {
                 if case .year(let year, _) = $0 {
                     return year == selectedYear
                 }
                 return false
-            })
-        case .earlier(let selectedThroughYear):
-            return navigation.contains(where: {
-                if case .earlier(let throughYear, _) = $0 {
-                    return throughYear == selectedThroughYear
-                }
+            }) ? scope : nil
+        case .earlier:
+            guard let navigationScope = navigation.first(where: {
+                if case .earlier = $0 { return true }
                 return false
-            })
+            }), case .earlier(let throughYear, _) = navigationScope else { return nil }
+            return .earlier(throughYear: throughYear)
         }
     }
 

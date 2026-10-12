@@ -79,7 +79,10 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["archive-cover-0-2"].exists)
 
         app.descendants(matching: .any)["archive-year-2025"].click()
-        XCTAssertTrue(app.staticTexts["archive-overview-year-2025"].exists)
+        XCTAssertTrue(
+            app.staticTexts["archive-overview-year-2025"]
+                .waitForExistence(timeout: 3)
+        )
         XCTAssertEqual(
             app.buttons["archive-cover-0-0"].value as? String,
             "2025 annual part, some content unavailable"
@@ -106,7 +109,10 @@ final class SouvenirsUITests: XCTestCase {
             app.descendants(matching: .any)["archive-overview"]
                 .waitForExistence(timeout: 3)
         )
-        XCTAssertTrue(app.staticTexts["archive-overview-year-2019"].exists)
+        XCTAssertTrue(
+            app.staticTexts["archive-overview-year-2019"]
+                .waitForExistence(timeout: 3)
+        )
         XCTAssertTrue(app.buttons["archive-cover-0-0"].exists)
         XCTAssertTrue(app.buttons["archive-cover-0-1"].exists)
     }

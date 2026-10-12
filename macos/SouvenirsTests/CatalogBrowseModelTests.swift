@@ -149,6 +149,39 @@ final class CatalogBrowseModelTests: XCTestCase {
         XCTAssertNil(model.detail)
     }
 
+    func testRefreshKeepsLiveEarlierSelectionWhenBoundaryChanges() async {
+        let engine = FakeBrowseEngine()
+        engine.overview = [datedOverview]
+        engine.navigation = [
+            .allPhotos,
+            .earlier(
+                throughYear: 2019,
+                years: [.init(
+                    year: 2019,
+                    entries: [.init(identity: datedIdentity, annualPartYear: nil)]
+                )]
+            ),
+        ]
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+        model.selectScope(.earlier(throughYear: 2019))
+
+        engine.suspendOverview = true
+        let refresh = Task { await model.refresh() }
+        await engine.waitUntilSuspended()
+        model.selectScope(.allPhotos)
+        model.selectScope(.earlier(throughYear: 2019))
+        engine.navigation = [
+            .allPhotos,
+            .earlier(throughYear: 2020, years: [])
+        ]
+        engine.resumeSuspended()
+        await refresh.value
+
+        XCTAssertEqual(model.selectedScope, .earlier(throughYear: 2020))
+        XCTAssertEqual(model.selection, .overview)
+    }
+
     func testLateDetailResponseCannotReplaceNewerSelection() async {
         let engine = FakeBrowseEngine()
         engine.overview = [datedOverview, ongoingOverview]

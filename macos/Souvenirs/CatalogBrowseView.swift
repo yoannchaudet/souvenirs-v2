@@ -55,7 +55,9 @@ struct CatalogBrowseSidebar: View {
             },
             set: { value in
                 guard let value else { return }
-                model.selectScope(value)
+                Task { @MainActor in
+                    model.selectScope(value)
+                }
             }
         )
     }
