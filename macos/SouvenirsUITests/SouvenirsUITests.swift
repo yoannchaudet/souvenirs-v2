@@ -600,6 +600,99 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
+    func testConnectedSourceCardEntersExistingReviewFlow() throws {
+        let app = launch(scenario: "import-flow", sourceScenario: "connected")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+
+        let card = app.descendants(matching: .any)["connected-source-card"]
+        let reviewButton = app.buttons["review-connected-source"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertEqual(card.label, "EOS_DIGITAL")
+        XCTAssertEqual(card.value as? String, "Connected, ready to review")
+        XCTAssertTrue(
+            app.descendants(matching: .any)["connected-source-summary"].exists
+        )
+        XCTAssertTrue(
+            app.staticTexts["1 removable source connected · EOS_DIGITAL"].exists
+        )
+        XCTAssertTrue(app.buttons["choose-import-folder"].isEnabled)
+
+        reviewButton.click()
+        let sheet = activeSheet(app)
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["import-review-sheet"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(
+            sheet.descendants(matching: .any)["import-operation-summary"].exists
+        )
+
+        sheet.buttons["cancel-import-review"].click()
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: reviewButton
+        )
+        waitForExpectations(timeout: 5)
+    }
+
+    @MainActor
+    func testConnectedSourceCardSelectsAmongMultipleSources() throws {
+        let app = launch(scenario: "import-flow", sourceScenario: "multiple")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(
+            app.staticTexts[
+                "2 removable sources connected · BACKUP_CARD selected"
+            ].waitForExistence(timeout: 5)
+        )
+
+        app.menuButtons["connected-source-selector"].click()
+        app.menuItems["EOS_DIGITAL"].click()
+
+        XCTAssertTrue(
+            app.staticTexts[
+                "2 removable sources connected · EOS_DIGITAL selected"
+            ].waitForExistence(timeout: 5)
+        )
+    }
+
+    @MainActor
+    func testConnectedSourceDisconnectBeforeReviewReturnsFocusToRetry() throws {
+        let app = launch(
+            scenario: "import-flow",
+            sourceScenario: "disconnect-before-review"
+        )
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["connected-source-card"]
+                .waitForExistence(timeout: 5)
+        )
+
+        app.buttons["review-connected-source"].click()
+
+        XCTAssertTrue(
+            app.staticTexts["connected-source-status"].waitForExistence(timeout: 5)
+        )
+        XCTAssertEqual(
+            app.staticTexts["connected-source-status"].label,
+            "No readable removable source connected"
+        )
+        XCTAssertFalse(app.sheets.firstMatch.exists)
+        let retry = app.buttons["connected-source-retry"]
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: retry
+        )
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(app.buttons["choose-import-folder"].isEnabled)
+    }
+
+    @MainActor
     private func openImportReview(_ app: XCUIApplication) -> XCUIElement {
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
         app.buttons["open-catalog"].click()
@@ -621,7 +714,10 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
-    private func launch(scenario: String) -> XCUIApplication {
+    private func launch(
+        scenario: String,
+        sourceScenario: String = "none"
+    ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
             "-ApplePersistenceIgnoreState", "YES",
@@ -633,6 +729,7 @@ final class SouvenirsUITests: XCTestCase {
                 "target/debug/souvenirs-fake-engine"
             ).path
         app.launchEnvironment["SOUVENIRS_FAKE_ENGINE_SCENARIO"] = scenario
+        app.launchEnvironment["SOUVENIRS_SOURCE_DISCOVERY_SCENARIO"] = sourceScenario
         if scenario == "startup-failure-once" {
             let marker = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("SouvenirsUITests-\(UUID().uuidString)")

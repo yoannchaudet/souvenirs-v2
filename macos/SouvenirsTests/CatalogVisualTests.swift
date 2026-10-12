@@ -9,6 +9,7 @@ final class CatalogVisualTests: XCTestCase {
         let engine = VisualCatalogEngine()
         let model = CatalogWelcomeModel(
             engine: engine,
+            sourceDiscovery: DebugSourceDiscovery(scenario: .connected),
             defaults: UserDefaults(suiteName: "CatalogVisualTests")!,
             recents: [
                 RecentCatalog(
@@ -122,6 +123,10 @@ final class CatalogVisualTests: XCTestCase {
         engine.validationError = nil
         await model.chooseCreateLocation("/Volumes/photos/Family Catalog")
         await model.createCatalog()
+        for _ in 0..<20 where model.selectedConnectedSource == nil {
+            await Task.yield()
+        }
+        XCTAssertNotNil(model.selectedConnectedSource)
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
@@ -270,6 +275,42 @@ final class CatalogVisualTests: XCTestCase {
         }
     }
 
+    func testCaptureConnectedSourceStates() async throws {
+        let catalog = RecentCatalog(
+            path: "/Volumes/photos/Family Catalog",
+            name: "Family Archive",
+            volumeName: "photos-nas.local"
+        )
+
+        for (scenario, name) in [
+            (DebugSourceDiscovery.Scenario.multiple, "connected-sources-multiple"),
+            (.errorThenConnected, "connected-sources-error")
+        ] {
+            let engine = VisualCatalogEngine()
+            let model = CatalogWelcomeModel(
+                engine: engine,
+                sourceDiscovery: DebugSourceDiscovery(scenario: scenario),
+                recents: [catalog]
+            )
+            let imports = ImportExecutionCoordinator(engine: engine)
+            await model.openCatalog(at: catalog.path)
+            for _ in 0..<20
+            where model.isDiscoveringSources && model.sourceDiscoveryError == nil {
+                await Task.yield()
+            }
+
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 920, height: 620),
+                name: name
+            )
+        }
+    }
+
     func testCaptureImportExecutionAndRecoveryScreens() async throws {
         let catalog = RecentCatalog(
             path: "/Volumes/photos/Family Catalog",
@@ -277,7 +318,11 @@ final class CatalogVisualTests: XCTestCase {
             volumeName: "photos-nas.local"
         )
         let modelEngine = VisualCatalogEngine()
-        let model = CatalogWelcomeModel(engine: modelEngine, recents: [catalog])
+        let model = CatalogWelcomeModel(
+            engine: modelEngine,
+            sourceDiscovery: DebugSourceDiscovery(scenario: .connected),
+            recents: [catalog]
+        )
         await model.openCatalog(at: catalog.path)
 
         let runningEngine = VisualCatalogEngine()

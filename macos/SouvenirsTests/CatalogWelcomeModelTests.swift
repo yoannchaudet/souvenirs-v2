@@ -26,6 +26,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
         let engine = FakeCatalogEngine()
         let model = CatalogWelcomeModel(
             engine: engine,
+            sourceDiscovery: StaticSourceDiscovery(),
             defaults: isolatedDefaults(),
             recents: []
         )
@@ -60,6 +61,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
         )
         let model = CatalogWelcomeModel(
             engine: FakeCatalogEngine(),
+            sourceDiscovery: StaticSourceDiscovery(),
             defaults: isolatedDefaults(),
             recents: [recent]
         )
@@ -77,6 +79,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
         let engine = FakeCatalogEngine()
         let model = CatalogWelcomeModel(
             engine: engine,
+            sourceDiscovery: StaticSourceDiscovery(),
             defaults: isolatedDefaults(),
             recents: []
         )
@@ -100,6 +103,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
         )
         let model = CatalogWelcomeModel(
             engine: engine,
+            sourceDiscovery: StaticSourceDiscovery(),
             defaults: isolatedDefaults(),
             recents: []
         )
@@ -129,6 +133,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
         )
         let model = CatalogWelcomeModel(
             engine: engine,
+            sourceDiscovery: StaticSourceDiscovery(),
             defaults: isolatedDefaults(),
             recents: []
         )
@@ -161,6 +166,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
         )
         let model = CatalogWelcomeModel(
             engine: engine,
+            sourceDiscovery: StaticSourceDiscovery(),
             defaults: isolatedDefaults(),
             recents: [recent]
         )
@@ -183,6 +189,7 @@ final class CatalogWelcomeModelTests: XCTestCase {
         let second = RecentCatalog(path: "/two", name: "Two", volumeName: "disk")
         let model = CatalogWelcomeModel(
             engine: engine,
+            sourceDiscovery: StaticSourceDiscovery(),
             defaults: isolatedDefaults(),
             recents: [first, second]
         )
@@ -190,6 +197,173 @@ final class CatalogWelcomeModelTests: XCTestCase {
         await model.openCatalog(at: second.path, name: second.name)
 
         XCTAssertEqual(model.recents.map(\.path), ["/two", "/one"])
+    }
+
+    func testSourceRefreshPreservesSelectionThenFallsBackDeterministically() async {
+        let discovery = FakeCatalogSourceDiscovery(
+            responses: [
+                .success([.camera, .backup]),
+                .success([.backup, .other]),
+                .success([.other])
+            ]
+        )
+        let model = CatalogWelcomeModel(
+            engine: FakeCatalogEngine(),
+            sourceDiscovery: discovery,
+            defaults: isolatedDefaults(),
+            recents: []
+        )
+
+        await model.openCatalog(at: "/catalog")
+        await waitUntil { model.connectedSources.count == 2 }
+        model.selectConnectedSource(id: ConnectedSource.backup.id)
+
+        discovery.emitChange()
+        await waitUntil { model.connectedSources.contains(.other) }
+        XCTAssertEqual(model.selectedConnectedSource, .backup)
+
+        discovery.emitChange()
+        await waitUntil { model.connectedSources == [.other] }
+        XCTAssertEqual(model.selectedConnectedSource, .other)
+    }
+
+    func testDiscoveryFailureClearsPreviouslyConnectedSourceAndRetries() async {
+        let discovery = FakeCatalogSourceDiscovery(
+            responses: [
+                .success([.camera]),
+                .failure(SourceDiscoveryError.enumerationUnavailable),
+                .success([.camera])
+            ]
+        )
+        let model = CatalogWelcomeModel(
+            engine: FakeCatalogEngine(),
+            sourceDiscovery: discovery,
+            defaults: isolatedDefaults(),
+            recents: []
+        )
+
+        await model.openCatalog(at: "/catalog")
+        await waitUntil { model.selectedConnectedSource == .camera }
+
+        discovery.emitChange()
+        await waitUntil { model.sourceDiscoveryError != nil }
+        XCTAssertTrue(model.connectedSources.isEmpty)
+        XCTAssertNil(model.selectedConnectedSource)
+
+        model.retrySourceDiscovery()
+        await waitUntil { model.selectedConnectedSource == .camera }
+        XCTAssertNil(model.sourceDiscoveryError)
+    }
+
+    func testSupersededDiscoveryCannotRestoreStaleSources() async {
+        let discovery = FakeCatalogSourceDiscovery(suspendsDiscoveries: true)
+        let model = CatalogWelcomeModel(
+            engine: FakeCatalogEngine(),
+            sourceDiscovery: discovery,
+            defaults: isolatedDefaults(),
+            recents: []
+        )
+
+        await model.openCatalog(at: "/catalog")
+        await waitUntil { discovery.pendingCount == 1 }
+        model.refreshConnectedSources()
+        await waitUntil { discovery.pendingCount == 2 }
+
+        discovery.resumeDiscovery(at: 1, with: .success([.backup]))
+        await waitUntil { model.selectedConnectedSource == .backup }
+        discovery.resumeDiscovery(at: 0, with: .success([.camera]))
+        await Task.yield()
+
+        XCTAssertEqual(model.connectedSources, [.backup])
+        XCTAssertEqual(model.selectedConnectedSource, .backup)
+    }
+
+    func testCatalogSwitchIgnoresPreviousLifecycleCompletion() async {
+        let discovery = FakeCatalogSourceDiscovery(suspendsDiscoveries: true)
+        let model = CatalogWelcomeModel(
+            engine: FakeCatalogEngine(),
+            sourceDiscovery: discovery,
+            defaults: isolatedDefaults(),
+            recents: []
+        )
+
+        await model.openCatalog(at: "/first")
+        await waitUntil { discovery.pendingCount == 1 }
+        await model.openCatalog(at: "/second")
+        await waitUntil { discovery.pendingCount == 2 }
+
+        discovery.resumeDiscovery(at: 0, with: .success([.camera]))
+        await Task.yield()
+        XCTAssertTrue(model.connectedSources.isEmpty)
+
+        discovery.resumeDiscovery(at: 0, with: .success([.other]))
+        await waitUntil { model.selectedConnectedSource == .other }
+        XCTAssertEqual(discovery.stopCount, 2)
+    }
+
+    func testReviewValidationRetriesAfterSupersededRefresh() async {
+        let discovery = FakeCatalogSourceDiscovery(suspendsDiscoveries: true)
+        let model = CatalogWelcomeModel(
+            engine: FakeCatalogEngine(),
+            sourceDiscovery: discovery,
+            defaults: isolatedDefaults(),
+            recents: []
+        )
+
+        await model.openCatalog(at: "/catalog")
+        await waitUntil { discovery.pendingCount == 1 }
+        discovery.resumeDiscovery(at: 0, with: .success([.camera]))
+        await waitUntil { model.selectedConnectedSource == .camera }
+
+        let review = Task {
+            await model.reviewConnectedSource(
+                id: ConnectedSource.camera.id,
+                into: RecentCatalog(
+                    path: "/catalog",
+                    name: "Archive",
+                    volumeName: "disk"
+                )
+            )
+        }
+        await waitUntil { discovery.pendingCount == 1 }
+        discovery.emitChange()
+        await waitUntil { discovery.pendingCount == 2 }
+
+        discovery.resumeDiscovery(at: 0, with: .success([.camera]))
+        await waitUntil { discovery.pendingCount == 2 }
+        discovery.resumeDiscovery(at: 1, with: .success([.camera]))
+
+        let started = await review.value
+        XCTAssertTrue(started)
+        XCTAssertNotNil(model.importPlanning)
+        discovery.resumeDiscovery(at: 0, with: .success([.camera]))
+    }
+
+    func testReviewValidationDoesNotOpenSheetAfterDisconnect() async {
+        let discovery = FakeCatalogSourceDiscovery(
+            responses: [
+                .success([.camera]),
+                .success([])
+            ]
+        )
+        let model = CatalogWelcomeModel(
+            engine: FakeCatalogEngine(),
+            sourceDiscovery: discovery,
+            defaults: isolatedDefaults(),
+            recents: []
+        )
+
+        await model.openCatalog(at: "/catalog")
+        await waitUntil { model.selectedConnectedSource == .camera }
+
+        let started = await model.reviewConnectedSource(
+            id: ConnectedSource.camera.id,
+            into: RecentCatalog(path: "/catalog", name: "Archive", volumeName: "disk")
+        )
+
+        XCTAssertFalse(started)
+        XCTAssertNil(model.importPlanning)
+        XCTAssertTrue(model.connectedSources.isEmpty)
     }
 
     func testCatalogProtocolErrorsUseArchiveTerminologyWithoutEchoingInternalPaths() {
@@ -227,6 +401,16 @@ final class CatalogWelcomeModelTests: XCTestCase {
         let defaults = UserDefaults(suiteName: name)!
         defaults.removePersistentDomain(forName: name)
         return defaults
+    }
+
+    private func waitUntil(
+        _ condition: @escaping @MainActor () -> Bool
+    ) async {
+        for _ in 0..<100 {
+            if condition() { return }
+            await Task.yield()
+        }
+        XCTFail("Condition was not met")
     }
 }
 
@@ -292,4 +476,83 @@ private final class FakeCatalogEngine: CatalogEngineClient {
 private struct TestError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
+}
+
+@MainActor
+private final class StaticSourceDiscovery: SourceDiscoveryClient {
+    func discoverSources(catalogPath: String) async throws -> [ConnectedSource] {
+        []
+    }
+
+    func startObserving(_ onChange: @escaping @MainActor () -> Void) {}
+
+    func stopObserving() {}
+}
+
+@MainActor
+private final class FakeCatalogSourceDiscovery: SourceDiscoveryClient {
+    typealias Response = Result<[ConnectedSource], Error>
+
+    private var responses: [Response]
+    private let suspendsDiscoveries: Bool
+    private var pending: [CheckedContinuation<[ConnectedSource], Error>] = []
+    private var onChange: (@MainActor () -> Void)?
+    private(set) var stopCount = 0
+
+    init(
+        responses: [Response] = [],
+        suspendsDiscoveries: Bool = false
+    ) {
+        self.responses = responses
+        self.suspendsDiscoveries = suspendsDiscoveries
+    }
+
+    var pendingCount: Int {
+        pending.count
+    }
+
+    func discoverSources(catalogPath: String) async throws -> [ConnectedSource] {
+        if suspendsDiscoveries {
+            return try await withCheckedThrowingContinuation {
+                pending.append($0)
+            }
+        }
+        guard !responses.isEmpty else { return [] }
+        return try responses.removeFirst().get()
+    }
+
+    func startObserving(_ onChange: @escaping @MainActor () -> Void) {
+        self.onChange = onChange
+    }
+
+    func stopObserving() {
+        stopCount += 1
+        onChange = nil
+    }
+
+    func emitChange() {
+        onChange?()
+    }
+
+    func resumeDiscovery(at index: Int, with response: Response) {
+        pending.remove(at: index).resume(with: response)
+    }
+}
+
+private extension ConnectedSource {
+    static let camera = ConnectedSource(
+        id: "uuid:camera",
+        rootPath: "/Volumes/EOS_DIGITAL",
+        name: "EOS_DIGITAL"
+    )
+    static let backup = ConnectedSource(
+        id: "uuid:backup",
+        rootPath: "/Volumes/BACKUP_CARD",
+        name: "BACKUP_CARD"
+    )
+    static let other = ConnectedSource(
+        id: "uuid:other",
+        rootPath: "/Volumes/OTHER",
+        name: "OTHER"
+    )
 }
