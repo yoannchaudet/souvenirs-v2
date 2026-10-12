@@ -579,13 +579,13 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                 }),
                             }
                         };
-                        write_event(&mut output, sequence, terminal)?;
                         if matches!(
                             scenario,
                             Scenario::ImportExecution | Scenario::ImportTerminalBrowseError
                         ) {
                             admitted_count = 12;
                         }
+                        write_event(&mut output, sequence, terminal)?;
                     }
                     _ => reject_request(&mut output, request)?,
                 }
@@ -660,6 +660,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             },
                         )?;
                         sequence += 1;
+                        admitted_count = 12;
                         write_event(
                             &mut output,
                             sequence,
@@ -671,7 +672,6 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                 }),
                             },
                         )?;
-                        admitted_count = 12;
                     }
                     RequestPayload::CancelOperation(_) => {
                         write_message(
