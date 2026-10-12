@@ -293,15 +293,18 @@ final class ImportExecutionCoordinator: ObservableObject {
                 } catch {
                     phase = .failed("The engine returned an invalid completion result.")
                 }
+                return
             case .failed(let code, let message):
                 if code == "source_unavailable" {
                     await routeSourceUnavailable(operationID: operationID)
                 } else {
                     phase = .failed(archiveUserMessage(code: code, message: message))
                 }
+                return
             case .cancelled(let copiedCount):
                 completedUnits = UInt64(copiedCount)
                 phase = .cancelled(copiedCount: copiedCount)
+                return
             }
         }
         if phase == .running || phase == .recovering || phase == .stopping {
