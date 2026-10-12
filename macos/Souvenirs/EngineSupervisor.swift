@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public actor EngineSupervisor {
-    public static let protocolVersion: UInt32 = 8
+    public static let protocolVersion: UInt32 = 9
     public static let protocolClientVersion = "0.2.0"
 
     public struct Handshake: Equatable, Sendable {
@@ -642,6 +642,22 @@ public actor EngineSupervisor {
         }
     }
 
+    public struct OperationMedia: Codable, Equatable, Hashable, Sendable {
+        public let identity: CatalogCollectionIdentity
+        public let annualPartYear: Int?
+        public let acceptedDate: String
+        public let filename: String
+        public let path: String
+
+        enum CodingKeys: String, CodingKey {
+            case identity
+            case annualPartYear = "annual_part_year"
+            case acceptedDate = "accepted_date"
+            case filename
+            case path
+        }
+    }
+
     public struct UnfinishedOperation: Codable, Equatable, Sendable {
         public enum Interruption: String, Codable, Equatable, Sendable {
             case sourceUnavailable = "source_unavailable"
@@ -678,9 +694,34 @@ public actor EngineSupervisor {
         public let copiedCount: Int
         public let totalCount: Int
         public let remainingCount: Int
+        public let verifiedMedia: [OperationMedia]
         public let sourceAvailable: Bool
         public let interruption: Interruption
         public let activityTime: ActivityTime
+
+        public init(
+            operationID: String,
+            collectionName: String,
+            sourceName: String,
+            copiedCount: Int,
+            totalCount: Int,
+            remainingCount: Int,
+            verifiedMedia: [OperationMedia] = [],
+            sourceAvailable: Bool,
+            interruption: Interruption,
+            activityTime: ActivityTime
+        ) {
+            self.operationID = operationID
+            self.collectionName = collectionName
+            self.sourceName = sourceName
+            self.copiedCount = copiedCount
+            self.totalCount = totalCount
+            self.remainingCount = remainingCount
+            self.verifiedMedia = verifiedMedia
+            self.sourceAvailable = sourceAvailable
+            self.interruption = interruption
+            self.activityTime = activityTime
+        }
 
         enum CodingKeys: String, CodingKey {
             case operationID = "operation_id"
@@ -689,6 +730,7 @@ public actor EngineSupervisor {
             case copiedCount = "copied_count"
             case totalCount = "total_count"
             case remainingCount = "remaining_count"
+            case verifiedMedia = "verified_media"
             case sourceAvailable = "source_available"
             case interruption
             case activityTime = "activity_time"
@@ -703,6 +745,11 @@ public actor EngineSupervisor {
                 totalUnits: UInt64?,
                 message: String?
             )
+            case mediaVerified(
+                media: OperationMedia,
+                completedMedia: UInt64,
+                totalMedia: UInt64
+            )
             case completed(result: Data)
             case failed(code: String, message: String)
             case cancelled(copiedCount: Int)
@@ -716,7 +763,7 @@ public actor EngineSupervisor {
             switch payload {
             case .completed, .failed, .cancelled:
                 return true
-            case .started, .progress:
+            case .started, .progress, .mediaVerified:
                 return false
             }
         }
@@ -1593,6 +1640,19 @@ public actor EngineSupervisor {
                 completedUnits: completedUnits,
                 totalUnits: envelope.totalUnits,
                 message: envelope.message
+            )
+        case "media_verified":
+            guard let media = envelope.media,
+                  let completedMedia = envelope.completedMedia,
+                  let totalMedia = envelope.totalMedia else {
+                throw SupervisorError.malformedResponse(
+                    "A media_verified event requires media and media counts"
+                )
+            }
+            payload = .mediaVerified(
+                media: media,
+                completedMedia: completedMedia,
+                totalMedia: totalMedia
             )
         case "completed":
             let result = try completedResult(from: line)
@@ -2505,6 +2565,9 @@ private struct OperationEventEnvelope: Decodable {
     let completedUnits: UInt64?
     let totalUnits: UInt64?
     let message: String?
+    let media: EngineSupervisor.OperationMedia?
+    let completedMedia: UInt64?
+    let totalMedia: UInt64?
     let copiedCount: Int?
     let error: ProtocolErrorResponse?
 
@@ -2517,6 +2580,9 @@ private struct OperationEventEnvelope: Decodable {
         case completedUnits = "completed_units"
         case totalUnits = "total_units"
         case message
+        case media
+        case completedMedia = "completed_media"
+        case totalMedia = "total_media"
         case copiedCount = "copied_count"
         case error
     }

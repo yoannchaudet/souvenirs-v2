@@ -64,6 +64,12 @@ struct ImportOutcome: Equatable {
 
 @MainActor
 final class ImportExecutionCoordinator: ObservableObject {
+    private struct MediaKey: Hashable {
+        let identity: EngineSupervisor.CatalogCollectionIdentity
+        let annualPartYear: Int?
+        let path: String
+    }
+
     enum Phase: Equatable {
         case idle
         case running
@@ -90,11 +96,13 @@ final class ImportExecutionCoordinator: ObservableObject {
     @Published private(set) var recoveryActivityTime:
         EngineSupervisor.UnfinishedOperation.ActivityTime?
     @Published private(set) var isRetryingRecovery = false
+    @Published private(set) var verifiedMedia: [EngineSupervisor.OperationMedia] = []
 
     private let engine: ImportExecutionEngine
     private var operationTask: Task<Void, Never>?
     private var recovery: EngineSupervisor.UnfinishedOperation?
     private var inspectionGeneration = 0
+    private var mediaByKey: [MediaKey: EngineSupervisor.OperationMedia] = [:]
 
     init(engine: ImportExecutionEngine) {
         self.engine = engine
@@ -128,6 +136,7 @@ final class ImportExecutionCoordinator: ObservableObject {
         remainingUnits = 0
         interruption = nil
         recoveryActivityTime = nil
+        clearVerifiedMedia()
         progressMessage = "Preparing verified copy…"
         phase = .running
         operationTask = Task {
@@ -156,7 +165,7 @@ final class ImportExecutionCoordinator: ObservableObject {
             )
             guard phase == .idle, generation == inspectionGeneration else { return }
             guard let unfinished else { return }
-            apply(unfinished: unfinished, catalog: catalog)
+            guard apply(unfinished: unfinished, catalog: catalog) else { return }
             phase = .recoveryPrompt(sourceAvailable: unfinished.sourceAvailable)
         } catch {
             guard phase == .idle, generation == inspectionGeneration else { return }
@@ -188,7 +197,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                     phase = .failed("A different unfinished import was found.")
                     return
                 }
-                apply(unfinished: unfinished, catalog: catalog)
+                guard apply(unfinished: unfinished, catalog: catalog) else { return }
                 guard unfinished.sourceAvailable else {
                     phase = .recoveryPrompt(sourceAvailable: false)
                     return
@@ -255,6 +264,7 @@ final class ImportExecutionCoordinator: ObservableObject {
         interruption = nil
         recoveryActivityTime = nil
         isRetryingRecovery = false
+        clearVerifiedMedia()
     }
 
     private func consume(operationID: String, recovering: Bool) async throws {
@@ -270,6 +280,13 @@ final class ImportExecutionCoordinator: ObservableObject {
                 completedUnits = completed
                 if let total { totalUnits = max(total, 1) }
                 if let message { progressMessage = message }
+            case .mediaVerified(let media, let completed, let total):
+                guard recordVerifiedMedia(media) else {
+                    phase = .failed("The engine returned inconsistent verified media.")
+                    return
+                }
+                completedUnits = completed
+                totalUnits = max(total, 1)
             case .completed(let result):
                 do {
                     phase = .completed(try decodeOutcome(result))
@@ -330,7 +347,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                 phase = .failed("The source became unavailable, but the unfinished import could not be found.")
                 return
             }
-            apply(unfinished: unfinished, catalog: catalog)
+            guard apply(unfinished: unfinished, catalog: catalog) else { return }
             phase = .recoveryPrompt(sourceAvailable: unfinished.sourceAvailable)
         } catch {
             phase = .failed(userMessage(for: error))
@@ -340,7 +357,7 @@ final class ImportExecutionCoordinator: ObservableObject {
     private func apply(
         unfinished: EngineSupervisor.UnfinishedOperation,
         catalog: RecentCatalog
-    ) {
+    ) -> Bool {
         recovery = unfinished
         self.catalog = catalog
         operationID = unfinished.operationID
@@ -351,6 +368,51 @@ final class ImportExecutionCoordinator: ObservableObject {
         remainingUnits = UInt64(unfinished.remainingCount)
         interruption = unfinished.interruption
         recoveryActivityTime = unfinished.activityTime
+        guard replaceVerifiedMedia(unfinished.verifiedMedia) else {
+            phase = .failed("The engine returned inconsistent verified media.")
+            return false
+        }
+        return true
+    }
+
+    private func replaceVerifiedMedia(
+        _ media: [EngineSupervisor.OperationMedia]
+    ) -> Bool {
+        clearVerifiedMedia()
+        for record in media where !recordVerifiedMedia(record) {
+            clearVerifiedMedia()
+            return false
+        }
+        return true
+    }
+
+    private func recordVerifiedMedia(
+        _ media: EngineSupervisor.OperationMedia
+    ) -> Bool {
+        switch media.identity {
+        case .dated where media.annualPartYear != nil:
+            return false
+        case .ongoing where media.annualPartYear == nil:
+            return false
+        default:
+            break
+        }
+        let key = MediaKey(
+            identity: media.identity,
+            annualPartYear: media.annualPartYear,
+            path: media.path
+        )
+        if let existing = mediaByKey[key] {
+            return existing == media
+        }
+        mediaByKey[key] = media
+        verifiedMedia.append(media)
+        return true
+    }
+
+    private func clearVerifiedMedia() {
+        verifiedMedia = []
+        mediaByKey = [:]
     }
 
     private func decodeOutcome(_ data: Data) throws -> ImportOutcome {

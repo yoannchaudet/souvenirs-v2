@@ -41,6 +41,93 @@ final class ImportExecutionModelTests: XCTestCase {
         }
     }
 
+    func testVerifiedMediaUsesMediaCountsAndDeduplicatesRecoveryReplay() async {
+        let engine = FakeImportExecutionEngine()
+        let model = ImportExecutionCoordinator(engine: engine)
+        let media = verifiedMedia()
+
+        model.start(review: review, catalog: catalog)
+        await engine.waitForStream()
+        let event = EngineSupervisor.OperationEvent(
+            operationID: "operation-1",
+            sequence: 0,
+            payload: .mediaVerified(
+                media: media,
+                completedMedia: 1,
+                totalMedia: 2
+            )
+        )
+        engine.send(event)
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 1,
+            payload: .mediaVerified(
+                media: media,
+                completedMedia: 1,
+                totalMedia: 2
+            )
+        ))
+
+        await waitUntil { model.verifiedMedia == [media] }
+        XCTAssertEqual(model.completedUnits, 1)
+        XCTAssertEqual(model.totalUnits, 2)
+    }
+
+    func testConflictingVerifiedMediaFailsClosed() async {
+        let engine = FakeImportExecutionEngine()
+        let model = ImportExecutionCoordinator(engine: engine)
+        let media = verifiedMedia()
+
+        model.start(review: review, catalog: catalog)
+        await engine.waitForStream()
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 0,
+            payload: .mediaVerified(
+                media: media,
+                completedMedia: 1,
+                totalMedia: 2
+            )
+        ))
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 1,
+            payload: .mediaVerified(
+                media: .init(
+                    identity: media.identity,
+                    annualPartYear: media.annualPartYear,
+                    acceptedDate: media.acceptedDate,
+                    filename: "different.jpg",
+                    path: media.path
+                ),
+                completedMedia: 1,
+                totalMedia: 2
+            )
+        ))
+
+        await waitUntil {
+            model.phase == .failed("The engine returned inconsistent verified media.")
+        }
+        XCTAssertEqual(model.verifiedMedia, [media])
+    }
+
+    func testInspectionRestoresVerifiedMediaSnapshot() async {
+        let engine = FakeImportExecutionEngine()
+        let media = verifiedMedia()
+        engine.inspection = unfinished(
+            sourceAvailable: false,
+            verifiedMedia: [media]
+        )
+        let model = ImportExecutionCoordinator(engine: engine)
+
+        await model.inspect(catalog: catalog)
+
+        XCTAssertEqual(model.phase, .recoveryPrompt(sourceAvailable: false))
+        XCTAssertEqual(model.verifiedMedia, [media])
+        XCTAssertEqual(model.completedUnits, 7)
+        XCTAssertEqual(model.totalUnits, 12)
+    }
+
     func testExecutionSurvivesPresentationLifecycle() async {
         let engine = FakeImportExecutionEngine()
         @MainActor final class AppOwner {
@@ -374,7 +461,8 @@ final class ImportExecutionModelTests: XCTestCase {
     }
 
     private func unfinished(
-        sourceAvailable: Bool
+        sourceAvailable: Bool,
+        verifiedMedia: [EngineSupervisor.OperationMedia] = []
     ) -> EngineSupervisor.UnfinishedOperation {
         .init(
             operationID: "operation-1",
@@ -383,6 +471,7 @@ final class ImportExecutionModelTests: XCTestCase {
             copiedCount: 7,
             totalCount: 12,
             remainingCount: 5,
+            verifiedMedia: verifiedMedia,
             sourceAvailable: sourceAvailable,
             interruption: sourceAvailable
                 ? .incompleteWithoutTerminalRecord
@@ -392,6 +481,19 @@ final class ImportExecutionModelTests: XCTestCase {
                 unixSeconds: 1_760_151_600,
                 nanosecond: 0
             )
+        )
+    }
+
+    private func verifiedMedia() -> EngineSupervisor.OperationMedia {
+        .init(
+            identity: .dated(
+                year: "2026",
+                directory: "2026-10-10 +2d Dolomites"
+            ),
+            annualPartYear: nil,
+            acceptedDate: "2026-10-10",
+            filename: "20261010-101101-01.jpg",
+            path: "/Volumes/photos/Family Catalog/2026/2026-10-10 +2d Dolomites/20261010-101101-01.jpg"
         )
     }
 

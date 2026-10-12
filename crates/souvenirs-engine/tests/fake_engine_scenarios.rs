@@ -263,6 +263,30 @@ fn successful_operation_emits_ordered_terminal_events() {
 }
 
 #[test]
+fn import_execution_emits_media_records_before_completion() {
+    let output = run("import-execution", &[handshake(), start_request()]);
+
+    assert!(output.status.success());
+    let messages = messages(&output);
+    let events = &messages[2..];
+    assert_eq!(
+        events
+            .iter()
+            .map(|message| message["sequence"].as_u64().expect("event sequence"))
+            .collect::<Vec<_>>(),
+        (0..events.len() as u64).collect::<Vec<_>>()
+    );
+    let media = events
+        .iter()
+        .filter(|message| message["event"] == "media_verified")
+        .collect::<Vec<_>>();
+    assert_eq!(media.len(), 12);
+    assert_eq!(media[0]["completed_media"], 1);
+    assert_eq!(media[11]["completed_media"], 12);
+    assert_eq!(events.last().unwrap()["event"], "completed");
+}
+
+#[test]
 fn failed_operation_is_deterministic() {
     let output = run("failed-operation", &[handshake(), start_request()]);
 

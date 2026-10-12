@@ -7,7 +7,7 @@ use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 // This is the oldest macOS client version supported by the engine.
 pub const MINIMUM_CLIENT_VERSION: &str = "0.2.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
@@ -408,6 +408,15 @@ pub struct CatalogBrowseMedia {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct OperationMedia {
+    pub identity: CatalogCollectionIdentity,
+    pub annual_part_year: Option<i32>,
+    pub accepted_date: String,
+    pub filename: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ImportScanResult {
     pub source_path: String,
     pub source_name: String,
@@ -506,6 +515,7 @@ pub struct UnfinishedOperationResult {
     pub copied_count: usize,
     pub total_count: usize,
     pub remaining_count: usize,
+    pub verified_media: Vec<OperationMedia>,
     pub source_available: bool,
     pub interruption: UnfinishedOperationInterruption,
     pub activity_time: UnfinishedOperationActivityTime,
@@ -576,6 +586,11 @@ pub enum OperationEventPayload {
         completed_units: u64,
         total_units: Option<u64>,
         message: Option<String>,
+    },
+    MediaVerified {
+        media: OperationMedia,
+        completed_media: u64,
+        total_media: u64,
     },
     Completed {
         result: Value,
@@ -730,7 +745,7 @@ mod tests {
 
     #[test]
     fn golden_fixture_matches_rust_types() {
-        let fixture = fixture_path("protocol-v8.jsonl");
+        let fixture = fixture_path("protocol-v9.jsonl");
         let contents = fs::read_to_string(fixture).expect("fixture should be readable");
         let values: Vec<Value> = contents
             .lines()
@@ -774,7 +789,7 @@ mod tests {
             }
         }
         assert_eq!(request_count, 9);
-        assert_eq!(engine_message_count, 14);
+        assert_eq!(engine_message_count, 15);
 
         let schema_value =
             serde_json::to_value(protocol_schema()).expect("schema should serialize");
@@ -792,7 +807,7 @@ mod tests {
         let expected = serde_json::to_string_pretty(&protocol_schema())
             .expect("protocol schema should serialize")
             + "\n";
-        let actual = fs::read_to_string(fixture_path("../schema/v8.json"))
+        let actual = fs::read_to_string(fixture_path("../schema/v9.json"))
             .expect("committed schema should be readable");
 
         assert_eq!(actual, expected, "regenerate the committed protocol schema");

@@ -22,8 +22,8 @@ use souvenirs_application::{
     ImportDateSource as ApplicationDateSource, ImportDateState as ApplicationDateState,
     ImportDestination as ApplicationDestination, ImportExecutionRequest, ImportExecutionResult,
     ImportExecutionService, ImportPlanningService, ImportRecoveryMode, ImportRecoveryService,
-    ImportReviewRequest, OperationInspectionService, OperationProgress, PreparedImport,
-    RecoveryOutcome,
+    ImportReviewRequest, OperationInspectionService, OperationMedia as ApplicationOperationMedia,
+    OperationMediaCollectionIdentity, OperationUpdate, PreparedImport, RecoveryOutcome,
 };
 use souvenirs_protocol::{
     CatalogBrowseCollection, CatalogBrowseDateGroup, CatalogBrowseMedia,
@@ -33,10 +33,11 @@ use souvenirs_protocol::{
     EngineMessage, HandshakeResult, ImportDateResolution, ImportDateSource,
     ImportDateSourceSummary, ImportDateState, ImportDestination, ImportPreflightCheck,
     ImportPreflightEvidence, ImportReviewResult, ImportScanResult, OperationAccepted,
-    OperationEvent, OperationEventPayload, OperationInspectionResult, ProtocolError, Request,
-    RequestPayload, ResponseResult, StartOperationParameters, UnfinishedOperationActivityTime,
-    UnfinishedOperationActivityTimeKind, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
-    CATALOG_BROWSE_METHOD, CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
+    OperationEvent, OperationEventPayload, OperationInspectionResult, OperationMedia,
+    ProtocolError, Request, RequestPayload, ResponseResult, StartOperationParameters,
+    UnfinishedOperationActivityTime, UnfinishedOperationActivityTimeKind,
+    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_BROWSE_METHOD,
+    CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
     CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
     OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
@@ -135,12 +136,12 @@ pub fn run_engine_with_options(
                             let result = ImportExecutionService::execute(
                                 *prepared,
                                 &worker_cancellation,
-                                |progress| {
-                                    let _ = write_progress(
+                                |update| {
+                                    let _ = write_update(
                                         &worker_output,
                                         &worker_operation_id,
                                         &mut sequence,
-                                        progress,
+                                        update,
                                     );
                                     if !options.progress_delay.is_zero() {
                                         thread::sleep(options.progress_delay);
@@ -208,12 +209,12 @@ pub fn run_engine_with_options(
                                 &worker_operation_id,
                                 ImportRecoveryMode::Resume,
                                 &worker_cancellation,
-                                |progress| {
-                                    let _ = write_progress(
+                                |update| {
+                                    let _ = write_update(
                                         &worker_output,
                                         &worker_operation_id,
                                         &mut sequence,
-                                        progress,
+                                        update,
                                     );
                                     if !options.progress_delay.is_zero() {
                                         thread::sleep(options.progress_delay);
@@ -451,6 +452,11 @@ impl Connection {
                                     copied_count: operation.copied_count,
                                     total_count: operation.total_count,
                                     remaining_count: operation.remaining_count,
+                                    verified_media: operation
+                                        .verified_media
+                                        .into_iter()
+                                        .map(protocol_operation_media)
+                                        .collect(),
                                     source_available: operation.source_available,
                                     interruption: match operation.interruption {
                                         souvenirs_application::UnfinishedOperationInterruption::SourceUnavailable => {
@@ -691,6 +697,23 @@ fn protocol_browse_media(media: ApplicationBrowseMedia) -> CatalogBrowseMedia {
     }
 }
 
+fn protocol_operation_media(media: ApplicationOperationMedia) -> OperationMedia {
+    OperationMedia {
+        identity: match media.identity {
+            OperationMediaCollectionIdentity::Dated { year, directory } => {
+                CatalogCollectionIdentity::Dated { year, directory }
+            }
+            OperationMediaCollectionIdentity::Ongoing { key } => {
+                CatalogCollectionIdentity::Ongoing { key }
+            }
+        },
+        annual_part_year: media.annual_part_year,
+        accepted_date: media.accepted_date,
+        filename: media.filename,
+        path: media.path.to_string_lossy().into_owned(),
+    }
+}
+
 fn application_browse_selection(identity: CatalogCollectionIdentity) -> ApplicationBrowseSelection {
     match identity {
         CatalogCollectionIdentity::Dated { year, directory } => {
@@ -912,22 +935,25 @@ fn write_operation_event(
     )
 }
 
-fn write_progress(
+fn write_update(
     output: &Arc<Mutex<OutputSink<impl Write>>>,
     operation_id: &str,
     sequence: &mut u64,
-    progress: OperationProgress,
+    update: OperationUpdate,
 ) -> io::Result<()> {
-    let result = write_operation_event(
-        output,
-        operation_id,
-        *sequence,
-        OperationEventPayload::Progress {
+    let payload = match update {
+        OperationUpdate::Progress(progress) => OperationEventPayload::Progress {
             completed_units: progress.completed_units,
             total_units: Some(progress.total_units),
             message: Some(progress.message),
         },
-    );
+        OperationUpdate::MediaVerified(verified) => OperationEventPayload::MediaVerified {
+            media: protocol_operation_media(verified.media),
+            completed_media: verified.completed_media,
+            total_media: verified.total_media,
+        },
+    };
+    let result = write_operation_event(output, operation_id, *sequence, payload);
     *sequence += 1;
     result
 }
@@ -1727,8 +1753,16 @@ mod tests {
         let operation_id = prepared.operation_id().to_owned();
         let unavailable = source.join("IMG_20261010_101102.jpg");
         let error =
-            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |progress| {
-                if progress.completed_units == 1 {
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |update| {
+                if matches!(
+                    update,
+                    souvenirs_application::OperationUpdate::Progress(
+                        souvenirs_application::OperationProgress {
+                            completed_units: 1,
+                            ..
+                        }
+                    )
+                ) {
                     fs::remove_file(&unavailable).unwrap();
                 }
             })
@@ -1777,7 +1811,16 @@ mod tests {
         let handshake = read_message(&mut output);
         let accepted = read_message(&mut output);
         let started = read_message(&mut output);
-        let progress = read_message(&mut output);
+        let progress = loop {
+            let message = read_message(&mut output);
+            if message["event"] == "progress" && message["completed_units"] == 2 {
+                break message;
+            }
+            assert!(
+                message["event"] == "media_verified" || message["event"] == "progress",
+                "unexpected recovery message: {message}"
+            );
+        };
         assert_eq!(handshake["id"], "request-1");
         assert_eq!(accepted["id"], "request-2");
         assert_eq!(started["event"], "started");

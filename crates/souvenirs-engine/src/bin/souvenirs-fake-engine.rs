@@ -11,11 +11,11 @@ use souvenirs_protocol::{
     HandshakeResult, ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportDestination,
     ImportPreflightCheck, ImportPreflightEvidence, ImportReviewResult, ImportScanResult,
     OperationAccepted, OperationEvent, OperationEventPayload, OperationInspectionResult,
-    ProtocolError, Request, RequestPayload, ResponseResult, UnfinishedOperationResult,
-    CANCEL_OPERATION_METHOD, CATALOG_BROWSE_METHOD, CATALOG_COLLECTIONS_METHOD,
-    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD,
-    IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
-    START_OPERATION_METHOD,
+    OperationMedia, ProtocolError, Request, RequestPayload, ResponseResult,
+    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_BROWSE_METHOD,
+    CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
+    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
+    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 fn main() {
@@ -490,6 +490,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             copied_count: 7,
                             total_count: 12,
                             remaining_count: 5,
+                            verified_media: fake_operation_media(7),
                             source_available: false,
                             interruption:
                                 souvenirs_protocol::UnfinishedOperationInterruption::SourceUnavailable,
@@ -525,15 +526,24 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                 name: "import.execute".to_owned(),
                             },
                         )?;
+                        let emitted_count = if matches!(scenario, Scenario::ImportSourceUnavailable)
+                        {
+                            7
+                        } else {
+                            12
+                        };
+                        let mut sequence =
+                            write_fake_media_events(&mut output, 1, emitted_count, 12)?;
                         write_event(
                             &mut output,
-                            1,
+                            sequence,
                             OperationEventPayload::Progress {
-                                completed_units: 7,
+                                completed_units: emitted_count as u64,
                                 total_units: Some(12),
                                 message: Some("Reading back and checking each copy…".to_owned()),
                             },
                         )?;
+                        sequence += 1;
                         let terminal = if matches!(scenario, Scenario::ImportSourceUnavailable) {
                             unfinished = true;
                             OperationEventPayload::Failed {
@@ -551,7 +561,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                 }),
                             }
                         };
-                        write_event(&mut output, 2, terminal)?;
+                        write_event(&mut output, sequence, terminal)?;
                     }
                     _ => reject_request(&mut output, request)?,
                 }
@@ -573,6 +583,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             copied_count: 7,
                             total_count: 12,
                             remaining_count: 5,
+                            verified_media: fake_operation_media(7),
                             source_available: matches!(scenario, Scenario::ImportRecovery),
                             interruption: if matches!(scenario, Scenario::ImportRecoveryMissing) {
                                 souvenirs_protocol::UnfinishedOperationInterruption::SourceUnavailable
@@ -604,18 +615,20 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                 name: "operation.recover".to_owned(),
                             },
                         )?;
+                        let mut sequence = write_fake_media_events(&mut output, 1, 12, 12)?;
                         write_event(
                             &mut output,
-                            1,
+                            sequence,
                             OperationEventPayload::Progress {
-                                completed_units: 10,
+                                completed_units: 12,
                                 total_units: Some(12),
                                 message: Some("Finishing verified copies…".to_owned()),
                             },
                         )?;
+                        sequence += 1;
                         write_event(
                             &mut output,
-                            2,
+                            sequence,
                             OperationEventPayload::Completed {
                                 result: json!({
                                     "copied_count": 12,
@@ -698,6 +711,43 @@ fn catalog_collections(output: &mut impl Write, request_id: String) -> io::Resul
             }),
         ),
     )
+}
+
+fn fake_operation_media(count: usize) -> Vec<OperationMedia> {
+    (1..=count)
+        .map(|index| OperationMedia {
+            identity: CatalogCollectionIdentity::Dated {
+                year: "2026".to_owned(),
+                directory: "2026-10-10 +2d Dolomites".to_owned(),
+            },
+            annual_part_year: None,
+            accepted_date: format!("2026-10-{:02}", 9 + ((index - 1) % 3)),
+            filename: format!("20261010-1011{index:02}-01.jpg"),
+            path: format!("/catalog/2026/2026-10-10 +2d Dolomites/20261010-1011{index:02}-01.jpg"),
+        })
+        .collect()
+}
+
+fn write_fake_media_events(
+    output: &mut impl Write,
+    start_sequence: u64,
+    count: usize,
+    total: usize,
+) -> io::Result<u64> {
+    let mut sequence = start_sequence;
+    for (index, media) in fake_operation_media(count).into_iter().enumerate() {
+        write_event(
+            output,
+            sequence,
+            OperationEventPayload::MediaVerified {
+                media,
+                completed_media: (index + 1) as u64,
+                total_media: total as u64,
+            },
+        )?;
+        sequence += 1;
+    }
+    Ok(sequence)
 }
 
 fn catalog_browse(
