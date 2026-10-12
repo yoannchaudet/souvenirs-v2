@@ -429,10 +429,7 @@ struct ContentView: View {
             Task { await syncImportPresentation(for: catalog) }
         }
         .onChange(of: terminalRefreshToken, initial: true) { _, token in
-            guard token != nil,
-                  imports.catalog?.path == catalog.path else {
-                return
-            }
+            guard token != nil else { return }
             Task {
                 await Task.yield()
                 await syncImportPresentation(for: catalog)
