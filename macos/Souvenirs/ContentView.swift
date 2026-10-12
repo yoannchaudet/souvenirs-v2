@@ -428,13 +428,15 @@ struct ContentView: View {
         .onChange(of: imports.presentationRevision, initial: true) { _, _ in
             Task { await syncImportPresentation(for: catalog) }
         }
-        .task(id: terminalRefreshToken) {
-            guard terminalRefreshToken != nil,
+        .onChange(of: terminalRefreshToken, initial: true) { _, token in
+            guard token != nil,
                   imports.catalog?.path == catalog.path else {
                 return
             }
-            await syncImportPresentation(for: catalog)
-            await model.browse.reconcileTerminalImport()
+            Task {
+                await syncImportPresentation(for: catalog)
+                await model.browse.reconcileTerminalImport()
+            }
         }
     }
 

@@ -467,10 +467,7 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(
             app.descendants(matching: .any)["archive-dated-media-0-0"].exists
         )
-        XCTAssertTrue(
-            app.staticTexts["import-completed"].waitForExistence(timeout: 10),
-            app.debugDescription
-        )
+        XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 10))
         XCTAssertTrue(
             app.staticTexts[
                 "3 already in your archive were skipped · 2 remain on the source"
@@ -635,10 +632,7 @@ final class SouvenirsUITests: XCTestCase {
         )
         sheet.buttons["finish-recovery"].click()
 
-        XCTAssertTrue(
-            app.staticTexts["import-completed"].waitForExistence(timeout: 10),
-            app.debugDescription
-        )
+        XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts["archive-browse-title"].label, "Dolomites")
     }
 
