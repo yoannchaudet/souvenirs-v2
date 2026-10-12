@@ -356,9 +356,11 @@ final class ImportExecutionModelTests: XCTestCase {
         let model = ImportExecutionCoordinator(engine: engine)
         await model.inspect(catalog: catalog)
 
+        let recoveringRevision = model.presentationRevision
         model.stopRecoveryHere()
         XCTAssertEqual(model.phase, .stopping)
         await waitUntil { model.phase == .cancelled(copiedCount: 7) }
+        XCTAssertGreaterThan(model.presentationRevision, recoveringRevision)
         XCTAssertEqual(engine.cancelledOperationIDs, ["operation-1"])
     }
 

@@ -248,6 +248,7 @@ final class ImportExecutionCoordinator: ObservableObject {
             do {
                 _ = try await engine.cancel(operationID: recovery.operationID)
                 phase = .cancelled(copiedCount: recovery.copiedCount)
+                presentationRevision += 1
             } catch {
                 phase = failurePhase(error)
             }
