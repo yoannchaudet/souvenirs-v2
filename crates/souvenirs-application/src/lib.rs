@@ -33,9 +33,10 @@ use souvenirs_domain::relationships::{
 };
 use souvenirs_domain::source::{SourceFile, SourceFileId, SourcePath};
 use souvenirs_storage::{
-    is_operation_journal_file_name, read_manifest_entries, read_timestamped_operation_records,
-    CatalogConfig, CatalogInitializationError, CatalogLayout, DurableTransition, ManifestReadError,
-    OperationRecord, StorageCapabilities, StorageCapabilityError, WriteSuitability, FORMAT_VERSION,
+    is_operation_journal_file_name, read_collection_manifest_entries,
+    read_timestamped_operation_records, CatalogConfig, CatalogInitializationError, CatalogLayout,
+    DurableTransition, ManifestReadError, OperationRecord, StorageCapabilities,
+    StorageCapabilityError, WriteSuitability, FORMAT_VERSION,
 };
 use time::Date;
 
@@ -78,7 +79,7 @@ pub enum CatalogCollection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogBrowseMedia {
     pub filename: String,
-    pub path: PathBuf,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,7 +94,9 @@ pub struct CatalogBrowsePart {
     pub year_directory: String,
     pub collection_directory: String,
     pub media_count: usize,
+    pub cover_media: Option<CatalogBrowseMedia>,
     pub date_groups: Vec<CatalogBrowseDateGroup>,
+    pub problem: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,7 +107,9 @@ pub enum CatalogBrowseCollection {
         start_date: Date,
         end_date: Date,
         media_count: usize,
+        cover_media: Option<CatalogBrowseMedia>,
         date_groups: Vec<CatalogBrowseDateGroup>,
+        problem: Option<String>,
     },
     Ongoing {
         identity: CollectionIdentity,
@@ -112,6 +117,12 @@ pub enum CatalogBrowseCollection {
         media_count: usize,
         parts: Vec<CatalogBrowsePart>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogBrowseSelection {
+    Dated { year: String, directory: String },
+    Ongoing { key: String },
 }
 
 pub struct CatalogService;
@@ -289,11 +300,13 @@ impl CatalogService {
 
     pub fn browse(
         path: impl AsRef<Path>,
+        selection: Option<&CatalogBrowseSelection>,
     ) -> Result<Vec<CatalogBrowseCollection>, CatalogServiceError> {
         let path = path.as_ref();
         let collections = Self::collections(path)?;
         collections
             .into_iter()
+            .filter(|collection| browse_collection_matches(collection, selection))
             .map(|collection| match collection {
                 CatalogCollection::Dated {
                     identity,
@@ -306,15 +319,19 @@ impl CatalogService {
                             "A dated collection has an invalid identity.".to_owned(),
                         ));
                     };
-                    let date_groups =
-                        browse_date_groups(&path.join(year.as_str()).join(directory.as_str()))?;
+                    let content = browse_collection_content(
+                        &path.join(year.as_str()).join(directory.as_str()),
+                        selection.is_some(),
+                    )?;
                     Ok(CatalogBrowseCollection::Dated {
                         identity,
                         label,
                         start_date,
                         end_date,
-                        media_count: date_groups.iter().map(|group| group.media.len()).sum(),
-                        date_groups,
+                        media_count: content.media_count,
+                        cover_media: content.cover_media,
+                        date_groups: content.date_groups,
+                        problem: content.problem,
                     })
                 }
                 CatalogCollection::Ongoing {
@@ -325,20 +342,20 @@ impl CatalogService {
                     let parts = parts
                         .into_iter()
                         .map(|part| {
-                            let date_groups = browse_date_groups(
+                            let content = browse_collection_content(
                                 &path
                                     .join(&part.year_directory)
                                     .join(&part.collection_directory),
+                                selection.is_some(),
                             )?;
                             Ok(CatalogBrowsePart {
                                 year: part.year,
                                 year_directory: part.year_directory,
                                 collection_directory: part.collection_directory,
-                                media_count: date_groups
-                                    .iter()
-                                    .map(|group| group.media.len())
-                                    .sum(),
-                                date_groups,
+                                media_count: content.media_count,
+                                cover_media: content.cover_media,
+                                date_groups: content.date_groups,
+                                problem: content.problem,
                             })
                         })
                         .collect::<Result<Vec<_>, CatalogServiceError>>()?;
@@ -354,38 +371,113 @@ impl CatalogService {
     }
 }
 
-fn browse_date_groups(
-    collection_path: &Path,
-) -> Result<Vec<CatalogBrowseDateGroup>, CatalogServiceError> {
-    let manifest_path = collection_path.join("SHA256SUMS");
-    if !manifest_path.exists() {
-        return Ok(Vec::new());
+fn browse_collection_matches(
+    collection: &CatalogCollection,
+    selection: Option<&CatalogBrowseSelection>,
+) -> bool {
+    match (selection, collection) {
+        (None, _) => true,
+        (
+            Some(CatalogBrowseSelection::Dated { year, directory }),
+            CatalogCollection::Dated {
+                identity:
+                    CollectionIdentity::Dated {
+                        year: candidate_year,
+                        directory: candidate_directory,
+                    },
+                ..
+            },
+        ) => candidate_year.as_str() == year && candidate_directory.as_str() == directory,
+        (
+            Some(CatalogBrowseSelection::Ongoing { key }),
+            CatalogCollection::Ongoing {
+                identity: CollectionIdentity::Ongoing { key: candidate },
+                ..
+            },
+        ) => candidate.as_str() == key,
+        _ => false,
     }
-    let entries = read_manifest_entries(&manifest_path).map_err(|error| match error {
-        ManifestReadError::Invalid { .. } => {
-            CatalogServiceError::InvalidCollectionLayout(error.to_string())
+}
+
+struct CatalogBrowseContent {
+    media_count: usize,
+    cover_media: Option<CatalogBrowseMedia>,
+    date_groups: Vec<CatalogBrowseDateGroup>,
+    problem: Option<String>,
+}
+
+fn browse_collection_content(
+    collection_path: &Path,
+    include_date_groups: bool,
+) -> Result<CatalogBrowseContent, CatalogServiceError> {
+    let entries = match read_collection_manifest_entries(collection_path) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => {
+            return Ok(CatalogBrowseContent {
+                media_count: 0,
+                cover_media: None,
+                date_groups: Vec::new(),
+                problem: None,
+            });
         }
-        ManifestReadError::Io { path, source } => CatalogServiceError::Io { path, source },
-    })?;
+        Err(error @ (ManifestReadError::Invalid { .. } | ManifestReadError::NotRegular { .. })) => {
+            return Ok(CatalogBrowseContent {
+                media_count: 0,
+                cover_media: None,
+                date_groups: Vec::new(),
+                problem: Some(error.to_string()),
+            });
+        }
+        Err(ManifestReadError::Io { path, source }) => {
+            return Err(CatalogServiceError::Io { path, source });
+        }
+    };
+    let media_count = entries.len();
     let mut groups = BTreeMap::<Date, Vec<CatalogBrowseMedia>>::new();
+    let mut cover_media = None;
     for entry in entries {
         let filename = entry.filename.as_str();
-        let canonical = CanonicalFilename::parse(filename).ok_or_else(|| {
+        let Some(canonical) = CanonicalFilename::parse(filename) else {
+            return Ok(CatalogBrowseContent {
+                media_count: 0,
+                cover_media: None,
+                date_groups: Vec::new(),
+                problem: Some(format!(
+                    "Manifest {} contains noncanonical original filename {filename:?}.",
+                    collection_path.display()
+                )),
+            });
+        };
+        let media_path = collection_path.join(filename);
+        let path = media_path.to_str().ok_or_else(|| {
             CatalogServiceError::InvalidCollectionLayout(format!(
-                "Manifest {} contains noncanonical original filename {filename:?}.",
-                manifest_path.display()
+                "Archive media path is not valid UTF-8: {}.",
+                media_path.display()
             ))
         })?;
-        let date = canonical.accepted_date();
-        groups.entry(date).or_default().push(CatalogBrowseMedia {
+        let media = CatalogBrowseMedia {
             filename: filename.to_owned(),
-            path: collection_path.join(filename),
-        });
+            path: path.to_owned(),
+        };
+        if cover_media.is_none() {
+            cover_media = Some(media.clone());
+        }
+        if include_date_groups {
+            groups
+                .entry(canonical.accepted_date())
+                .or_default()
+                .push(media);
+        }
     }
-    Ok(groups
-        .into_iter()
-        .map(|(date, media)| CatalogBrowseDateGroup { date, media })
-        .collect())
+    Ok(CatalogBrowseContent {
+        media_count,
+        cover_media,
+        date_groups: groups
+            .into_iter()
+            .map(|(date, media)| CatalogBrowseDateGroup { date, media })
+            .collect(),
+        problem: None,
+    })
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
@@ -1715,7 +1807,21 @@ mod tests {
         )
         .unwrap();
 
-        let browse = CatalogService::browse(directory.path()).unwrap();
+        let summary = CatalogService::browse(directory.path(), None).unwrap();
+        assert!(matches!(
+            &summary[0],
+            super::CatalogBrowseCollection::Dated {
+                media_count: 2,
+                cover_media: Some(_),
+                date_groups,
+                ..
+            } if date_groups.is_empty()
+        ));
+        let selection = super::CatalogBrowseSelection::Dated {
+            year: "2025".to_owned(),
+            directory: "2025-12-31 +2d New Year".to_owned(),
+        };
+        let browse = CatalogService::browse(directory.path(), Some(&selection)).unwrap();
 
         let super::CatalogBrowseCollection::Dated {
             media_count,
@@ -1738,12 +1844,16 @@ mod tests {
         );
         assert_eq!(
             date_groups[0].media[0].path,
-            dated.join("2025-12-31 10-11-12 001.jpg")
+            dated.join("2025-12-31 10-11-12 001.jpg").to_str().unwrap()
         );
 
+        let selection = super::CatalogBrowseSelection::Ongoing {
+            key: "kids".to_owned(),
+        };
+        let browse = CatalogService::browse(directory.path(), Some(&selection)).unwrap();
         let super::CatalogBrowseCollection::Ongoing {
             media_count, parts, ..
-        } = &browse[1]
+        } = &browse[0]
         else {
             panic!("expected ongoing collection");
         };
@@ -1768,7 +1878,7 @@ mod tests {
         )
         .unwrap();
 
-        let browse = CatalogService::browse(directory.path()).unwrap();
+        let browse = CatalogService::browse(directory.path(), None).unwrap();
 
         assert!(matches!(
             &browse[0],
@@ -1781,7 +1891,7 @@ mod tests {
     }
 
     #[test]
-    fn browse_rejects_noncanonical_admitted_filename() {
+    fn browse_reports_noncanonical_admitted_filename_without_hiding_other_collections() {
         let directory = tempdir().expect("temporary directory");
         CatalogService::create(directory.path(), "Family Catalog").unwrap();
         let collection = directory.path().join("2025/2025-07-09 Trip");
@@ -1795,10 +1905,23 @@ mod tests {
         )
         .unwrap();
 
+        let other = directory.path().join("2025/2025-08-01 Other");
+        fs::create_dir_all(&other).unwrap();
+
+        let browse = CatalogService::browse(directory.path(), None).unwrap();
+
+        assert_eq!(browse.len(), 2);
         assert!(matches!(
-            CatalogService::browse(directory.path()),
-            Err(CatalogServiceError::InvalidCollectionLayout(message))
-                if message.contains("noncanonical original filename")
+            &browse[0],
+            super::CatalogBrowseCollection::Dated {
+                media_count: 0,
+                problem: Some(problem),
+                ..
+            } if problem.contains("noncanonical original filename")
+        ));
+        assert!(matches!(
+            &browse[1],
+            super::CatalogBrowseCollection::Dated { problem: None, .. }
         ));
     }
 

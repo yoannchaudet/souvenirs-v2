@@ -36,6 +36,16 @@
             "start_date"
           ],
           "properties": {
+            "cover_media": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CatalogBrowseMedia"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "date_groups": {
               "type": "array",
               "items": {
@@ -61,6 +71,12 @@
               "type": "integer",
               "format": "uint",
               "minimum": 0.0
+            },
+            "problem": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "start_date": {
               "type": "string"
@@ -137,6 +153,28 @@
         }
       }
     },
+    "CatalogBrowseParameters": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CatalogCollectionIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "CatalogBrowsePart": {
       "type": "object",
       "required": [
@@ -150,6 +188,16 @@
         "collection_directory": {
           "type": "string"
         },
+        "cover_media": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CatalogBrowseMedia"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "date_groups": {
           "type": "array",
           "items": {
@@ -160,6 +208,12 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        },
+        "problem": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "year": {
           "type": "integer",
@@ -1029,7 +1083,7 @@
               ]
             },
             "params": {
-              "$ref": "#/definitions/CatalogPathParameters"
+              "$ref": "#/definitions/CatalogBrowseParameters"
             }
           }
         },

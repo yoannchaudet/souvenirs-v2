@@ -18,6 +18,11 @@ These are proposed operations, not command names.
 | Report duplicates | List byte-identical originals inside the catalog or between a source and the catalog. |
 | Read history | Read completed and unfinished [journals](storage.md#journal). |
 
+The browse operation returns counts and cover items before it loads one selected collection.
+Each returned media path represents a manifest record.
+The file can be missing when external changes make the catalog inconsistent.
+The application must show a missing-file state when it cannot load a returned path.
+
 ### Change
 
 | Operation | Purpose |

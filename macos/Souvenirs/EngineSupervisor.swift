@@ -207,14 +207,18 @@ public actor EngineSupervisor {
         public let yearDirectory: String
         public let collectionDirectory: String
         public let mediaCount: Int
+        public let coverMedia: CatalogBrowseMedia?
         public let dateGroups: [CatalogBrowseDateGroup]
+        public let problem: String?
 
         enum CodingKeys: String, CodingKey {
             case year
             case yearDirectory = "year_directory"
             case collectionDirectory = "collection_directory"
             case mediaCount = "media_count"
+            case coverMedia = "cover_media"
             case dateGroups = "date_groups"
+            case problem
         }
     }
 
@@ -225,7 +229,9 @@ public actor EngineSupervisor {
             startDate: String,
             endDate: String,
             mediaCount: Int,
-            dateGroups: [CatalogBrowseDateGroup]
+            coverMedia: CatalogBrowseMedia?,
+            dateGroups: [CatalogBrowseDateGroup],
+            problem: String?
         )
         case ongoing(
             identity: CatalogCollectionIdentity,
@@ -236,7 +242,7 @@ public actor EngineSupervisor {
 
         public var identity: CatalogCollectionIdentity {
             switch self {
-            case .dated(let identity, _, _, _, _, _),
+            case .dated(let identity, _, _, _, _, _, _, _),
                  .ongoing(let identity, _, _, _):
                 return identity
             }
@@ -254,7 +260,9 @@ public actor EngineSupervisor {
             case startDate = "start_date"
             case endDate = "end_date"
             case mediaCount = "media_count"
+            case coverMedia = "cover_media"
             case dateGroups = "date_groups"
+            case problem
             case parts
         }
 
@@ -281,10 +289,15 @@ public actor EngineSupervisor {
                     startDate: container.decode(String.self, forKey: .startDate),
                     endDate: container.decode(String.self, forKey: .endDate),
                     mediaCount: mediaCount,
+                    coverMedia: container.decodeIfPresent(
+                        CatalogBrowseMedia.self,
+                        forKey: .coverMedia
+                    ),
                     dateGroups: container.decode(
                         [CatalogBrowseDateGroup].self,
                         forKey: .dateGroups
-                    )
+                    ),
+                    problem: container.decodeIfPresent(String.self, forKey: .problem)
                 )
             case .ongoing:
                 guard case .ongoing = identity else {
@@ -312,7 +325,9 @@ public actor EngineSupervisor {
                 let startDate,
                 let endDate,
                 let mediaCount,
-                let dateGroups
+                let coverMedia,
+                let dateGroups,
+                let problem
             ):
                 try container.encode(Kind.dated, forKey: .kind)
                 try container.encode(identity, forKey: .identity)
@@ -320,7 +335,9 @@ public actor EngineSupervisor {
                 try container.encode(startDate, forKey: .startDate)
                 try container.encode(endDate, forKey: .endDate)
                 try container.encode(mediaCount, forKey: .mediaCount)
+                try container.encodeIfPresent(coverMedia, forKey: .coverMedia)
                 try container.encode(dateGroups, forKey: .dateGroups)
+                try container.encodeIfPresent(problem, forKey: .problem)
             case .ongoing(let identity, let label, let mediaCount, let parts):
                 try container.encode(Kind.ongoing, forKey: .kind)
                 try container.encode(identity, forKey: .identity)
@@ -1039,11 +1056,14 @@ public actor EngineSupervisor {
         return result.collections
     }
 
-    public func catalogBrowse(path: String) async throws -> [CatalogBrowseCollection] {
+    public func catalogBrowse(
+        path: String,
+        selection: CatalogCollectionIdentity? = nil
+    ) async throws -> [CatalogBrowseCollection] {
         let result: CatalogBrowseResult = try await sendRequest(
             method: "catalog.browse",
-            parameters: CatalogPathParameters(path: path),
-            timeout: requestTimeout
+            parameters: CatalogBrowseParameters(path: path, selection: selection),
+            timeout: .seconds(120)
         )
         guard result.type == "catalog_browse" else {
             throw SupervisorError.malformedResponse(
@@ -2131,6 +2151,11 @@ private struct CatalogValidationParameters: Encodable, Sendable {
 
 struct CatalogPathParameters: Encodable, Sendable {
     let path: String
+}
+
+struct CatalogBrowseParameters: Encodable, Sendable {
+    let path: String
+    let selection: EngineSupervisor.CatalogCollectionIdentity?
 }
 
 private struct CreateCatalogParameters: Encodable, Sendable {

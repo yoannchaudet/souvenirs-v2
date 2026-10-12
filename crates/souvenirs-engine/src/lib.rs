@@ -11,13 +11,15 @@ use serde_json::{json, Value};
 use souvenirs_application::{
     CatalogBrowseCollection as ApplicationBrowseCollection,
     CatalogBrowseDateGroup as ApplicationBrowseDateGroup,
-    CatalogBrowseMedia as ApplicationBrowseMedia, CatalogCollection as ApplicationCollection,
-    CatalogIntent as ApplicationIntent, CatalogService, DateResolution, ExistingCollectionIdentity,
-    ImportCancellation, ImportDateSource as ApplicationDateSource,
-    ImportDateState as ApplicationDateState, ImportDestination as ApplicationDestination,
-    ImportExecutionRequest, ImportExecutionResult, ImportExecutionService, ImportPlanningService,
-    ImportRecoveryMode, ImportRecoveryService, ImportReviewRequest, OperationInspectionService,
-    OperationProgress, PreparedImport, RecoveryOutcome,
+    CatalogBrowseMedia as ApplicationBrowseMedia,
+    CatalogBrowseSelection as ApplicationBrowseSelection,
+    CatalogCollection as ApplicationCollection, CatalogIntent as ApplicationIntent, CatalogService,
+    DateResolution, ExistingCollectionIdentity, ImportCancellation,
+    ImportDateSource as ApplicationDateSource, ImportDateState as ApplicationDateState,
+    ImportDestination as ApplicationDestination, ImportExecutionRequest, ImportExecutionResult,
+    ImportExecutionService, ImportPlanningService, ImportRecoveryMode, ImportRecoveryService,
+    ImportReviewRequest, OperationInspectionService, OperationProgress, PreparedImport,
+    RecoveryOutcome,
 };
 use souvenirs_protocol::{
     CatalogBrowseCollection, CatalogBrowseDateGroup, CatalogBrowseMedia, CatalogBrowsePart,
@@ -395,7 +397,11 @@ impl Connection {
                 CatalogService::collections(parameters.path),
             ),
             RequestPayload::BrowseCatalog(parameters) => {
-                catalog_browse_response(request.id, CatalogService::browse(parameters.path))
+                let selection = parameters.selection.map(application_browse_selection);
+                catalog_browse_response(
+                    request.id,
+                    CatalogService::browse(parameters.path, selection.as_ref()),
+                )
             }
             RequestPayload::ScanImport(parameters) => import_scan_response(
                 request.id,
@@ -569,14 +575,18 @@ fn protocol_browse_collection(collection: ApplicationBrowseCollection) -> Catalo
             start_date,
             end_date,
             media_count,
+            cover_media,
             date_groups,
+            problem,
         } => CatalogBrowseCollection::Dated {
             identity: protocol_identity(identity),
             label,
             start_date: start_date.to_string(),
             end_date: end_date.to_string(),
             media_count,
+            cover_media: cover_media.map(protocol_browse_media),
             date_groups: date_groups.into_iter().map(protocol_date_group).collect(),
+            problem,
         },
         ApplicationBrowseCollection::Ongoing {
             identity,
@@ -594,11 +604,13 @@ fn protocol_browse_collection(collection: ApplicationBrowseCollection) -> Catalo
                     year_directory: part.year_directory,
                     collection_directory: part.collection_directory,
                     media_count: part.media_count,
+                    cover_media: part.cover_media.map(protocol_browse_media),
                     date_groups: part
                         .date_groups
                         .into_iter()
                         .map(protocol_date_group)
                         .collect(),
+                    problem: part.problem,
                 })
                 .collect(),
         },
@@ -608,16 +620,23 @@ fn protocol_browse_collection(collection: ApplicationBrowseCollection) -> Catalo
 fn protocol_date_group(group: ApplicationBrowseDateGroup) -> CatalogBrowseDateGroup {
     CatalogBrowseDateGroup {
         date: group.date.to_string(),
-        media: group
-            .media
-            .into_iter()
-            .map(
-                |ApplicationBrowseMedia { filename, path }| CatalogBrowseMedia {
-                    filename,
-                    path: path.to_string_lossy().into_owned(),
-                },
-            )
-            .collect(),
+        media: group.media.into_iter().map(protocol_browse_media).collect(),
+    }
+}
+
+fn protocol_browse_media(media: ApplicationBrowseMedia) -> CatalogBrowseMedia {
+    CatalogBrowseMedia {
+        filename: media.filename,
+        path: media.path,
+    }
+}
+
+fn application_browse_selection(identity: CatalogCollectionIdentity) -> ApplicationBrowseSelection {
+    match identity {
+        CatalogCollectionIdentity::Dated { year, directory } => {
+            ApplicationBrowseSelection::Dated { year, directory }
+        }
+        CatalogCollectionIdentity::Ongoing { key } => ApplicationBrowseSelection::Ongoing { key },
     }
 }
 
@@ -1573,7 +1592,14 @@ mod tests {
             request(
                 "request-2",
                 "catalog.browse",
-                json!({"path": directory.path().to_string_lossy()})
+                json!({
+                    "path": directory.path().to_string_lossy(),
+                    "selection": {
+                        "kind": "dated",
+                        "year": "2024",
+                        "directory": "2024-07-14 Brittany"
+                    }
+                })
             )
         );
 

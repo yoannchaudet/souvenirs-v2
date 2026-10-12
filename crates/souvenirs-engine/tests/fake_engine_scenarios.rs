@@ -50,7 +50,18 @@ fn catalog_flow_serves_collection_query_capability() {
                 "catalog.collections",
                 json!({"path": "/catalog"}),
             ),
-            request("request-3", "catalog.browse", json!({"path": "/catalog"})),
+            request(
+                "request-3",
+                "catalog.browse",
+                json!({
+                    "path": "/catalog",
+                    "selection": {
+                        "kind": "dated",
+                        "year": "2019",
+                        "directory": "2019-07-14 +6d Brittany"
+                    }
+                }),
+            ),
         ],
     );
 

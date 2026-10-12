@@ -231,9 +231,14 @@ Ongoing collections follow dated collections and sort by collision key.
 
 The `catalog.browse` query returns manifest-admitted originals for archive presentation.
 It preserves the same collection identities, ranges, ongoing grouping, and annual part directories.
-Rust groups originals by accepted date and returns media paths in deterministic manifest order.
+An unscoped query returns all collection counts and one cover item per collection part.
+An identity-scoped query returns date groups and media for the exact selected collection.
+Rust groups detailed results by accepted date and returns media paths in deterministic manifest order.
 The macOS client must not reconstruct collection paths or read manifests directly.
 Published originals do not enter browse results until a manifest admits them.
+An invalid collection manifest produces a problem on that collection part.
+The query continues to return other collections after an invalid manifest.
+Catalog I/O errors fail the complete query.
 
 ### Engine
 

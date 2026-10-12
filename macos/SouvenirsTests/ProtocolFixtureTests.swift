@@ -196,8 +196,9 @@ final class ProtocolFixtureTests: XCTestCase {
                     id: "request-4",
                     protocolVersion: EngineSupervisor.protocolVersion,
                     method: "operation.inspect",
-                    params: CatalogPathParameters(
-                        path: "/Volumes/photos/Family Catalog"
+                    params: CatalogBrowseParameters(
+                        path: "/Volumes/photos/Family Catalog",
+                        selection: nil
                     )
                 )
             )
@@ -311,11 +312,14 @@ final class ProtocolFixtureTests: XCTestCase {
                 startDate: "2019-07-14",
                 endDate: "2019-07-20",
                 mediaCount: 1,
-                dateGroups: let groups
+                coverMedia: let coverMedia,
+                dateGroups: let groups,
+                problem: nil
             ) = response.result.collections[0] else {
                 return XCTFail("Expected dated browse collection")
             }
-            XCTAssertEqual(groups[0].media[0].filename, "2019-07-15 10-11-12 001.jpg")
+            XCTAssertTrue(groups.isEmpty)
+            XCTAssertEqual(coverMedia?.filename, "2019-07-15 10-11-12 001.jpg")
         case 13:
             try assertRequest(
                 data,
@@ -798,7 +802,7 @@ private enum ProtocolFixtureValidator {
                 collection,
                 exactly: [
                     "kind", "identity", "label", "start_date", "end_date",
-                    "media_count", "date_groups",
+                    "media_count", "cover_media", "date_groups", "problem",
                 ],
                 at: path
             )
@@ -830,7 +834,7 @@ private enum ProtocolFixtureValidator {
                     part,
                     exactly: [
                         "year", "year_directory", "collection_directory",
-                        "media_count", "date_groups",
+                        "media_count", "cover_media", "date_groups", "problem",
                     ],
                     at: partPath
                 )

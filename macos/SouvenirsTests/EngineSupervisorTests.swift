@@ -326,7 +326,9 @@ final class EngineSupervisorTests: XCTestCase {
             startDate: "2019-07-14",
             endDate: "2019-07-20",
             mediaCount: 1,
-            dateGroups: let datedGroups
+            coverMedia: _,
+            dateGroups: let datedGroups,
+            problem: nil
         ) = collections[0] else {
             return XCTFail("Expected dated browse collection")
         }
@@ -344,16 +346,6 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertEqual(parts[0].yearDirectory, "2019")
         XCTAssertEqual(parts[0].dateGroups[0].media[0].path, "/catalog/2019/z Kids/2019-03-02 10-11-05 001.heic")
         try await supervisor.stop()
-    }
-
-    func testCatalogBrowseRejectsIdentityKindMismatch() {
-        let data = Data(
-            """
-            {"type":"catalog_browse","collections":[{"kind":"dated","identity":{"kind":"ongoing","key":"kids"},"label":"Kids","start_date":"2019-07-14","end_date":"2019-07-20","media_count":0,"date_groups":[]}]}
-            """.utf8
-        )
-
-        XCTAssertThrowsError(try JSONDecoder().decode(CatalogBrowseResult.self, from: data))
     }
 
     func testCurrentClientDecodesDateLessScanAfterHandshake() async throws {

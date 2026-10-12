@@ -16,6 +16,8 @@ use crate::{
     CatalogLayout, CatalogLock, DurableTransition, OperationJournal, OperationJournalError,
 };
 
+pub const COLLECTION_MANIFEST_FILE_NAME: &str = "SHA256SUMS";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestReplacement {
     pub path: PathBuf,
@@ -86,6 +88,21 @@ pub fn read_manifest_entries(
         entries.push(ManifestEntry { digest, filename });
     }
     Ok(entries)
+}
+
+pub fn read_collection_manifest_entries(
+    collection_path: impl AsRef<Path>,
+) -> Result<Option<Vec<ManifestEntry>>, ManifestReadError> {
+    let path = collection_path.as_ref().join(COLLECTION_MANIFEST_FILE_NAME);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(ManifestReadError::Io { path, source }),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(ManifestReadError::NotRegular { path });
+    }
+    read_manifest_entries(path).map(Some)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -395,19 +412,22 @@ pub enum ManifestReadError {
         path: PathBuf,
         source: io::Error,
     },
+    NotRegular {
+        path: PathBuf,
+    },
 }
 
 impl ManifestReadError {
     pub fn path(&self) -> &Path {
         match self {
-            Self::Invalid { path, .. } | Self::Io { path, .. } => path,
+            Self::Invalid { path, .. } | Self::Io { path, .. } | Self::NotRegular { path } => path,
         }
     }
 
     pub fn line(&self) -> Option<usize> {
         match self {
             Self::Invalid { line, .. } => Some(*line),
-            Self::Io { .. } => None,
+            Self::Io { .. } | Self::NotRegular { .. } => None,
         }
     }
 
@@ -415,6 +435,9 @@ impl ManifestReadError {
         match self {
             Self::Invalid { reason, .. } => reason.clone(),
             Self::Io { source, .. } => source.to_string(),
+            Self::NotRegular { .. } => {
+                format!("{COLLECTION_MANIFEST_FILE_NAME} is not a regular file")
+            }
         }
     }
 }
@@ -434,6 +457,11 @@ impl fmt::Display for ManifestReadError {
                     path.display()
                 )
             }
+            Self::NotRegular { path } => write!(
+                formatter,
+                "invalid catalog manifest {}: {COLLECTION_MANIFEST_FILE_NAME} is not a regular file",
+                path.display()
+            ),
         }
     }
 }
@@ -442,7 +470,7 @@ impl Error for ManifestReadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
-            Self::Invalid { .. } => None,
+            Self::Invalid { .. } | Self::NotRegular { .. } => None,
         }
     }
 }
@@ -451,7 +479,10 @@ impl Error for ManifestReadError {
 mod tests {
     use std::fs;
 
-    use super::{read_manifest_entries, ManifestReadError};
+    use super::{
+        read_collection_manifest_entries, read_manifest_entries, ManifestReadError,
+        COLLECTION_MANIFEST_FILE_NAME,
+    };
     use crate::test_support::TempDirectory;
 
     #[test]
@@ -494,6 +525,21 @@ mod tests {
             read_manifest_entries(path),
             Err(ManifestReadError::Invalid { line: 2, reason, .. })
                 if reason.contains("strict byte order")
+        ));
+    }
+
+    #[test]
+    fn collection_reader_distinguishes_missing_and_non_regular_manifests() {
+        let directory = TempDirectory::new("collection-manifest");
+
+        assert_eq!(
+            read_collection_manifest_entries(directory.path()).unwrap(),
+            None
+        );
+        fs::create_dir(directory.path().join(COLLECTION_MANIFEST_FILE_NAME)).unwrap();
+        assert!(matches!(
+            read_collection_manifest_entries(directory.path()),
+            Err(ManifestReadError::NotRegular { .. })
         ));
     }
 }

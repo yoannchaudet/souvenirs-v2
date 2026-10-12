@@ -9,7 +9,7 @@ use souvenirs_domain::names::PortableComponent;
 use souvenirs_domain::plan::{ContentDigest, ManifestFingerprint};
 
 use crate::durability::{sync_directory, sync_file};
-use crate::{read_manifest_entries, ManifestReadError};
+use crate::{read_manifest_entries, ManifestReadError, COLLECTION_MANIFEST_FILE_NAME};
 
 const INDEX_SCHEMA_VERSION: i64 = 2;
 
@@ -346,6 +346,11 @@ fn read_manifest(
                 action: "read catalog manifest",
                 path,
                 source,
+            },
+            ManifestReadError::NotRegular { path } => CatalogIndexError::InvalidManifest {
+                path,
+                line: None,
+                reason: format!("{COLLECTION_MANIFEST_FILE_NAME} is not a regular file"),
             },
         })?
         .into_iter()

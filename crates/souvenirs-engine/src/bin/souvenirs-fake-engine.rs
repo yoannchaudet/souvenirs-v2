@@ -315,8 +315,8 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::ListCatalogCollections(_) => {
                         catalog_collections(&mut output, request.id)?;
                     }
-                    RequestPayload::BrowseCatalog(_) => {
-                        catalog_browse(&mut output, request.id)?;
+                    RequestPayload::BrowseCatalog(parameters) => {
+                        catalog_browse(&mut output, request.id, parameters.selection)?;
                     }
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
@@ -354,8 +354,8 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::ListCatalogCollections(_) => {
                         catalog_collections(&mut output, request.id)?;
                     }
-                    RequestPayload::BrowseCatalog(_) => {
-                        catalog_browse(&mut output, request.id)?;
+                    RequestPayload::BrowseCatalog(parameters) => {
+                        catalog_browse(&mut output, request.id, parameters.selection)?;
                     }
                     RequestPayload::ReviewImport(parameters) => {
                         if unavailable
@@ -645,7 +645,11 @@ fn catalog_collections(output: &mut impl Write, request_id: String) -> io::Resul
     )
 }
 
-fn catalog_browse(output: &mut impl Write, request_id: String) -> io::Result<()> {
+fn catalog_browse(
+    output: &mut impl Write,
+    request_id: String,
+    selection: Option<CatalogCollectionIdentity>,
+) -> io::Result<()> {
     let dated_group = CatalogBrowseDateGroup {
         date: "2019-07-15".to_owned(),
         media: vec![CatalogBrowseMedia {
@@ -661,39 +665,66 @@ fn catalog_browse(output: &mut impl Write, request_id: String) -> io::Result<()>
                 .to_owned(),
         }],
     };
+    let mut collections = vec![
+        CatalogBrowseCollection::Dated {
+            identity: CatalogCollectionIdentity::Dated {
+                year: "2019".to_owned(),
+                directory: "2019-07-14 +6d Brittany".to_owned(),
+            },
+            label: "Brittany".to_owned(),
+            start_date: "2019-07-14".to_owned(),
+            end_date: "2019-07-20".to_owned(),
+            media_count: 1,
+            cover_media: dated_group.media.first().cloned(),
+            date_groups: vec![dated_group],
+            problem: None,
+        },
+        CatalogBrowseCollection::Ongoing {
+            identity: CatalogCollectionIdentity::Ongoing {
+                key: "kids".to_owned(),
+            },
+            label: "Kids".to_owned(),
+            media_count: 1,
+            parts: vec![CatalogBrowsePart {
+                year: 2019,
+                year_directory: "2019".to_owned(),
+                collection_directory: "z Kids".to_owned(),
+                media_count: 1,
+                cover_media: ongoing_group.media.first().cloned(),
+                date_groups: vec![ongoing_group],
+                problem: None,
+            }],
+        },
+    ];
+    match selection {
+        Some(identity) => collections.retain(|collection| match collection {
+            CatalogBrowseCollection::Dated {
+                identity: candidate,
+                ..
+            }
+            | CatalogBrowseCollection::Ongoing {
+                identity: candidate,
+                ..
+            } => candidate == &identity,
+        }),
+        None => {
+            for collection in &mut collections {
+                match collection {
+                    CatalogBrowseCollection::Dated { date_groups, .. } => date_groups.clear(),
+                    CatalogBrowseCollection::Ongoing { parts, .. } => {
+                        for part in parts {
+                            part.date_groups.clear();
+                        }
+                    }
+                }
+            }
+        }
+    }
     write_message(
         output,
         &EngineMessage::success(
             request_id,
-            ResponseResult::CatalogBrowse(CatalogBrowseResult {
-                collections: vec![
-                    CatalogBrowseCollection::Dated {
-                        identity: CatalogCollectionIdentity::Dated {
-                            year: "2019".to_owned(),
-                            directory: "2019-07-14 +6d Brittany".to_owned(),
-                        },
-                        label: "Brittany".to_owned(),
-                        start_date: "2019-07-14".to_owned(),
-                        end_date: "2019-07-20".to_owned(),
-                        media_count: 1,
-                        date_groups: vec![dated_group],
-                    },
-                    CatalogBrowseCollection::Ongoing {
-                        identity: CatalogCollectionIdentity::Ongoing {
-                            key: "kids".to_owned(),
-                        },
-                        label: "Kids".to_owned(),
-                        media_count: 1,
-                        parts: vec![CatalogBrowsePart {
-                            year: 2019,
-                            year_directory: "2019".to_owned(),
-                            collection_directory: "z Kids".to_owned(),
-                            media_count: 1,
-                            date_groups: vec![ongoing_group],
-                        }],
-                    },
-                ],
-            }),
+            ResponseResult::CatalogBrowse(CatalogBrowseResult { collections }),
         ),
     )
 }

@@ -22,8 +22,9 @@ pub use copy::{is_source_unavailable_error, CopyExpectation, VerifiedCopy, Verif
 pub use index::{snapshot_catalog_manifests, CatalogIndex, CatalogIndexError};
 pub use lock::{CatalogLock, LockEnvironment, LockError, LockHolder, SystemLockEnvironment};
 pub use manifest::{
-    read_manifest_entries, ManifestEntry, ManifestReadError, ManifestReplacement,
-    ManifestReplacementError, ManifestReplacementRequest,
+    read_collection_manifest_entries, read_manifest_entries, ManifestEntry, ManifestReadError,
+    ManifestReplacement, ManifestReplacementError, ManifestReplacementRequest,
+    COLLECTION_MANIFEST_FILE_NAME,
 };
 #[cfg(feature = "test-failpoints")]
 pub use operation::Failpoint;

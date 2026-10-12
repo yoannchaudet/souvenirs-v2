@@ -98,7 +98,7 @@ pub enum RequestPayload {
     #[serde(rename = "catalog.collections")]
     ListCatalogCollections(CatalogPathParameters),
     #[serde(rename = "catalog.browse")]
-    BrowseCatalog(CatalogPathParameters),
+    BrowseCatalog(CatalogBrowseParameters),
     #[serde(rename = "import.scan")]
     ScanImport(ImportScanParameters),
     #[serde(rename = "import.review")]
@@ -149,6 +149,14 @@ pub enum CatalogIntent {
 #[serde(deny_unknown_fields)]
 pub struct CatalogPathParameters {
     pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogBrowseParameters {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<CatalogCollectionIdentity>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -337,7 +345,9 @@ pub enum CatalogBrowseCollection {
         start_date: String,
         end_date: String,
         media_count: usize,
+        cover_media: Option<CatalogBrowseMedia>,
         date_groups: Vec<CatalogBrowseDateGroup>,
+        problem: Option<String>,
     },
     Ongoing {
         identity: CatalogCollectionIdentity,
@@ -353,7 +363,9 @@ pub struct CatalogBrowsePart {
     pub year_directory: String,
     pub collection_directory: String,
     pub media_count: usize,
+    pub cover_media: Option<CatalogBrowseMedia>,
     pub date_groups: Vec<CatalogBrowseDateGroup>,
+    pub problem: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

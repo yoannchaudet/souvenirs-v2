@@ -160,7 +160,13 @@ final class RealEngineSmokeTests: XCTestCase {
             """.utf8
         ).write(to: collection.appendingPathComponent("SHA256SUMS"))
 
-        let collections = try await supervisor.catalogBrowse(path: fixture.catalog.path)
+        let collections = try await supervisor.catalogBrowse(
+            path: fixture.catalog.path,
+            selection: .dated(
+                year: "2026",
+                directory: "2026-10-10 Existing"
+            )
+        )
 
         guard case .dated(
             identity: .dated(year: "2026", directory: "2026-10-10 Existing"),
@@ -168,7 +174,9 @@ final class RealEngineSmokeTests: XCTestCase {
             startDate: "2026-10-10",
             endDate: "2026-10-10",
             mediaCount: 1,
-            dateGroups: let groups
+            coverMedia: _,
+            dateGroups: let groups,
+            problem: nil
         ) = collections.first else {
             return XCTFail("Expected dated browse collection")
         }
