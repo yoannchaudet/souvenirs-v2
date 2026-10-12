@@ -33,6 +33,7 @@ final class ImportExecutionModelTests: XCTestCase {
         XCTAssertEqual(model.percentCompleted, 58)
         XCTAssertEqual(model.progressMessage, "Checking copies…")
 
+        let runningRevision = model.presentationRevision
         engine.send(.init(
             operationID: "operation-1",
             sequence: 2,
@@ -48,6 +49,7 @@ final class ImportExecutionModelTests: XCTestCase {
                 ImportOutcome(copiedCount: 12, skippedCount: 3, leftOnSourceCount: 2)
             )
         }
+        XCTAssertGreaterThan(model.presentationRevision, runningRevision)
     }
 
     func testVerifiedMediaUsesMediaCountsAndDeduplicatesRecoveryReplay() async {
@@ -268,6 +270,7 @@ final class ImportExecutionModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .recovering)
         XCTAssertEqual(engine.recoveryStartCount, 1)
 
+        let recoveringRevision = model.presentationRevision
         engine.send(.init(
             operationID: "operation-1",
             sequence: 0,
@@ -275,6 +278,7 @@ final class ImportExecutionModelTests: XCTestCase {
         ))
         engine.finish()
         await waitUntil { model.phase == .cancelled(copiedCount: 7) }
+        XCTAssertGreaterThan(model.presentationRevision, recoveringRevision)
     }
 
     func testUnavailableRetryReinspectsAndRecoversSameOperation() async {

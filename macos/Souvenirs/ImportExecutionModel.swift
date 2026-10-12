@@ -278,7 +278,11 @@ final class ImportExecutionCoordinator: ObservableObject {
                 progressMessage = recovering
                     ? "Checking copied files…"
                     : "Copying and checking each file…"
-            case .progress(_, _, let message):
+            case .progress(let completed, let total, let message):
+                if verifiedMedia.isEmpty, let total {
+                    completedUnits = completed
+                    totalUnits = max(total, 1)
+                }
                 if let message { progressMessage = message }
             case .mediaVerified(let media, let completed, let total):
                 guard recordVerifiedMedia(media) else {
@@ -290,6 +294,7 @@ final class ImportExecutionCoordinator: ObservableObject {
             case .completed(let result):
                 do {
                     phase = .completed(try decodeOutcome(result))
+                    presentationRevision += 1
                 } catch {
                     phase = .failed("The engine returned an invalid completion result.")
                 }
@@ -304,6 +309,7 @@ final class ImportExecutionCoordinator: ObservableObject {
             case .cancelled(let copiedCount):
                 completedUnits = UInt64(copiedCount)
                 phase = .cancelled(copiedCount: copiedCount)
+                presentationRevision += 1
                 return
             }
         }

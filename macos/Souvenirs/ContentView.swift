@@ -426,14 +426,10 @@ struct ContentView: View {
             await model.browse.load(catalogPath: catalog.path)
         }
         .onChange(of: imports.presentationRevision, initial: true) { _, _ in
-            Task { await syncImportPresentation(for: catalog) }
-        }
-        .onChange(of: terminalRefreshToken, initial: true) { _, token in
-            guard token != nil else { return }
+            let isTerminal = terminalRefreshToken != nil
             Task {
-                await Task.yield()
-                await syncImportPresentation(for: catalog, loadDetail: false)
-                await model.browse.reconcileTerminalImport()
+                await syncImportPresentation(for: catalog, loadDetail: !isTerminal)
+                if isTerminal { await model.browse.reconcileTerminalImport() }
             }
         }
     }
@@ -823,6 +819,7 @@ struct ContentView: View {
                     secondaryAction: {
                         model.browse.clearImportPresentation()
                         imports.dismissOutcome()
+                        Task { await model.browse.refresh() }
                     }
                 )
             case .active, .refreshing, .none:
