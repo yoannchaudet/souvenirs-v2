@@ -7,7 +7,7 @@ use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 // This is the oldest macOS client version supported by the engine.
 pub const MINIMUM_CLIENT_VERSION: &str = "0.2.0";
 pub const HANDSHAKE_METHOD: &str = "handshake";
@@ -17,6 +17,7 @@ pub const CATALOG_VALIDATE_METHOD: &str = "catalog.validate";
 pub const CATALOG_CREATE_METHOD: &str = "catalog.create";
 pub const CATALOG_OPEN_METHOD: &str = "catalog.open";
 pub const CATALOG_COLLECTIONS_METHOD: &str = "catalog.collections";
+pub const CATALOG_BROWSE_METHOD: &str = "catalog.browse";
 pub const IMPORT_SCAN_METHOD: &str = "import.scan";
 pub const IMPORT_REVIEW_METHOD: &str = "import.review";
 pub const OPERATION_INSPECT_METHOD: &str = "operation.inspect";
@@ -96,6 +97,8 @@ pub enum RequestPayload {
     OpenCatalog(CatalogPathParameters),
     #[serde(rename = "catalog.collections")]
     ListCatalogCollections(CatalogPathParameters),
+    #[serde(rename = "catalog.browse")]
+    BrowseCatalog(CatalogPathParameters),
     #[serde(rename = "import.scan")]
     ScanImport(ImportScanParameters),
     #[serde(rename = "import.review")]
@@ -253,6 +256,7 @@ pub enum ResponseResult {
     CancellationAccepted(CancellationAccepted),
     Catalog(CatalogResult),
     CatalogCollections(CatalogCollectionsResult),
+    CatalogBrowse(CatalogBrowseResult),
     ImportScan(Box<ImportScanResult>),
     ImportReview(Box<ImportReviewResult>),
     OperationInspection(OperationInspectionResult),
@@ -317,6 +321,51 @@ pub struct CatalogCollectionPart {
     pub year: i32,
     pub year_directory: String,
     pub collection_directory: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct CatalogBrowseResult {
+    pub collections: Vec<CatalogBrowseCollection>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CatalogBrowseCollection {
+    Dated {
+        identity: CatalogCollectionIdentity,
+        label: String,
+        start_date: String,
+        end_date: String,
+        media_count: usize,
+        date_groups: Vec<CatalogBrowseDateGroup>,
+    },
+    Ongoing {
+        identity: CatalogCollectionIdentity,
+        label: String,
+        media_count: usize,
+        parts: Vec<CatalogBrowsePart>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct CatalogBrowsePart {
+    pub year: i32,
+    pub year_directory: String,
+    pub collection_directory: String,
+    pub media_count: usize,
+    pub date_groups: Vec<CatalogBrowseDateGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct CatalogBrowseDateGroup {
+    pub date: String,
+    pub media: Vec<CatalogBrowseMedia>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct CatalogBrowseMedia {
+    pub filename: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -642,7 +691,7 @@ mod tests {
 
     #[test]
     fn golden_fixture_matches_rust_types() {
-        let fixture = fixture_path("protocol-v6.jsonl");
+        let fixture = fixture_path("protocol-v7.jsonl");
         let contents = fs::read_to_string(fixture).expect("fixture should be readable");
         let values: Vec<Value> = contents
             .lines()
@@ -671,6 +720,7 @@ mod tests {
                         | RequestPayload::CreateCatalog(_)
                         | RequestPayload::OpenCatalog(_)
                         | RequestPayload::ListCatalogCollections(_)
+                        | RequestPayload::BrowseCatalog(_)
                         | RequestPayload::ReviewImport(_)
                         | RequestPayload::InspectOperation(_)
                 ));
@@ -684,8 +734,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(request_count, 7);
-        assert_eq!(engine_message_count, 12);
+        assert_eq!(request_count, 8);
+        assert_eq!(engine_message_count, 13);
 
         let schema_value =
             serde_json::to_value(protocol_schema()).expect("schema should serialize");
@@ -703,7 +753,7 @@ mod tests {
         let expected = serde_json::to_string_pretty(&protocol_schema())
             .expect("protocol schema should serialize")
             + "\n";
-        let actual = fs::read_to_string(fixture_path("../schema/v6.json"))
+        let actual = fs::read_to_string(fixture_path("../schema/v7.json"))
             .expect("committed schema should be readable");
 
         assert_eq!(actual, expected, "regenerate the committed protocol schema");

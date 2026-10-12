@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use souvenirs_domain::catalog::{
-    parse_collection_directory, parse_year_directory, year_directory, CollectionIdentity,
-    DatedCollectionRange, ParsedCollectionDirectory,
+    parse_collection_directory, parse_year_directory, year_directory, CanonicalFilename,
+    CollectionIdentity, DatedCollectionRange, ParsedCollectionDirectory,
 };
 use souvenirs_domain::datetime::{
     confirm_batch, confirm_candidate, AcceptedDateTime, AcceptedDateTimeSource,
@@ -33,9 +33,9 @@ use souvenirs_domain::relationships::{
 };
 use souvenirs_domain::source::{SourceFile, SourceFileId, SourcePath};
 use souvenirs_storage::{
-    is_operation_journal_file_name, read_timestamped_operation_records, CatalogConfig,
-    CatalogInitializationError, CatalogLayout, DurableTransition, OperationRecord,
-    StorageCapabilities, StorageCapabilityError, WriteSuitability, FORMAT_VERSION,
+    is_operation_journal_file_name, read_manifest_entries, read_timestamped_operation_records,
+    CatalogConfig, CatalogInitializationError, CatalogLayout, DurableTransition, ManifestReadError,
+    OperationRecord, StorageCapabilities, StorageCapabilityError, WriteSuitability, FORMAT_VERSION,
 };
 use time::Date;
 
@@ -72,6 +72,45 @@ pub enum CatalogCollection {
         identity: CollectionIdentity,
         label: String,
         parts: Vec<CatalogCollectionPart>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogBrowseMedia {
+    pub filename: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogBrowseDateGroup {
+    pub date: Date,
+    pub media: Vec<CatalogBrowseMedia>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogBrowsePart {
+    pub year: i32,
+    pub year_directory: String,
+    pub collection_directory: String,
+    pub media_count: usize,
+    pub date_groups: Vec<CatalogBrowseDateGroup>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogBrowseCollection {
+    Dated {
+        identity: CollectionIdentity,
+        label: String,
+        start_date: Date,
+        end_date: Date,
+        media_count: usize,
+        date_groups: Vec<CatalogBrowseDateGroup>,
+    },
+    Ongoing {
+        identity: CollectionIdentity,
+        label: String,
+        media_count: usize,
+        parts: Vec<CatalogBrowsePart>,
     },
 }
 
@@ -247,6 +286,106 @@ impl CatalogService {
         }
         Ok(collections)
     }
+
+    pub fn browse(
+        path: impl AsRef<Path>,
+    ) -> Result<Vec<CatalogBrowseCollection>, CatalogServiceError> {
+        let path = path.as_ref();
+        let collections = Self::collections(path)?;
+        collections
+            .into_iter()
+            .map(|collection| match collection {
+                CatalogCollection::Dated {
+                    identity,
+                    label,
+                    start_date,
+                    end_date,
+                } => {
+                    let CollectionIdentity::Dated { year, directory } = &identity else {
+                        return Err(CatalogServiceError::InvalidCollectionLayout(
+                            "A dated collection has an invalid identity.".to_owned(),
+                        ));
+                    };
+                    let date_groups =
+                        browse_date_groups(&path.join(year.as_str()).join(directory.as_str()))?;
+                    Ok(CatalogBrowseCollection::Dated {
+                        identity,
+                        label,
+                        start_date,
+                        end_date,
+                        media_count: date_groups.iter().map(|group| group.media.len()).sum(),
+                        date_groups,
+                    })
+                }
+                CatalogCollection::Ongoing {
+                    identity,
+                    label,
+                    parts,
+                } => {
+                    let parts = parts
+                        .into_iter()
+                        .map(|part| {
+                            let date_groups = browse_date_groups(
+                                &path
+                                    .join(&part.year_directory)
+                                    .join(&part.collection_directory),
+                            )?;
+                            Ok(CatalogBrowsePart {
+                                year: part.year,
+                                year_directory: part.year_directory,
+                                collection_directory: part.collection_directory,
+                                media_count: date_groups
+                                    .iter()
+                                    .map(|group| group.media.len())
+                                    .sum(),
+                                date_groups,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, CatalogServiceError>>()?;
+                    Ok(CatalogBrowseCollection::Ongoing {
+                        identity,
+                        label,
+                        media_count: parts.iter().map(|part| part.media_count).sum(),
+                        parts,
+                    })
+                }
+            })
+            .collect()
+    }
+}
+
+fn browse_date_groups(
+    collection_path: &Path,
+) -> Result<Vec<CatalogBrowseDateGroup>, CatalogServiceError> {
+    let manifest_path = collection_path.join("SHA256SUMS");
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = read_manifest_entries(&manifest_path).map_err(|error| match error {
+        ManifestReadError::Invalid { .. } => {
+            CatalogServiceError::InvalidCollectionLayout(error.to_string())
+        }
+        ManifestReadError::Io { path, source } => CatalogServiceError::Io { path, source },
+    })?;
+    let mut groups = BTreeMap::<Date, Vec<CatalogBrowseMedia>>::new();
+    for entry in entries {
+        let filename = entry.filename.as_str();
+        let canonical = CanonicalFilename::parse(filename).ok_or_else(|| {
+            CatalogServiceError::InvalidCollectionLayout(format!(
+                "Manifest {} contains noncanonical original filename {filename:?}.",
+                manifest_path.display()
+            ))
+        })?;
+        let date = canonical.accepted_date();
+        groups.entry(date).or_default().push(CatalogBrowseMedia {
+            filename: filename.to_owned(),
+            path: collection_path.join(filename),
+        });
+    }
+    Ok(groups
+        .into_iter()
+        .map(|(date, media)| CatalogBrowseDateGroup { date, media })
+        .collect())
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
@@ -1547,6 +1686,120 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn browse_returns_manifest_admitted_media_grouped_by_date() {
+        let directory = tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Family Catalog").unwrap();
+        let dated = directory.path().join("2025/2025-12-31 +2d New Year");
+        let ongoing = directory.path().join("2025/z Kids");
+        fs::create_dir_all(&dated).unwrap();
+        fs::create_dir_all(&ongoing).unwrap();
+        fs::write(
+            dated.join("SHA256SUMS"),
+            concat!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
+                "2025-12-31 10-11-12 001.jpg\n",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  ",
+                "2026-01-01 09-08-07 001.mov\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            ongoing.join("SHA256SUMS"),
+            concat!(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  ",
+                "2025-03-02 10-11-05 001.heic\n"
+            ),
+        )
+        .unwrap();
+
+        let browse = CatalogService::browse(directory.path()).unwrap();
+
+        let super::CatalogBrowseCollection::Dated {
+            media_count,
+            date_groups,
+            ..
+        } = &browse[0]
+        else {
+            panic!("expected dated collection");
+        };
+        assert_eq!(*media_count, 2);
+        assert_eq!(
+            date_groups
+                .iter()
+                .map(|group| group.date)
+                .collect::<Vec<_>>(),
+            vec![
+                time::macros::date!(2025 - 12 - 31),
+                time::macros::date!(2026 - 01 - 01)
+            ]
+        );
+        assert_eq!(
+            date_groups[0].media[0].path,
+            dated.join("2025-12-31 10-11-12 001.jpg")
+        );
+
+        let super::CatalogBrowseCollection::Ongoing {
+            media_count, parts, ..
+        } = &browse[1]
+        else {
+            panic!("expected ongoing collection");
+        };
+        assert_eq!(*media_count, 1);
+        assert_eq!(parts[0].year, 2025);
+        assert_eq!(parts[0].media_count, 1);
+        assert_eq!(
+            parts[0].date_groups[0].media[0].filename,
+            "2025-03-02 10-11-05 001.heic"
+        );
+    }
+
+    #[test]
+    fn browse_excludes_unadmitted_files() {
+        let directory = tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Family Catalog").unwrap();
+        let collection = directory.path().join("2025/2025-07-09 Trip");
+        fs::create_dir_all(&collection).unwrap();
+        fs::write(
+            collection.join("2025-07-09 05-02-03 001.jpg"),
+            b"unadmitted",
+        )
+        .unwrap();
+
+        let browse = CatalogService::browse(directory.path()).unwrap();
+
+        assert!(matches!(
+            &browse[0],
+            super::CatalogBrowseCollection::Dated {
+                media_count: 0,
+                date_groups,
+                ..
+            } if date_groups.is_empty()
+        ));
+    }
+
+    #[test]
+    fn browse_rejects_noncanonical_admitted_filename() {
+        let directory = tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Family Catalog").unwrap();
+        let collection = directory.path().join("2025/2025-07-09 Trip");
+        fs::create_dir_all(&collection).unwrap();
+        fs::write(
+            collection.join("SHA256SUMS"),
+            concat!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
+                "2025-07-09 notes.jpg\n"
+            ),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            CatalogService::browse(directory.path()),
+            Err(CatalogServiceError::InvalidCollectionLayout(message))
+                if message.contains("noncanonical original filename")
+        ));
     }
 
     #[test]

@@ -132,6 +132,51 @@ final class RealEngineSmokeTests: XCTestCase {
         try await supervisor.stop()
     }
 
+    func testRealEngineBrowsesManifestAdmittedMedia() async throws {
+        let fixture = try makeFixture(fileCount: 1, bytesPerFile: 32)
+        let supervisor = EngineSupervisor()
+        _ = try await supervisor.start()
+        addTeardownBlock {
+            try? await supervisor.stop()
+        }
+        _ = try await supervisor.handshake()
+        _ = try await supervisor.createCatalog(
+            path: fixture.catalog.path,
+            displayName: "Browse Archive"
+        )
+        let collection = fixture.catalog
+            .appendingPathComponent("2026")
+            .appendingPathComponent("2026-10-10 Existing")
+        try FileManager.default.createDirectory(
+            at: collection,
+            withIntermediateDirectories: true
+        )
+        let filename = "2026-10-10 10-11-12 001.jpg"
+        try Data("media".utf8).write(to: collection.appendingPathComponent(filename))
+        try Data(
+            """
+            aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  \(filename)
+
+            """.utf8
+        ).write(to: collection.appendingPathComponent("SHA256SUMS"))
+
+        let collections = try await supervisor.catalogBrowse(path: fixture.catalog.path)
+
+        guard case .dated(
+            identity: .dated(year: "2026", directory: "2026-10-10 Existing"),
+            label: "Existing",
+            startDate: "2026-10-10",
+            endDate: "2026-10-10",
+            mediaCount: 1,
+            dateGroups: let groups
+        ) = collections.first else {
+            return XCTFail("Expected dated browse collection")
+        }
+        XCTAssertEqual(groups[0].date, "2026-10-10")
+        XCTAssertEqual(groups[0].media[0].path, collection.appendingPathComponent(filename).path)
+        try await supervisor.stop()
+    }
+
     func testRealEngineCancellationInterruptsRemainingCopies() async throws {
         let fixture = try makeFixture(fileCount: 3, bytesPerFile: 32)
         let supervisor = EngineSupervisor(

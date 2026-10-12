@@ -50,6 +50,7 @@ fn catalog_flow_serves_collection_query_capability() {
                 "catalog.collections",
                 json!({"path": "/catalog"}),
             ),
+            request("request-3", "catalog.browse", json!({"path": "/catalog"})),
         ],
     );
 
@@ -59,10 +60,19 @@ fn catalog_flow_serves_collection_query_capability() {
         .as_array()
         .unwrap()
         .contains(&json!("catalog.collections")));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("catalog.browse")));
     assert_eq!(messages[1]["result"]["type"], "catalog_collections");
     assert_eq!(
         messages[1]["result"]["collections"][1]["identity"]["key"],
         "kids"
+    );
+    assert_eq!(messages[2]["result"]["type"], "catalog_browse");
+    assert_eq!(
+        messages[2]["result"]["collections"][0]["date_groups"][0]["media"][0]["filename"],
+        "2019-07-15 10-11-12 001.jpg"
     );
 }
 

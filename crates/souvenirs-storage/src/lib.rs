@@ -21,7 +21,10 @@ pub use catalog_path::{
 pub use copy::{is_source_unavailable_error, CopyExpectation, VerifiedCopy, VerifiedCopyError};
 pub use index::{snapshot_catalog_manifests, CatalogIndex, CatalogIndexError};
 pub use lock::{CatalogLock, LockEnvironment, LockError, LockHolder, SystemLockEnvironment};
-pub use manifest::{ManifestReplacement, ManifestReplacementError, ManifestReplacementRequest};
+pub use manifest::{
+    read_manifest_entries, ManifestEntry, ManifestReadError, ManifestReplacement,
+    ManifestReplacementError, ManifestReplacementRequest,
+};
 #[cfg(feature = "test-failpoints")]
 pub use operation::Failpoint;
 pub use operation::{

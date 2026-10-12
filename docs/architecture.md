@@ -219,7 +219,7 @@ The protocol version remains the wire compatibility boundary.
 
 The Rust types generate a committed JSON Schema.
 Swift protocol fixtures must validate against this schema.
-Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v6.json`.
+Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v7.json`.
 
 The `catalog.collections` query returns engine-owned collection identities.
 A dated identity contains the exact year directory and collection directory.
@@ -228,6 +228,12 @@ Each ongoing result also contains the exact annual part directories.
 The earliest annual part supplies the ongoing display label.
 Dated collections sort by date range, label, and exact identity.
 Ongoing collections follow dated collections and sort by collision key.
+
+The `catalog.browse` query returns manifest-admitted originals for archive presentation.
+It preserves the same collection identities, ranges, ongoing grouping, and annual part directories.
+Rust groups originals by accepted date and returns media paths in deterministic manifest order.
+The macOS client must not reconstruct collection paths or read manifests directly.
+Published originals do not enter browse results until a manifest admits them.
 
 ### Engine
 

@@ -190,22 +190,52 @@ impl fmt::Display for CanonicalStem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CanonicalFilename(PortableComponent);
+pub struct CanonicalFilename {
+    component: PortableComponent,
+    accepted_date: Date,
+}
 
 impl CanonicalFilename {
     pub fn new(stem: &CanonicalStem, extension: &str) -> Result<Self, CatalogError> {
         validate_extension(extension)?;
-        Ok(Self(PortableComponent::new(format!("{stem}.{extension}"))?))
+        Ok(Self {
+            component: PortableComponent::new(format!("{stem}.{extension}"))?,
+            accepted_date: stem.datetime.date(),
+        })
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let datetime = value.get(..19).and_then(|prefix| {
+            PrimitiveDateTime::parse(
+                prefix,
+                format_description!("[year]-[month]-[day] [hour]-[minute]-[second]"),
+            )
+            .ok()
+        })?;
+        let (counter, extension) = value.get(19..)?.strip_prefix(' ')?.split_once('.')?;
+        if counter.len() < 3
+            || (counter.len() > 3 && counter.starts_with('0'))
+            || !counter.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let counter = NonZeroU32::new(counter.parse().ok()?)?;
+        let canonical = Self::new(&CanonicalStem::new(datetime, counter).ok()?, extension).ok()?;
+        is_canonical_directory_name(value, canonical.as_str()).then_some(canonical)
     }
 
     pub fn as_str(&self) -> &str {
-        self.0.as_str()
+        self.component.as_str()
+    }
+
+    pub fn accepted_date(&self) -> Date {
+        self.accepted_date
     }
 }
 
 impl fmt::Display for CanonicalFilename {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
+        self.component.fmt(formatter)
     }
 }
 
@@ -599,6 +629,16 @@ mod tests {
                 .as_str(),
             "2024-07-09 05-02-03 012.e\u{301}xt"
         );
+    }
+
+    #[test]
+    fn canonical_filename_parser_shares_writer_rules() {
+        let filename = CanonicalFilename::parse("2024-07-09 05-02-03 012.JpG").unwrap();
+
+        assert_eq!(filename.accepted_date(), date(2024, Month::July, 9));
+        assert_eq!(filename.as_str(), "2024-07-09 05-02-03 012.JpG");
+        assert!(CanonicalFilename::parse("2024-07-09 notes.txt").is_none());
+        assert!(CanonicalFilename::parse("2024-07-09 05-02-03 0012.jpg").is_none());
     }
 
     #[test]
