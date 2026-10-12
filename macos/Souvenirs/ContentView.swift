@@ -425,7 +425,7 @@ struct ContentView: View {
         .task(id: "browse-\(catalog.path)") {
             await model.browse.load(catalogPath: catalog.path)
         }
-        .onChange(of: imports.presentationRevision, initial: true) { _, _ in
+        .onReceive(imports.$presentationRevision) { _ in
             let isTerminal = terminalRefreshToken != nil
             Task {
                 await syncImportPresentation(for: catalog, loadDetail: !isTerminal)
