@@ -86,7 +86,7 @@ struct CatalogBrowseHeader: View {
         VStack(alignment: .leading, spacing: 1) {
             Text(model.displayTitle)
                 .font(.headline)
-                .focusable(model.importReconciliation == .landed)
+                .focusable()
                 .focused($titleFocused)
                 .accessibilityFocused($titleAccessibilityFocused)
                 .accessibilityAddTraits(.isHeader)

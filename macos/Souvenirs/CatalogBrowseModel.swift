@@ -166,7 +166,7 @@ final class CatalogBrowseModel: ObservableObject {
         if let displayedCollection {
             return displayedCollection.label
         }
-        if let transientImport, transientImport.reconciliation != .landed {
+        if let transientImport, transientImport.reconciliation != .landed, selection == transientImport.occurrence.map(Selection.collection) {
             return transientImport.collectionName.isEmpty
                 ? "Importing" : transientImport.collectionName
         }
