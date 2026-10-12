@@ -724,18 +724,22 @@ fn source_snapshot(
     Ok(Some(snapshot))
 }
 
-fn emit_recovered_media(
-    plan: &ExecutionPlan,
-    destination: PathBuf,
+struct RecoveryMediaProgress {
     legacy_file_progress: bool,
     total_media: usize,
     total_units: usize,
-    emitted_media: &mut BTreeSet<PathBuf>,
-    completed_media: &mut usize,
-    completed_units: &mut usize,
+    emitted_media: BTreeSet<PathBuf>,
+    completed_media: usize,
+    completed_units: usize,
+}
+
+fn emit_recovered_media(
+    plan: &ExecutionPlan,
+    destination: PathBuf,
+    progress: &mut RecoveryMediaProgress,
     update: &mut impl FnMut(OperationUpdate),
 ) -> Result<(), ImportExecutionError> {
-    if !emitted_media.insert(destination.clone()) {
+    if !progress.emitted_media.insert(destination.clone()) {
         return Ok(());
     }
     let copy = plan
@@ -748,29 +752,35 @@ fn emit_recovered_media(
                 destination.display()
             ))
         })?;
-    if legacy_file_progress {
-        *completed_units += 1;
+    if progress.legacy_file_progress {
+        progress.completed_units += 1;
         update(OperationUpdate::Progress(OperationProgress {
-            completed_units: *completed_units as u64,
-            total_units: total_units as u64,
-            message: format!("Recovered {completed_units} of {total_units}"),
+            completed_units: progress.completed_units as u64,
+            total_units: progress.total_units as u64,
+            message: format!(
+                "Recovered {} of {}",
+                progress.completed_units, progress.total_units
+            ),
         }));
         return Ok(());
     }
     let Some(media) = recovery_operation_media(plan, copy)? else {
         return Ok(());
     };
-    *completed_media += 1;
-    *completed_units += 1;
+    progress.completed_media += 1;
+    progress.completed_units += 1;
     update(OperationUpdate::MediaVerified(OperationMediaVerified {
         media,
-        completed_media: *completed_media as u64,
-        total_media: total_media as u64,
+        completed_media: progress.completed_media as u64,
+        total_media: progress.total_media as u64,
     }));
     update(OperationUpdate::Progress(OperationProgress {
-        completed_units: *completed_units as u64,
-        total_units: total_units as u64,
-        message: format!("Recovered {completed_units} of {total_units}"),
+        completed_units: progress.completed_units as u64,
+        total_units: progress.total_units as u64,
+        message: format!(
+            "Recovered {} of {}",
+            progress.completed_units, progress.total_units
+        ),
     }));
     Ok(())
 }
@@ -818,32 +828,42 @@ impl ImportRecoveryService {
         } else {
             total_media
         };
-        let mut emitted_media = BTreeSet::new();
-        let mut completed_media = 0;
-        let mut completed_units = 0;
+        let mut media_progress = RecoveryMediaProgress {
+            legacy_file_progress,
+            total_media,
+            total_units,
+            emitted_media: BTreeSet::new(),
+            completed_media: 0,
+            completed_units: 0,
+        };
         for copy in &plan.copies {
             if published
                 .get(&copy.destination)
                 .is_some_and(|state| state.published)
             {
-                emitted_media.insert(copy.destination.clone());
+                media_progress
+                    .emitted_media
+                    .insert(copy.destination.clone());
                 if legacy_file_progress {
-                    completed_units += 1;
+                    media_progress.completed_units += 1;
                 } else if let Some(media) = recovery_operation_media(&plan, copy)? {
-                    completed_media += 1;
-                    completed_units += 1;
+                    media_progress.completed_media += 1;
+                    media_progress.completed_units += 1;
                     update(OperationUpdate::MediaVerified(OperationMediaVerified {
                         media,
-                        completed_media: completed_media as u64,
+                        completed_media: media_progress.completed_media as u64,
                         total_media: total_media as u64,
                     }));
                 }
             }
         }
         update(OperationUpdate::Progress(OperationProgress {
-            completed_units: completed_units as u64,
+            completed_units: media_progress.completed_units as u64,
             total_units: total_units as u64,
-            message: format!("Recovered {completed_units} of {total_units}"),
+            message: format!(
+                "Recovered {} of {total_units}",
+                media_progress.completed_units
+            ),
         }));
         if mode == ImportRecoveryMode::Resume {
             if let Err(error) = validate_recovery_sources(&layout, &plan, &published) {
@@ -877,12 +897,7 @@ impl ImportRecoveryService {
                                         if let Err(error) = emit_recovered_media(
                                             &plan,
                                             destination,
-                                            legacy_file_progress,
-                                            total_media,
-                                            total_units,
-                                            &mut emitted_media,
-                                            &mut completed_media,
-                                            &mut completed_units,
+                                            &mut media_progress,
                                             &mut update,
                                         ) {
                                             checkpoint_error = Some(error);
@@ -928,12 +943,7 @@ impl ImportRecoveryService {
                                         if let Err(error) = emit_recovered_media(
                                             &plan,
                                             destination,
-                                            legacy_file_progress,
-                                            total_media,
-                                            total_units,
-                                            &mut emitted_media,
-                                            &mut completed_media,
-                                            &mut completed_units,
+                                            &mut media_progress,
                                             &mut update,
                                         ) {
                                             checkpoint_error = Some(error);
@@ -989,12 +999,7 @@ impl ImportRecoveryService {
                                     if let Err(error) = emit_recovered_media(
                                         &current_plan,
                                         destination,
-                                        legacy_file_progress,
-                                        total_media,
-                                        total_units,
-                                        &mut emitted_media,
-                                        &mut completed_media,
-                                        &mut completed_units,
+                                        &mut media_progress,
                                         &mut update,
                                     ) {
                                         checkpoint_error = Some(error);
