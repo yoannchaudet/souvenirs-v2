@@ -561,6 +561,9 @@ struct ContentView: View {
             .accessibilityIdentifier("connected-source-summary")
             .accessibilityLabel("Connected source")
             .accessibilityValue(sourceSummary(source))
+            .accessibilityHint(
+                "Souvenirs scans this source only after you review the import."
+            )
             Spacer(minLength: 8)
             Button("Review Import…") {
                 let requestID = UUID()

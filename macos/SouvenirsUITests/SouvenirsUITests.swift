@@ -650,7 +650,7 @@ final class SouvenirsUITests: XCTestCase {
             "2 removable sources connected · BACKUP_CARD selected"
         )
 
-        app.menuButtons["connected-source-selector"].click()
+        app.descendants(matching: .any)["connected-source-selector"].click()
         app.menuItems["EOS_DIGITAL"].click()
 
         expectation(
