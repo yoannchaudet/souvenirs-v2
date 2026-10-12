@@ -1806,6 +1806,7 @@ mod tests {
             ),
         )
         .unwrap();
+        fs::write(dated.join("unadmitted.jpg"), b"unadmitted").unwrap();
 
         let summary = CatalogService::browse(directory.path(), None).unwrap();
         assert!(matches!(
@@ -1864,30 +1865,6 @@ mod tests {
             parts[0].date_groups[0].media[0].filename,
             "2025-03-02 10-11-05 001.heic"
         );
-    }
-
-    #[test]
-    fn browse_excludes_unadmitted_files() {
-        let directory = tempdir().expect("temporary directory");
-        CatalogService::create(directory.path(), "Family Catalog").unwrap();
-        let collection = directory.path().join("2025/2025-07-09 Trip");
-        fs::create_dir_all(&collection).unwrap();
-        fs::write(
-            collection.join("2025-07-09 05-02-03 001.jpg"),
-            b"unadmitted",
-        )
-        .unwrap();
-
-        let browse = CatalogService::browse(directory.path(), None).unwrap();
-
-        assert!(matches!(
-            &browse[0],
-            super::CatalogBrowseCollection::Dated {
-                media_count: 0,
-                date_groups,
-                ..
-            } if date_groups.is_empty()
-        ));
     }
 
     #[test]

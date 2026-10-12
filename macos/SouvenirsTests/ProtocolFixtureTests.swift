@@ -196,9 +196,8 @@ final class ProtocolFixtureTests: XCTestCase {
                     id: "request-4",
                     protocolVersion: EngineSupervisor.protocolVersion,
                     method: "operation.inspect",
-                    params: CatalogBrowseParameters(
-                        path: "/Volumes/photos/Family Catalog",
-                        selection: nil
+                    params: CatalogPathParameters(
+                        path: "/Volumes/photos/Family Catalog"
                     )
                 )
             )
@@ -294,8 +293,9 @@ final class ProtocolFixtureTests: XCTestCase {
                     id: "request-browse",
                     protocolVersion: EngineSupervisor.protocolVersion,
                     method: "catalog.browse",
-                    params: CatalogPathParameters(
-                        path: "/Volumes/photos/Family Catalog"
+                    params: CatalogBrowseParameters(
+                        path: "/Volumes/photos/Family Catalog",
+                        selection: .ongoing(key: "kids")
                     )
                 )
             )
@@ -305,21 +305,17 @@ final class ProtocolFixtureTests: XCTestCase {
                 from: data
             )
             XCTAssertEqual(response.result.type, "catalog_browse")
-            XCTAssertEqual(response.result.collections.count, 2)
-            guard case .dated(
-                identity: .dated(year: "2019", directory: "2019-07-14 +6d Brittany"),
-                label: "Brittany",
-                startDate: "2019-07-14",
-                endDate: "2019-07-20",
+            XCTAssertEqual(response.result.collections.count, 1)
+            guard case .ongoing(
+                identity: .ongoing(key: "kids"),
+                label: "Kids",
                 mediaCount: 1,
-                coverMedia: let coverMedia,
-                dateGroups: let groups,
-                problem: nil
+                parts: let parts
             ) = response.result.collections[0] else {
-                return XCTFail("Expected dated browse collection")
+                return XCTFail("Expected ongoing browse collection")
             }
-            XCTAssertTrue(groups.isEmpty)
-            XCTAssertEqual(coverMedia?.filename, "2019-07-15 10-11-12 001.jpg")
+            XCTAssertEqual(parts[0].dateGroups[0].date, "2019-03-02")
+            XCTAssertEqual(parts[1].problem, "invalid catalog manifest")
         case 13:
             try assertRequest(
                 data,
@@ -502,9 +498,15 @@ private enum ProtocolFixtureValidator {
         case "operation.inspect":
             try requireKeys(parameters, exactly: ["path"], at: "\(path).params")
             _ = try requireString(parameters, key: "path", at: "\(path).params")
-        case "catalog.collections", "catalog.browse":
+        case "catalog.collections":
             try requireKeys(parameters, exactly: ["path"], at: "\(path).params")
             _ = try requireString(parameters, key: "path", at: "\(path).params")
+        case "catalog.browse":
+            try requireKeys(parameters, exactly: ["path", "selection"], at: "\(path).params")
+            _ = try requireString(parameters, key: "path", at: "\(path).params")
+            let selection = try requireObject(parameters, key: "selection", at: "\(path).params")
+            try requireKeys(selection, exactly: ["kind", "key"], at: "\(path).params.selection")
+            _ = try requireString(selection, key: "key", at: "\(path).params.selection")
         case "import.review":
             try requireKeys(
                 parameters,

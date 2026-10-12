@@ -44,9 +44,19 @@ pub fn read_manifest_entries(
     let mut entries = Vec::new();
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
         let line_number = line_index + 1;
-        let line = line.map_err(|source| ManifestReadError::Io {
-            path: path.to_path_buf(),
-            source,
+        let line = line.map_err(|source| {
+            if source.kind() == io::ErrorKind::InvalidData {
+                ManifestReadError::Invalid {
+                    path: path.to_path_buf(),
+                    line: line_number,
+                    reason: "manifest is not valid UTF-8".to_owned(),
+                }
+            } else {
+                ManifestReadError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            }
         })?;
         let Some((digest, filename)) = line.split_once("  ") else {
             return Err(ManifestReadError::Invalid {
@@ -525,6 +535,19 @@ mod tests {
             read_manifest_entries(path),
             Err(ManifestReadError::Invalid { line: 2, reason, .. })
                 if reason.contains("strict byte order")
+        ));
+    }
+
+    #[test]
+    fn classifies_invalid_utf8_as_invalid_manifest_content() {
+        let directory = TempDirectory::new("invalid-utf8-manifest");
+        let path = directory.path().join("SHA256SUMS");
+        fs::write(&path, [0xff, b'\n']).unwrap();
+
+        assert!(matches!(
+            read_manifest_entries(path),
+            Err(ManifestReadError::Invalid { line: 1, reason, .. })
+                if reason.contains("UTF-8")
         ));
     }
 
