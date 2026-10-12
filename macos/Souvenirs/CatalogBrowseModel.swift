@@ -267,7 +267,8 @@ final class CatalogBrowseModel: ObservableObject {
     func updateImportPresentation(
         operationID: String?,
         collectionName: String,
-        media: [EngineSupervisor.OperationMedia]
+        media: [EngineSupervisor.OperationMedia],
+        loadDetail: Bool = true
     ) async {
         guard let operationID else {
             clearImportPresentation()
@@ -315,7 +316,7 @@ final class CatalogBrowseModel: ObservableObject {
             selectedScope = scopeContaining(occurrence, in: navigation) ?? selectedScope
         }
 
-        guard previousOccurrence != occurrence else {
+        guard loadDetail, previousOccurrence != occurrence else {
             return
         }
         await loadImportDetail(occurrence, operationID: operationID)

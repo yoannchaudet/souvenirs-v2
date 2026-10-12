@@ -432,7 +432,7 @@ struct ContentView: View {
             guard token != nil else { return }
             Task {
                 await Task.yield()
-                await syncImportPresentation(for: catalog)
+                await syncImportPresentation(for: catalog, loadDetail: false)
                 await model.browse.reconcileTerminalImport()
             }
         }
@@ -688,7 +688,10 @@ struct ContentView: View {
         }
     }
 
-    private func syncImportPresentation(for catalog: RecentCatalog) async {
+    private func syncImportPresentation(
+        for catalog: RecentCatalog,
+        loadDetail: Bool = true
+    ) async {
         guard imports.catalog?.path == catalog.path else {
             model.browse.clearImportPresentation()
             return
@@ -696,7 +699,8 @@ struct ContentView: View {
         await model.browse.updateImportPresentation(
             operationID: imports.operationID,
             collectionName: imports.collectionName,
-            media: imports.verifiedMedia
+            media: imports.verifiedMedia,
+            loadDetail: loadDetail
         )
     }
 

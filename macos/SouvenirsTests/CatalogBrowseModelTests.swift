@@ -300,7 +300,8 @@ final class CatalogBrowseModelTests: XCTestCase {
         await model.updateImportPresentation(
             operationID: "operation-1",
             collectionName: "Dolomites",
-            media: [media]
+            media: [media],
+            loadDetail: false
         )
         XCTAssertNotNil(model.presentedImportCollection)
 
