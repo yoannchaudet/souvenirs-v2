@@ -97,6 +97,7 @@ final class ImportExecutionCoordinator: ObservableObject {
         EngineSupervisor.UnfinishedOperation.ActivityTime?
     @Published private(set) var isRetryingRecovery = false
     @Published private(set) var verifiedMedia: [EngineSupervisor.OperationMedia] = []
+    @Published private(set) var presentationRevision = 0
 
     private let engine: ImportExecutionEngine
     private var operationTask: Task<Void, Never>?
@@ -147,6 +148,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                 }
                 let operationID = try await engine.startImportExecution(reviewedPlan: reviewedPlan)
                 self.operationID = operationID
+                presentationRevision += 1
                 try await consume(operationID: operationID, recovering: false)
             } catch {
                 guard !Task.isCancelled else { return }
@@ -246,6 +248,7 @@ final class ImportExecutionCoordinator: ObservableObject {
             do {
                 _ = try await engine.cancel(operationID: recovery.operationID)
                 phase = .cancelled(copiedCount: recovery.copiedCount)
+                presentationRevision += 1
             } catch {
                 phase = failurePhase(error)
             }
@@ -277,8 +280,10 @@ final class ImportExecutionCoordinator: ObservableObject {
                     ? "Checking copied files…"
                     : "Copying and checking each file…"
             case .progress(let completed, let total, let message):
-                completedUnits = completed
-                if let total { totalUnits = max(total, 1) }
+                if verifiedMedia.isEmpty, let total {
+                    completedUnits = completed
+                    totalUnits = max(total, 1)
+                }
                 if let message { progressMessage = message }
             case .mediaVerified(let media, let completed, let total):
                 guard recordVerifiedMedia(media) else {
@@ -290,18 +295,23 @@ final class ImportExecutionCoordinator: ObservableObject {
             case .completed(let result):
                 do {
                     phase = .completed(try decodeOutcome(result))
+                    presentationRevision += 1
                 } catch {
                     phase = .failed("The engine returned an invalid completion result.")
                 }
+                return
             case .failed(let code, let message):
                 if code == "source_unavailable" {
                     await routeSourceUnavailable(operationID: operationID)
                 } else {
                     phase = .failed(archiveUserMessage(code: code, message: message))
                 }
+                return
             case .cancelled(let copiedCount):
                 completedUnits = UInt64(copiedCount)
                 phase = .cancelled(copiedCount: copiedCount)
+                presentationRevision += 1
+                return
             }
         }
         if phase == .running || phase == .recovering || phase == .stopping {
@@ -332,6 +342,7 @@ final class ImportExecutionCoordinator: ObservableObject {
             operationID: recovery.operationID
         )
         self.operationID = operationID
+        presentationRevision += 1
         try await consume(operationID: operationID, recovering: true)
     }
 
@@ -407,12 +418,14 @@ final class ImportExecutionCoordinator: ObservableObject {
         }
         mediaByKey[key] = media
         verifiedMedia.append(media)
+        presentationRevision += 1
         return true
     }
 
     private func clearVerifiedMedia() {
         verifiedMedia = []
         mediaByKey = [:]
+        presentationRevision += 1
     }
 
     private func decodeOutcome(_ data: Data) throws -> ImportOutcome {

@@ -13,6 +13,7 @@ struct ContentView: View {
 
     let engineStatus: EngineAppModel.Status
     @ObservedObject var model: CatalogWelcomeModel
+    @ObservedObject private var browse: CatalogBrowseModel
     @ObservedObject var imports: ImportExecutionCoordinator
     let onRetryEngine: (() -> Void)?
     @State private var modalReturnFocus: ModalReturnFocus?
@@ -28,6 +29,7 @@ struct ContentView: View {
     ) {
         self.engineStatus = engineStatus
         self.model = model
+        self.browse = model.browse
         self.imports = imports
         self.onRetryEngine = onRetryEngine
     }
@@ -339,27 +341,7 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 HStack {
-                    if imports.catalog?.path == catalog.path,
-                       imports.phase != .idle,
-                       imports.phase != .recoveryDeferred {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(
-                                imports.collectionName.isEmpty
-                                    ? "All Photos" : imports.collectionName
-                            )
-                            .font(.headline)
-                            if !imports.collectionName.isEmpty, let review = imports.review {
-                                Text(
-                                    "\(review.acceptedDate) · "
-                                        + "\(review.transferCount) photos and videos"
-                                )
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            }
-                        }
-                    } else {
-                        CatalogBrowseHeader(model: model.browse)
-                    }
+                    CatalogBrowseHeader(model: model.browse)
                     Spacer()
                     if imports.phase == .idle || imports.phase == .recoveryDeferred {
                         Button {
@@ -397,25 +379,23 @@ struct ContentView: View {
                 .padding(.horizontal, 18)
                 .frame(height: 44)
                 Divider()
-                if imports.catalog?.path == catalog.path,
-                   imports.phase != .idle,
-                   imports.phase != .recoveryDeferred {
-                    importActivity(catalog)
-                } else {
-                    VStack(spacing: 0) {
-                        if imports.catalog?.path == catalog.path,
-                           imports.phase == .recoveryDeferred {
-                            deferredRecovery
-                                .padding(.vertical, 12)
-                        }
-                        if let source = model.selectedConnectedSource {
-                            connectedSourceBanner(source, catalog: catalog)
-                                .padding(.horizontal, 18)
-                                .padding(.vertical, 12)
-                        }
-                        CatalogBrowsePane(model: model.browse) {
-                            catalogReadyContent(catalog)
-                        }
+                VStack(spacing: 0) {
+                    if imports.catalog?.path == catalog.path {
+                        importActivity
+                    }
+                    if imports.catalog?.path == catalog.path,
+                       imports.phase == .recoveryDeferred {
+                        deferredRecovery
+                            .padding(.vertical, 12)
+                    }
+                    if imports.phase == .idle || imports.phase == .recoveryDeferred,
+                       let source = model.selectedConnectedSource {
+                        connectedSourceBanner(source, catalog: catalog)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
+                    }
+                    CatalogBrowsePane(model: model.browse) {
+                        catalogReadyContent(catalog)
                     }
                 }
                 HStack(spacing: 3) {
@@ -446,6 +426,13 @@ struct ContentView: View {
         }
         .task(id: "browse-\(catalog.path)") {
             await model.browse.load(catalogPath: catalog.path)
+        }
+        .onReceive(imports.$presentationRevision) { _ in
+            let isTerminal = terminalRefreshToken != nil
+            Task {
+                await syncImportPresentation(for: catalog, loadDetail: !isTerminal)
+                if isTerminal { await model.browse.reconcileTerminalImport() }
+            }
         }
     }
 
@@ -651,10 +638,21 @@ struct ContentView: View {
     private var sidebarStatus: String {
         switch imports.phase {
         case .running, .recovering, .stopping:
-            return "Importing · \(imports.percentCompleted)%"
-        case .recoveryPrompt, .recoveryDeferred, .failed:
+            return "Importing · \(imports.completedUnits) of \(imports.totalUnits)"
+        case .recoveryPrompt, .recoveryDeferred:
+            return "Import paused · \(imports.completedUnits) of \(imports.totalUnits) safe"
+        case .completed, .cancelled:
+            switch model.browse.importReconciliation {
+            case .landed:
+                return "Everything is safe"
+            case .failed:
+                return "Archive access · needs you"
+            case .active, .refreshing, .none:
+                return "Updating archive…"
+            }
+        case .failed:
             return "Import paused · needs you"
-        default:
+        case .idle:
             return "Everything is safe"
         }
     }
@@ -665,20 +663,52 @@ struct ContentView: View {
             return .blue
         case .recoveryPrompt, .recoveryDeferred:
             return .orange
+        case .completed, .cancelled:
+            if case .failed = model.browse.importReconciliation {
+                return .red
+            }
+            return model.browse.importReconciliation == .landed ? .green : .blue
         case .failed:
             return .red
-        default:
+        case .idle:
             return .green
         }
     }
 
+    private var terminalRefreshToken: String? {
+        switch imports.phase {
+        case .completed(let outcome):
+            return "\(imports.operationID ?? "operation")-completed-\(outcome.copiedCount)"
+        case .cancelled(let copiedCount):
+            return "\(imports.operationID ?? "operation")-cancelled-\(copiedCount)"
+        default:
+            return nil
+        }
+    }
+
+    private func syncImportPresentation(
+        for catalog: RecentCatalog,
+        loadDetail: Bool = true
+    ) async {
+        guard imports.catalog?.path == catalog.path else {
+            model.browse.clearImportPresentation()
+            return
+        }
+        await model.browse.updateImportPresentation(
+            operationID: imports.operationID,
+            collectionName: imports.collectionName,
+            media: imports.verifiedMedia,
+            loadDetail: loadDetail
+        )
+    }
+
     @ViewBuilder
-    private func importActivity(_ catalog: RecentCatalog) -> some View {
+    private var importActivity: some View {
         switch imports.phase {
         case .running, .recovering:
             importProgress
         case .stopping:
-            activityMessage(
+            activityBanner(
                 icon: "stop.circle",
                 title: "Stopping safely…",
                 message: "Souvenirs keeps every verified item and records where the import stopped.",
@@ -687,19 +717,25 @@ struct ContentView: View {
                 actionTitle: nil
             )
         case .completed(let outcome):
-            completedImport(outcome)
+            terminalActivity(
+                success: completedImport(outcome),
+                pendingMessage: "Souvenirs is confirming the imported media in the archive."
+            )
         case .cancelled(let copiedCount):
-            activityMessage(
-                icon: "stop.circle.fill",
-                title: "Import stopped",
-                message: "\(copiedCount) verified items remain in your archive. Nothing on the source was changed.",
-                tint: .secondary,
-                identifier: "import-cancelled",
-                actionTitle: "Done",
-                action: imports.dismissOutcome
+            terminalActivity(
+                success: activityBanner(
+                    icon: "stop.circle.fill",
+                    title: "Import stopped",
+                    message: "\(copiedCount) verified items remain in your archive. Nothing on the source was changed.",
+                    tint: .secondary,
+                    identifier: "import-cancelled",
+                    actionTitle: "Done",
+                    action: imports.dismissOutcome
+                ),
+                pendingMessage: "Souvenirs is confirming the admitted partial import."
             )
         case .failed(let message):
-            activityMessage(
+            activityBanner(
                 icon: "exclamationmark.triangle.fill",
                 title: "Import needs attention",
                 message: message,
@@ -709,109 +745,122 @@ struct ContentView: View {
                 action: imports.dismissOutcome
             )
         case .idle, .recoveryPrompt, .recoveryDeferred:
-            Spacer()
+            EmptyView()
         }
     }
 
     private var importProgress: some View {
-        ScrollView {
-            VStack(spacing: 18) {
-                VStack(alignment: .leading, spacing: 9) {
-                    HStack {
-                        Text(
-                            imports.progressMessage == "Checking the source…"
-                                ? "Checking the source"
-                                : "Copying \(imports.completedUnits) of \(imports.totalUnits)"
-                        )
-                            .font(.headline)
-                            .accessibilityIdentifier("import-progress-count")
-                        Spacer()
-                        Text("\(imports.percentCompleted)%")
-                            .foregroundStyle(.secondary)
-                    }
-                    ProgressView(value: imports.fractionCompleted)
-                        .progressViewStyle(.linear)
-                        .accessibilityIdentifier("import-progress-bar")
-                    HStack {
-                        Label(
-                            "Keep \(imports.sourceName) connected. Nothing on it will change. You can close this window.",
-                            systemImage: "checkmark.shield"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Stop…") { imports.stop() }
-                            .disabled(!imports.canStop)
-                            .accessibilityIdentifier("stop-import")
-                            .focusable()
-                            .focused($keyboardFocus, equals: .stopImport)
-                            .accessibilityFocused(
-                                $accessibilityFocus,
-                                equals: .stopImport
-                            )
-                    }
-                }
-                .padding(16)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-                .shadow(color: .black.opacity(0.08), radius: 14, y: 6)
-
-                Text(imports.progressMessage)
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text(
+                    imports.progressMessage == "Checking the source…"
+                        ? "Checking the source"
+                        : "Copying \(imports.completedUnits) of \(imports.totalUnits)"
+                )
+                    .font(.headline)
+                    .accessibilityIdentifier("import-progress-count")
+                Spacer()
+                Text("\(imports.percentCompleted)%")
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: imports.fractionCompleted)
+                .progressViewStyle(.linear)
+                .accessibilityIdentifier("import-progress-bar")
+            HStack {
+                Label(
+                    "Keep \(imports.sourceName) connected. Nothing on it will change. You can close this window.",
+                    systemImage: "checkmark.shield"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("import-progress-message")
-                thumbnailWall
+                Spacer()
+                Button("Stop…") { imports.stop() }
+                    .disabled(!imports.canStop)
+                    .accessibilityIdentifier("stop-import")
+                    .focusable()
+                    .focused($keyboardFocus, equals: .stopImport)
+                    .accessibilityFocused(
+                        $accessibilityFocus,
+                        equals: .stopImport
+                    )
             }
-            .padding(22)
-            .frame(maxWidth: .infinity, alignment: .top)
+            Text(imports.progressMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("import-progress-message")
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.08), radius: 10, y: 4)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+
+    private func terminalActivity<Success: View>(
+        success: Success,
+        pendingMessage: String
+    ) -> some View {
+        Group {
+            switch model.browse.importReconciliation {
+            case .landed:
+                success
+            case .failed(let message):
+                activityBanner(
+                    icon: "externaldrive.badge.exclamationmark",
+                    title: "Archive access needs attention",
+                    message: message,
+                    tint: .red,
+                    identifier: "import-terminal-archive-error",
+                    actionTitle: model.browse.canRetryTerminalImport
+                        ? "Try Again"
+                        : nil,
+                    action: {
+                        Task { await model.browse.reconcileTerminalImport() }
+                    },
+                    secondaryActionTitle: "Continue Browsing",
+                    secondaryAction: {
+                        model.browse.clearImportPresentation()
+                        imports.dismissOutcome()
+                        Task { await model.browse.refresh() }
+                    }
+                )
+            case .active, .refreshing, .none:
+                activityBanner(
+                    icon: "arrow.trianglehead.2.clockwise.rotate.90",
+                    title: "Updating the archive…",
+                    message: pendingMessage,
+                    tint: .blue,
+                    identifier: "import-terminal-refreshing",
+                    actionTitle: nil
+                )
+            }
         }
     }
 
     private func completedImport(_ outcome: ImportOutcome) -> some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                HStack(spacing: 11) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.green)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("All \(outcome.copiedCount) copied and checked. You can eject \(imports.sourceName).")
-                        .font(.headline)
-                        .accessibilityIdentifier("import-completed")
-                        Text("\(outcome.skippedCount) already in your archive were skipped · \(outcome.leftOnSourceCount) remain on the source")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Done") { imports.dismissOutcome() }
-                        .accessibilityIdentifier("dismiss-import-completed")
-                }
-                .padding(14)
-                .background(.green.opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12).stroke(.green.opacity(0.28))
-                }
-                thumbnailWall
+        HStack(spacing: 11) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("All \(outcome.copiedCount) copied and checked. You can eject \(imports.sourceName).")
+                    .font(.headline)
+                    .accessibilityIdentifier("import-completed")
+                Text("\(outcome.skippedCount) already in your archive were skipped · \(outcome.leftOnSourceCount) remain on the source")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .padding(22)
-            .frame(maxWidth: .infinity, alignment: .top)
+            Spacer()
+            Button("Done") { imports.dismissOutcome() }
+                .accessibilityIdentifier("dismiss-import-completed")
         }
-    }
-
-    private var thumbnailWall: some View {
-        LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 5),
-            spacing: 7
-        ) {
-            ForEach(0..<15, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(
-                        [Color.blue, .teal, .green, .indigo, .mint][index % 5]
-                            .opacity(index < Int(imports.completedUnits) ? 0.52 : 0.1)
-                    )
-                    .frame(height: index == 0 ? 118 : 80)
-            }
+        .padding(14)
+        .background(.green.opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12).stroke(.green.opacity(0.28))
         }
-        .accessibilityHidden(true)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
     }
 
     private var deferredRecovery: some View {
@@ -857,39 +906,46 @@ struct ContentView: View {
         .padding(.horizontal, 18)
     }
 
-    private func activityMessage(
+    private func activityBanner(
         icon: String,
         title: String,
         message: String,
         tint: Color,
         identifier: String,
         actionTitle: String?,
-        action: @escaping () -> Void = {}
+        action: @escaping () -> Void = {},
+        secondaryActionTitle: String? = nil,
+        secondaryAction: @escaping () -> Void = {}
     ) -> some View {
-        GeometryReader { proxy in
-            ScrollView {
-                VStack(spacing: 12) {
-                    Spacer(minLength: 24)
-                    Image(systemName: icon)
-                        .font(.system(size: 34))
-                        .foregroundStyle(tint)
-                    Text(title)
-                        .font(.title2.bold())
-                        .accessibilityIdentifier(identifier)
-                    Text(message)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 440)
-                    if let actionTitle {
-                        Button(actionTitle, action: action)
-                            .accessibilityIdentifier("\(identifier)-action")
-                    }
-                    Spacer(minLength: 24)
-                }
-                .padding(.horizontal, 18)
-                .frame(maxWidth: .infinity, minHeight: proxy.size.height)
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                    .accessibilityIdentifier(identifier)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let secondaryActionTitle {
+                Button(secondaryActionTitle, action: secondaryAction)
+                    .accessibilityIdentifier("\(identifier)-secondary-action")
+            }
+            if let actionTitle {
+                Button(actionTitle, action: action)
+                    .accessibilityIdentifier("\(identifier)-action")
             }
         }
+        .padding(14)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12).stroke(tint.opacity(0.24))
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
     }
 
     private func welcomeAction(

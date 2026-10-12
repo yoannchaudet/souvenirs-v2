@@ -15,9 +15,23 @@ final class RealEngineSmokeTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    private func makeSupervisor(
+        arguments: [String] = []
+    ) -> EngineSupervisor {
+        let appContents = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return EngineSupervisor(
+            executableURL: appContents
+                .appendingPathComponent("MacOS")
+                .appendingPathComponent("souvenirs-engine"),
+            arguments: arguments
+        )
+    }
+
     func testRealEngineCompletesImportAndWritesVerifiedManifest() async throws {
         let fixture = try makeFixture(fileCount: 2, bytesPerFile: 32)
-        let supervisor = EngineSupervisor()
+        let supervisor = makeSupervisor()
         _ = try await supervisor.start()
         addTeardownBlock {
             try? await supervisor.stop()
@@ -56,6 +70,26 @@ final class RealEngineSmokeTests: XCTestCase {
         guard case .completed = events.last?.payload else {
             return XCTFail("Expected a completed terminal event")
         }
+        let verifiedMedia = events.compactMap { event in
+            if case .mediaVerified(let media, _, _) = event.payload {
+                return media
+            }
+            return nil
+        }
+        XCTAssertEqual(verifiedMedia.count, 2)
+        let identity = try XCTUnwrap(verifiedMedia.first?.identity)
+        let overview = try await supervisor.catalogBrowse(
+            path: fixture.catalog.path
+        )
+        XCTAssertTrue(overview.collections.contains { $0.identity == identity })
+        let detail = try await supervisor.catalogBrowse(
+            path: fixture.catalog.path,
+            selection: identity
+        )
+        XCTAssertEqual(
+            detail.collections.first?.mediaPaths,
+            verifiedMedia.map(\.path)
+        )
 
         try verifyCatalog(
             fixture.catalog,
@@ -71,7 +105,7 @@ final class RealEngineSmokeTests: XCTestCase {
 
     func testRealEngineReviewsExactDatedAndOngoingCollections() async throws {
         let fixture = try makeFixture(fileCount: 1, bytesPerFile: 32)
-        let supervisor = EngineSupervisor()
+        let supervisor = makeSupervisor()
         _ = try await supervisor.start()
         addTeardownBlock {
             try? await supervisor.stop()
@@ -134,7 +168,7 @@ final class RealEngineSmokeTests: XCTestCase {
 
     func testRealEngineBrowsesManifestAdmittedMedia() async throws {
         let fixture = try makeFixture(fileCount: 1, bytesPerFile: 32)
-        let supervisor = EngineSupervisor()
+        let supervisor = makeSupervisor()
         _ = try await supervisor.start()
         addTeardownBlock {
             try? await supervisor.stop()
@@ -187,7 +221,7 @@ final class RealEngineSmokeTests: XCTestCase {
 
     func testRealEngineCancellationInterruptsRemainingCopies() async throws {
         let fixture = try makeFixture(fileCount: 3, bytesPerFile: 32)
-        let supervisor = EngineSupervisor(
+        let supervisor = makeSupervisor(
             arguments: ["--test-progress-delay-ms", "2000"]
         )
         _ = try await supervisor.start()
@@ -238,6 +272,22 @@ final class RealEngineSmokeTests: XCTestCase {
         guard case .cancelled(copiedCount: 1) = events.last?.payload else {
             return XCTFail("Expected cancellation after the first durable copy")
         }
+        let verifiedMedia = events.compactMap { event in
+            if case .mediaVerified(let media, _, _) = event.payload {
+                return media
+            }
+            return nil
+        }
+        XCTAssertEqual(verifiedMedia.count, 1)
+        let identity = try XCTUnwrap(verifiedMedia.first?.identity)
+        let detail = try await supervisor.catalogBrowse(
+            path: fixture.catalog.path,
+            selection: identity
+        )
+        XCTAssertEqual(
+            detail.collections.first?.mediaPaths,
+            verifiedMedia.map(\.path)
+        )
         try verifyCatalog(
             fixture.catalog,
             collectionName: "Cancellation Import",
@@ -256,7 +306,7 @@ final class RealEngineSmokeTests: XCTestCase {
         let detachedSource = fixture.source
             .deletingLastPathComponent()
             .appendingPathComponent("detached-source")
-        let supervisor = EngineSupervisor(
+        let supervisor = makeSupervisor(
             arguments: ["--test-progress-delay-ms", "2000"]
         )
         _ = try await supervisor.start()
@@ -350,7 +400,7 @@ final class RealEngineSmokeTests: XCTestCase {
 
     func testRealEnginePreservesCompoundItemAndVerifiesOriginals() async throws {
         let fixture = try makeCompoundFixture()
-        let supervisor = EngineSupervisor()
+        let supervisor = makeSupervisor()
         _ = try await supervisor.start()
         addTeardownBlock {
             try? await supervisor.stop()
@@ -388,7 +438,7 @@ final class RealEngineSmokeTests: XCTestCase {
 
     func testRealEngineRoutesAndRecoversInterruptedImport() async throws {
         let fixture = try makeFixture(fileCount: 3, bytesPerFile: 32)
-        let supervisor = EngineSupervisor(
+        let supervisor = makeSupervisor(
             arguments: ["--test-progress-delay-ms", "2000"]
         )
         let processIdentifier = try await supervisor.start()
@@ -431,7 +481,7 @@ final class RealEngineSmokeTests: XCTestCase {
         XCTAssertTrue(interrupted)
         _ = try? await supervisor.waitForTermination()
 
-        let recoverySupervisor = EngineSupervisor()
+        let recoverySupervisor = makeSupervisor()
         _ = try await recoverySupervisor.start()
         addTeardownBlock {
             try? await recoverySupervisor.stop()
@@ -688,6 +738,17 @@ final class RealEngineSmokeTests: XCTestCase {
         XCTAssertEqual(outcome?["kind"] as? String, "outcome")
         XCTAssertEqual(outcome?["outcome"] as? String, "cancelled")
         XCTAssertNotNil(outcome?["recorded_at"] as? [String: Any])
+    }
+}
+
+private extension EngineSupervisor.CatalogBrowseCollection {
+    var mediaPaths: [String] {
+        switch self {
+        case .dated(_, _, _, _, _, _, let groups, _):
+            return groups.flatMap(\.media).map(\.path)
+        case .ongoing(_, _, _, let parts):
+            return parts.flatMap(\.dateGroups).flatMap(\.media).map(\.path)
+        }
     }
 }
 

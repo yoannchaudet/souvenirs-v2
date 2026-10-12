@@ -324,26 +324,34 @@ final class CatalogVisualTests: XCTestCase {
             recents: [catalog]
         )
         await model.openCatalog(at: catalog.path)
+        await model.browse.load(catalogPath: catalog.path)
 
         let runningEngine = VisualCatalogEngine()
         let running = ImportExecutionCoordinator(engine: runningEngine)
         running.start(review: try await runningEngine.review(), catalog: catalog)
         await runningEngine.waitForStream()
-        runningEngine.send(.init(
-            operationID: "visual-operation",
-            sequence: 0,
-            payload: .progress(
-                completedUnits: 7,
-                totalUnits: 12,
-                message: "Reading back and checking each copy…"
-            )
-        ))
+        for (index, media) in VisualCatalogEngine.importedMedia(7).enumerated() {
+            runningEngine.send(.init(
+                operationID: "visual-operation",
+                sequence: UInt64(index),
+                payload: .mediaVerified(
+                    media: media,
+                    completedMedia: UInt64(index + 1),
+                    totalMedia: 12
+                )
+            ))
+        }
         for _ in 0..<20 {
             if running.completedUnits == 7 { break }
             await Task.yield()
         }
         XCTAssertEqual(running.completedUnits, 7)
         XCTAssertEqual(running.phase, .running)
+        await model.browse.updateImportPresentation(
+            operationID: running.operationID,
+            collectionName: running.collectionName,
+            media: running.verifiedMedia
+        )
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
@@ -383,6 +391,9 @@ final class CatalogVisualTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(running.phase, .cancelled(copiedCount: 7))
+        modelEngine.browseCollections = [VisualCatalogEngine.importedBrowse(7)]
+        modelEngine.browseNavigation = VisualCatalogEngine.importedNavigation
+        await model.browse.reconcileTerminalImport()
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
@@ -393,23 +404,31 @@ final class CatalogVisualTests: XCTestCase {
             name: "import-cancelled"
         )
         runningEngine.finish()
+        model.browse.clearImportPresentation()
 
         let completedEngine = VisualCatalogEngine()
         let completed = ImportExecutionCoordinator(engine: completedEngine)
         completed.start(review: try await completedEngine.review(), catalog: catalog)
         await completedEngine.waitForStream()
+        for (index, media) in VisualCatalogEngine.importedMedia(12).enumerated() {
+            completedEngine.send(.init(
+                operationID: "visual-operation",
+                sequence: UInt64(index),
+                payload: .mediaVerified(
+                    media: media,
+                    completedMedia: UInt64(index + 1),
+                    totalMedia: 12
+                )
+            ))
+        }
+        for _ in 0..<100 {
+            if completed.completedUnits == 12 { break }
+            await Task.yield()
+        }
+        XCTAssertEqual(completed.completedUnits, 12)
         completedEngine.send(.init(
             operationID: "visual-operation",
-            sequence: 0,
-            payload: .progress(
-                completedUnits: 12,
-                totalUnits: 12,
-                message: "Reading back and checking each copy…"
-            )
-        ))
-        completedEngine.send(.init(
-            operationID: "visual-operation",
-            sequence: 1,
+            sequence: 12,
             payload: .completed(
                 result: Data(
                     #"{"copied_count":12,"skipped_count":3,"left_on_source_count":2}"#.utf8
@@ -431,6 +450,14 @@ final class CatalogVisualTests: XCTestCase {
                 )
             )
         )
+        await model.browse.updateImportPresentation(
+            operationID: completed.operationID,
+            collectionName: completed.collectionName,
+            media: completed.verifiedMedia
+        )
+        modelEngine.browseCollections = [VisualCatalogEngine.importedBrowse(12)]
+        modelEngine.browseNavigation = VisualCatalogEngine.importedNavigation
+        await model.browse.reconcileTerminalImport()
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
@@ -477,6 +504,7 @@ final class CatalogVisualTests: XCTestCase {
             copiedCount: 7,
             totalCount: 12,
             remainingCount: 5,
+            verifiedMedia: VisualCatalogEngine.importedMedia(7),
             sourceAvailable: true,
             interruption: .incompleteWithoutTerminalRecord,
             activityTime: .init(
@@ -488,6 +516,11 @@ final class CatalogVisualTests: XCTestCase {
         let recoveryPresent = ImportExecutionCoordinator(engine: recoveryPresentEngine)
         await recoveryPresent.inspect(catalog: catalog)
         XCTAssertEqual(recoveryPresent.phase, .recoveryPrompt(sourceAvailable: true))
+        await model.browse.updateImportPresentation(
+            operationID: recoveryPresent.operationID,
+            collectionName: recoveryPresent.collectionName,
+            media: recoveryPresent.verifiedMedia
+        )
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
@@ -506,6 +539,7 @@ final class CatalogVisualTests: XCTestCase {
             copiedCount: 7,
             totalCount: 12,
             remainingCount: 5,
+            verifiedMedia: VisualCatalogEngine.importedMedia(7),
             sourceAvailable: false,
             interruption: .sourceUnavailable,
             activityTime: .init(
@@ -517,6 +551,11 @@ final class CatalogVisualTests: XCTestCase {
         let recoveryMissing = ImportExecutionCoordinator(engine: recoveryMissingEngine)
         await recoveryMissing.inspect(catalog: catalog)
         XCTAssertEqual(recoveryMissing.phase, .recoveryPrompt(sourceAvailable: false))
+        await model.browse.updateImportPresentation(
+            operationID: recoveryMissing.operationID,
+            collectionName: recoveryMissing.collectionName,
+            media: recoveryMissing.verifiedMedia
+        )
         try capture(
             ContentView(
                 engineStatus: .ready(engineVersion: "0.1.0"),
@@ -612,6 +651,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
     var reviewError: Error?
     var scanSuspended = false
     var browseCollections: [EngineSupervisor.CatalogBrowseCollection] = []
+    var browseNavigation = VisualCatalogEngine.defaultBrowseNavigation
     private var continuation:
         AsyncThrowingStream<EngineSupervisor.OperationEvent, any Error>.Continuation?
     private var scanContinuation: CheckedContinuation<Void, Never>?
@@ -646,7 +686,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
     ) async throws -> EngineSupervisor.CatalogBrowseSnapshot {
         guard let selection else {
             return .init(
-                navigation: Self.browseNavigation,
+                navigation: browseNavigation,
                 collections: browseCollections.map(\.overviewOnly)
             )
         }
@@ -796,7 +836,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
         ]
     }
 
-    static var browseNavigation: [EngineSupervisor.CatalogBrowseNavigationScope] {
+    static var defaultBrowseNavigation: [EngineSupervisor.CatalogBrowseNavigationScope] {
         [
             .allPhotos,
             .year(
@@ -834,6 +874,73 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
                                 annualPartYear: nil
                             )
                         ]
+                    )
+                ]
+            ),
+        ]
+    }
+
+    static func importedMedia(_ count: Int) -> [EngineSupervisor.OperationMedia] {
+        (1...count).map { index in
+            .init(
+                identity: .dated(
+                    year: "2026",
+                    directory: "2026-10-10 +2d Dolomites"
+                ),
+                annualPartYear: nil,
+                acceptedDate: String(
+                    format: "2026-10-%02d",
+                    9 + ((index - 1) % 3)
+                ),
+                filename: "20261010-1011\(String(format: "%02d", index))-01.jpg",
+                path: "/unavailable/20261010-1011\(String(format: "%02d", index))-01.jpg"
+            )
+        }
+    }
+
+    static func importedBrowse(_ count: Int) -> EngineSupervisor.CatalogBrowseCollection {
+        var groups: [EngineSupervisor.CatalogBrowseDateGroup] = []
+        for record in importedMedia(count) {
+            let media = EngineSupervisor.CatalogBrowseMedia(
+                filename: record.filename,
+                path: record.path
+            )
+            if let index = groups.firstIndex(where: { $0.date == record.acceptedDate }) {
+                groups[index] = .init(
+                    date: record.acceptedDate,
+                    media: groups[index].media + [media]
+                )
+            } else {
+                groups.append(.init(date: record.acceptedDate, media: [media]))
+            }
+        }
+        return .dated(
+            identity: .dated(
+                year: "2026",
+                directory: "2026-10-10 +2d Dolomites"
+            ),
+            label: "Dolomites",
+            startDate: "2026-10-10",
+            endDate: "2026-10-12",
+            mediaCount: count,
+            coverMedia: groups.first?.media.first,
+            dateGroups: groups,
+            problem: nil
+        )
+    }
+
+    static var importedNavigation: [EngineSupervisor.CatalogBrowseNavigationScope] {
+        [
+            .allPhotos,
+            .year(
+                year: 2026,
+                entries: [
+                    .init(
+                        identity: .dated(
+                            year: "2026",
+                            directory: "2026-10-10 +2d Dolomites"
+                        ),
+                        annualPartYear: nil
                     )
                 ]
             ),

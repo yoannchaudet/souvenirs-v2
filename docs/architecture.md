@@ -268,6 +268,14 @@ Recovery inspection returns the published-original media snapshot from the opera
 Recovery replays published originals in reviewed execution order before it resumes storage work.
 The macOS client deduplicates replayed records by collection identity, annual-part year, and destination path.
 These records are transient operation state until a manifest admits the originals.
+The macOS client merges transient records only into the matching destination presentation.
+Durable browse media takes precedence when the same destination path appears in both states.
+The client preserves the event order and accepted-date order that Rust returns.
+Import progress uses the media counts from `media_verified`.
+Completion and cancellation refresh unscoped browse and exact-identity browse.
+The client replaces transient content only after both durable queries succeed.
+A failed terminal refresh keeps transient content visible and provides a retry action.
+After a successful completion refresh, the client selects the imported occurrence and focuses its heading.
 An invalid collection manifest produces a problem on that collection part.
 That problem makes the part count and media unavailable rather than partially trusted.
 The query continues to return other collections after an invalid manifest.

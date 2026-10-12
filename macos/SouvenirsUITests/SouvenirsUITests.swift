@@ -461,13 +461,50 @@ final class SouvenirsUITests: XCTestCase {
         waitForExpectations(timeout: 3)
         start.click()
 
-        XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts["archive-dated-date-group-0"].waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-dated-media-0-0"].exists
+        )
+        XCTAssertTrue(
+            app.staticTexts["import-completed"].waitForExistence(timeout: 10)
+        )
         XCTAssertTrue(
             app.staticTexts[
                 "3 already in your archive were skipped · 2 remain on the source"
             ].exists
         )
         XCTAssertTrue(app.buttons["dismiss-import-completed"].exists)
+        let heading = app.staticTexts["archive-browse-title"]
+        XCTAssertEqual(heading.label, "Dolomites")
+        expectation(
+            for: NSPredicate(format: "hasKeyboardFocus == true"),
+            evaluatedWith: heading
+        )
+        waitForExpectations(timeout: 3)
+    }
+
+    @MainActor
+    func testTerminalBrowseFailureKeepsTransientMediaAndOffersRetry() throws {
+        let app = launch(scenario: "import-terminal-browse-error")
+        let sheet = openImportReview(app)
+        let start = sheet.buttons["start-import"]
+        expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: start
+        )
+        waitForExpectations(timeout: 3)
+        start.click()
+
+        XCTAssertTrue(
+            app.staticTexts["import-terminal-archive-error"].waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(app.buttons["import-terminal-archive-error-action"].exists)
+        XCTAssertTrue(app.buttons["import-terminal-archive-error-secondary-action"].exists)
+        XCTAssertTrue(app.staticTexts["archive-dated-date-group-0"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["archive-dated-media-0-0"].exists)
+        XCTAssertFalse(app.staticTexts["import-completed"].exists)
     }
 
     @MainActor
@@ -536,8 +573,9 @@ final class SouvenirsUITests: XCTestCase {
             app.staticTexts["import-recovery-deferred"].waitForExistence(timeout: 5)
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["archive-overview"].exists
+            app.staticTexts["archive-dated-date-group-0"].exists
         )
+        XCTAssertTrue(app.descendants(matching: .any)["archive-dated-media-0-0"].exists)
         XCTAssertTrue(app.buttons["retry-deferred-recovery"].exists)
         XCTAssertTrue(app.buttons["cancel-deferred-recovery"].exists)
         XCTAssertFalse(app.buttons["choose-import-folder"].isEnabled)
@@ -596,7 +634,10 @@ final class SouvenirsUITests: XCTestCase {
         )
         sheet.buttons["finish-recovery"].click()
 
-        XCTAssertTrue(app.staticTexts["import-completed"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts["import-completed"].waitForExistence(timeout: 10)
+        )
+        XCTAssertEqual(app.staticTexts["archive-browse-title"].label, "Dolomites")
     }
 
     @MainActor

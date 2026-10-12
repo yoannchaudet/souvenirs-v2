@@ -287,6 +287,51 @@ fn import_execution_emits_media_records_before_completion() {
 }
 
 #[test]
+fn import_execution_admits_media_only_after_terminal_event() {
+    let identity = json!({
+        "kind": "dated",
+        "year": "2026",
+        "directory": "2026-10-10 +2d Dolomites"
+    });
+    let output = run(
+        "import-execution",
+        &[
+            handshake(),
+            request("request-2", "catalog.browse", json!({"path": "/catalog"})),
+            start_request(),
+            request("request-4", "catalog.browse", json!({"path": "/catalog"})),
+            request(
+                "request-5",
+                "catalog.browse",
+                json!({"path": "/catalog", "selection": identity}),
+            ),
+        ],
+    );
+
+    assert!(output.status.success());
+    let messages = messages(&output);
+    assert!(messages[1]["result"]["collections"]
+        .as_array()
+        .expect("pre-import collections")
+        .is_empty());
+    let completed_index = messages
+        .iter()
+        .position(|message| message["event"] == "completed")
+        .expect("completed event");
+    assert_eq!(
+        messages[completed_index + 1]["result"]["collections"][0]["media_count"],
+        12
+    );
+    assert_eq!(
+        messages[completed_index + 2]["result"]["collections"][0]["date_groups"]
+            .as_array()
+            .expect("date groups")
+            .len(),
+        3
+    );
+}
+
+#[test]
 fn failed_operation_is_deterministic() {
     let output = run("failed-operation", &[handshake(), start_request()]);
 

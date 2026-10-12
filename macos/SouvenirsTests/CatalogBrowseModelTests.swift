@@ -234,12 +234,243 @@ final class CatalogBrowseModelTests: XCTestCase {
         XCTAssertEqual(model.collections.map(\.identity), [datedIdentity])
     }
 
+    func testTransientMediaMergesWithDurableDetailByPathInProtocolOrder() async {
+        let engine = FakeBrowseEngine()
+        engine.overview = [datedOverview]
+        engine.navigation = [.allPhotos]
+        engine.details[datedIdentity] = datedDetail
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+
+        let admitted = operationMedia(
+            identity: datedIdentity,
+            date: "2019-07-15",
+            filename: "brittany.jpg"
+        )
+        let newMedia = operationMedia(
+            identity: datedIdentity,
+            date: "2019-07-16",
+            filename: "second.jpg"
+        )
+        await model.updateImportPresentation(
+            operationID: "operation-1",
+            collectionName: "Brittany",
+            media: [admitted, newMedia]
+        )
+
+        guard case .dated(
+            _,
+            _,
+            _,
+            _,
+            let count,
+            _,
+            let groups,
+            _
+        ) = model.presentedImportCollection else {
+            return XCTFail("Expected a dated transient presentation")
+        }
+        XCTAssertEqual(count, 2)
+        XCTAssertEqual(groups.map(\.date), ["2019-07-15", "2019-07-16"])
+        XCTAssertEqual(
+            groups.flatMap(\.media).map(\.path),
+            ["/catalog/brittany.jpg", "/catalog/second.jpg"]
+        )
+        XCTAssertFalse(groups[0].media[0].isTransient)
+        XCTAssertTrue(groups[1].media[0].isTransient)
+        model.selectScope(.allPhotos)
+        XCTAssertEqual(model.displayTitle, "All Photos")
+    }
+
+    func testTerminalRefreshCommitsDurableLandingAndFocusAtomically() async {
+        let engine = FakeBrowseEngine()
+        engine.navigation = [.allPhotos]
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+        await model.updateImportPresentation(
+            operationID: "operation-1",
+            collectionName: "Dolomites",
+            media: []
+        )
+        XCTAssertEqual(model.displayTitle, "Dolomites")
+        XCTAssertNil(model.presentedImportCollection)
+        let media = operationMedia(
+            identity: importedIdentity,
+            date: "2026-10-10",
+            filename: "imported.jpg"
+        )
+        await model.updateImportPresentation(
+            operationID: "operation-1",
+            collectionName: "Dolomites",
+            media: [media],
+            loadDetail: false
+        )
+        XCTAssertNotNil(model.presentedImportCollection)
+
+        engine.overview = [importedOverview]
+        engine.navigation = [
+            .allPhotos,
+            .year(
+                year: 2026,
+                entries: [.init(identity: importedIdentity, annualPartYear: nil)]
+            ),
+        ]
+        engine.details[importedIdentity] = importedDetail
+        await model.reconcileTerminalImport()
+
+        XCTAssertEqual(model.importReconciliation, .landed)
+        XCTAssertNil(model.presentedImportCollection)
+        XCTAssertEqual(model.detail?.identity, importedIdentity)
+        XCTAssertEqual(model.selectedScope, .year(2026))
+        XCTAssertEqual(
+            model.selection,
+            .collection(.init(identity: importedIdentity, annualPartYear: nil))
+        )
+        XCTAssertEqual(model.landingFocusGeneration, 1)
+    }
+
+    func testTerminalScopedFailureKeepsTransientAndDoesNotPublishOverview() async {
+        let engine = FakeBrowseEngine()
+        engine.navigation = [.allPhotos]
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+        let media = operationMedia(
+            identity: importedIdentity,
+            date: "2026-10-10",
+            filename: "imported.jpg"
+        )
+        await model.updateImportPresentation(
+            operationID: "operation-1",
+            collectionName: "Dolomites",
+            media: [media]
+        )
+
+        engine.overview = [importedOverview]
+        engine.navigation = [
+            .allPhotos,
+            .year(
+                year: 2026,
+                entries: [.init(identity: importedIdentity, annualPartYear: nil)]
+            ),
+        ]
+        engine.scopedError = EngineSupervisor.SupervisorError.protocolError(
+            code: "catalog_io",
+            message: "The archive is unavailable."
+        )
+        await model.reconcileTerminalImport()
+
+        guard case .failed(let message) = model.importReconciliation else {
+            return XCTFail("Expected terminal refresh failure")
+        }
+        XCTAssertTrue(message.contains("access"))
+        XCTAssertTrue(model.collections.isEmpty)
+        XCTAssertNotNil(model.presentedImportCollection)
+        model.clearImportPresentation()
+        XCTAssertEqual(model.selection, .overview)
+        await model.updateImportPresentation(
+            operationID: "operation-1",
+            collectionName: "Dolomites",
+            media: [media]
+        )
+
+        engine.scopedError = nil
+        engine.details[importedIdentity] = importedDetail
+        await model.reconcileTerminalImport()
+        XCTAssertEqual(model.importReconciliation, .landed)
+    }
+
+    func testTerminalRefreshSelectsOngoingOccurrenceUnderEarlier() async {
+        let engine = FakeBrowseEngine()
+        engine.navigation = [.allPhotos]
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+        let media = operationMedia(
+            identity: ongoingIdentity,
+            annualPartYear: 2019,
+            date: "2019-03-02",
+            filename: "kids.jpg"
+        )
+        await model.updateImportPresentation(
+            operationID: "operation-1",
+            collectionName: "Kids",
+            media: [media]
+        )
+        engine.overview = [ongoingOverview]
+        engine.navigation = [
+            .allPhotos,
+            .earlier(
+                throughYear: 2019,
+                years: [
+                    .init(
+                        year: 2019,
+                        entries: [
+                            .init(identity: ongoingIdentity, annualPartYear: 2019)
+                        ]
+                    )
+                ]
+            ),
+        ]
+        engine.details[ongoingIdentity] = ongoingImportedDetail
+
+        await model.reconcileTerminalImport()
+
+        XCTAssertEqual(model.selectedScope, .earlier(throughYear: 2019))
+        XCTAssertEqual(
+            model.selection,
+            .collection(.init(identity: ongoingIdentity, annualPartYear: 2019))
+        )
+    }
+
+    func testStaleTerminalRefreshCannotLandReplacementOperation() async {
+        let engine = FakeBrowseEngine()
+        engine.navigation = [.allPhotos]
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+        let first = operationMedia(
+            identity: importedIdentity,
+            date: "2026-10-10",
+            filename: "first.jpg"
+        )
+        await model.updateImportPresentation(
+            operationID: "operation-1",
+            collectionName: "Dolomites",
+            media: [first]
+        )
+        engine.suspendOverview = true
+        let stale = Task { await model.reconcileTerminalImport() }
+        await engine.waitUntilSuspended()
+
+        let replacement = operationMedia(
+            identity: importedIdentity,
+            date: "2026-10-11",
+            filename: "replacement.jpg"
+        )
+        await model.updateImportPresentation(
+            operationID: "operation-2",
+            collectionName: "Dolomites",
+            media: [replacement]
+        )
+        engine.resumeSuspended()
+        await stale.value
+
+        XCTAssertEqual(model.importReconciliation, .active)
+        guard case .dated(_, _, _, _, _, _, let groups, _) =
+            model.presentedImportCollection else {
+            return XCTFail("Expected replacement transient media")
+        }
+        XCTAssertEqual(groups.flatMap(\.media).map(\.filename), ["replacement.jpg"])
+    }
+
     private var datedIdentity: EngineSupervisor.CatalogCollectionIdentity {
         .dated(year: "2019", directory: "2019-07-14 +6d Brittany")
     }
 
     private var ongoingIdentity: EngineSupervisor.CatalogCollectionIdentity {
         .ongoing(key: "kids")
+    }
+
+    private var importedIdentity: EngineSupervisor.CatalogCollectionIdentity {
+        .dated(year: "2026", directory: "2026-10-10 +2d Dolomites")
     }
 
     private var datedOccurrence: CatalogBrowseModel.CollectionOccurrence {
@@ -337,8 +568,72 @@ final class CatalogBrowseModelTests: XCTestCase {
         )
     }
 
+    private var ongoingImportedDetail: EngineSupervisor.CatalogBrowseCollection {
+        .ongoing(
+            identity: ongoingIdentity,
+            label: "Kids",
+            mediaCount: 1,
+            parts: [
+                .init(
+                    year: 2019,
+                    yearDirectory: "2019",
+                    collectionDirectory: "z Kids",
+                    mediaCount: 1,
+                    coverMedia: media("kids.jpg"),
+                    dateGroups: [
+                        .init(date: "2019-03-02", media: [media("kids.jpg")])
+                    ],
+                    problem: nil
+                )
+            ]
+        )
+    }
+
+    private var importedOverview: EngineSupervisor.CatalogBrowseCollection {
+        .dated(
+            identity: importedIdentity,
+            label: "Dolomites",
+            startDate: "2026-10-10",
+            endDate: "2026-10-12",
+            mediaCount: 1,
+            coverMedia: media("imported.jpg"),
+            dateGroups: [],
+            problem: nil
+        )
+    }
+
+    private var importedDetail: EngineSupervisor.CatalogBrowseCollection {
+        .dated(
+            identity: importedIdentity,
+            label: "Dolomites",
+            startDate: "2026-10-10",
+            endDate: "2026-10-12",
+            mediaCount: 1,
+            coverMedia: media("imported.jpg"),
+            dateGroups: [
+                .init(date: "2026-10-10", media: [media("imported.jpg")])
+            ],
+            problem: nil
+        )
+    }
+
     private func media(_ filename: String) -> EngineSupervisor.CatalogBrowseMedia {
         .init(filename: filename, path: "/catalog/\(filename)")
+    }
+
+    private func operationMedia(
+        identity: EngineSupervisor.CatalogCollectionIdentity,
+        annualPartYear: Int? = nil,
+        date: String,
+        filename: String
+    ) -> EngineSupervisor.OperationMedia {
+        .init(
+            identity: identity,
+            annualPartYear: annualPartYear,
+            acceptedDate: date,
+            filename: filename,
+            path: "/catalog/\(filename)"
+        )
     }
 }
 
@@ -349,6 +644,7 @@ private final class FakeBrowseEngine: CatalogEngineClient {
     var details:
         [EngineSupervisor.CatalogCollectionIdentity: EngineSupervisor.CatalogBrowseCollection] = [:]
     var error: Error?
+    var scopedError: Error?
     var suspendedIdentity: EngineSupervisor.CatalogCollectionIdentity?
     var suspendOverview = false
     private(set) var requests: [EngineSupervisor.CatalogCollectionIdentity?] = []
@@ -361,6 +657,7 @@ private final class FakeBrowseEngine: CatalogEngineClient {
     ) async throws -> EngineSupervisor.CatalogBrowseSnapshot {
         requests.append(selection)
         if let error { throw error }
+        if selection != nil, let scopedError { throw scopedError }
         if (suspendOverview && selection == nil)
             || suspendedIdentity.map({ selection == $0 }) == true {
             return await withCheckedContinuation { continuation = $0 }
