@@ -160,7 +160,7 @@ final class RealEngineSmokeTests: XCTestCase {
             """.utf8
         ).write(to: collection.appendingPathComponent("SHA256SUMS"))
 
-        let collections = try await supervisor.catalogBrowse(
+        let snapshot = try await supervisor.catalogBrowse(
             path: fixture.catalog.path,
             selection: .dated(
                 year: "2026",
@@ -177,7 +177,7 @@ final class RealEngineSmokeTests: XCTestCase {
             coverMedia: _,
             dateGroups: let groups,
             problem: nil
-        ) = collections.first else {
+        ) = snapshot.collections.first else {
             return XCTFail("Expected dated browse collection")
         }
         XCTAssertEqual(groups[0].date, "2026-10-10")

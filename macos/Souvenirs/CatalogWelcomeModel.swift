@@ -13,7 +13,7 @@ protocol CatalogEngineClient: AnyObject {
     func catalogBrowse(
         path: String,
         selection: EngineSupervisor.CatalogCollectionIdentity?
-    ) async throws -> [EngineSupervisor.CatalogBrowseCollection]
+    ) async throws -> EngineSupervisor.CatalogBrowseSnapshot
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan
     func reviewImport(
         catalogPath: String,
@@ -51,7 +51,7 @@ extension EngineAppModel: CatalogEngineClient {
     func catalogBrowse(
         path: String,
         selection: EngineSupervisor.CatalogCollectionIdentity?
-    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
+    ) async throws -> EngineSupervisor.CatalogBrowseSnapshot {
         try await supervisor.catalogBrowse(path: path, selection: selection)
     }
 

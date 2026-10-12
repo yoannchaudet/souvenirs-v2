@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public actor EngineSupervisor {
-    public static let protocolVersion: UInt32 = 7
+    public static let protocolVersion: UInt32 = 8
     public static let protocolClientVersion = "0.2.0"
 
     public struct Handshake: Equatable, Sendable {
@@ -219,6 +219,104 @@ public actor EngineSupervisor {
             case coverMedia = "cover_media"
             case dateGroups = "date_groups"
             case problem
+        }
+    }
+
+    public struct CatalogBrowseSnapshot: Equatable, Sendable {
+        public let navigation: [CatalogBrowseNavigationScope]
+        public let collections: [CatalogBrowseCollection]
+
+        public init(
+            navigation: [CatalogBrowseNavigationScope],
+            collections: [CatalogBrowseCollection]
+        ) {
+            self.navigation = navigation
+            self.collections = collections
+        }
+    }
+
+    public struct CatalogBrowseNavigationEntry: Codable, Equatable, Hashable, Sendable {
+        public let identity: CatalogCollectionIdentity
+        public let annualPartYear: Int?
+
+        public init(identity: CatalogCollectionIdentity, annualPartYear: Int?) {
+            self.identity = identity
+            self.annualPartYear = annualPartYear
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case identity
+            case annualPartYear = "annual_part_year"
+        }
+    }
+
+    public struct CatalogBrowseNavigationYear: Codable, Equatable, Sendable {
+        public let year: Int
+        public let entries: [CatalogBrowseNavigationEntry]
+
+        public init(year: Int, entries: [CatalogBrowseNavigationEntry]) {
+            self.year = year
+            self.entries = entries
+        }
+    }
+
+    public enum CatalogBrowseNavigationScope: Codable, Equatable, Sendable {
+        case allPhotos
+        case year(year: Int, entries: [CatalogBrowseNavigationEntry])
+        case earlier(throughYear: Int, years: [CatalogBrowseNavigationYear])
+
+        private enum Kind: String, Codable {
+            case allPhotos = "all_photos"
+            case year
+            case earlier
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case year
+            case entries
+            case throughYear = "through_year"
+            case years
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            switch try container.decode(Kind.self, forKey: .kind) {
+            case .allPhotos:
+                self = .allPhotos
+            case .year:
+                self = try .year(
+                    year: container.decode(Int.self, forKey: .year),
+                    entries: container.decode(
+                        [CatalogBrowseNavigationEntry].self,
+                        forKey: .entries
+                    )
+                )
+            case .earlier:
+                self = try .earlier(
+                    throughYear: container.decode(Int.self, forKey: .throughYear),
+                    years: container.decode(
+                        [CatalogBrowseNavigationYear].self,
+                        forKey: .years
+                    )
+                )
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .allPhotos:
+                try container.encode(Kind.allPhotos, forKey: .kind)
+            case .year(let year, let entries):
+                try container.encode(Kind.year, forKey: .kind)
+                try container.encode(year, forKey: .year)
+                try container.encode(entries, forKey: .entries)
+            case .earlier(let throughYear, let years):
+                try container.encode(Kind.earlier, forKey: .kind)
+                try container.encode(throughYear, forKey: .throughYear)
+                try container.encode(years, forKey: .years)
+            }
         }
     }
 
@@ -1059,7 +1157,7 @@ public actor EngineSupervisor {
     public func catalogBrowse(
         path: String,
         selection: CatalogCollectionIdentity? = nil
-    ) async throws -> [CatalogBrowseCollection] {
+    ) async throws -> CatalogBrowseSnapshot {
         let result: CatalogBrowseResult = try await sendRequest(
             method: "catalog.browse",
             parameters: CatalogBrowseParameters(path: path, selection: selection),
@@ -1070,7 +1168,10 @@ public actor EngineSupervisor {
                 "The response result type is not catalog_browse"
             )
         }
-        return result.collections
+        return CatalogBrowseSnapshot(
+            navigation: result.navigation,
+            collections: result.collections
+        )
     }
 
     public func scanImport(sourcePath: String) async throws -> ImportScan {
@@ -2273,6 +2374,7 @@ struct CatalogCollectionsResult: Decodable, Sendable {
 
 struct CatalogBrowseResult: Decodable, Sendable {
     let type: String
+    let navigation: [EngineSupervisor.CatalogBrowseNavigationScope]
     let collections: [EngineSupervisor.CatalogBrowseCollection]
 }
 

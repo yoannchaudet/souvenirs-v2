@@ -8,26 +8,37 @@ struct CatalogBrowseSidebar: View {
 
     var body: some View {
         List(selection: selection) {
-            Label("All Photos", systemImage: "square.grid.2x2")
-                .tag(CatalogBrowseModel.Selection.overview)
-                .accessibilityIdentifier("archive-all-photos")
-
-            ForEach(Array(model.collections.enumerated()), id: \.element.identity) {
-                index,
-                collection in
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(collection.browseLabel)
-                        .lineLimit(1)
-                    Text(collectionListDetail(collection))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+            ForEach(Array(model.navigation.enumerated()), id: \.offset) { _, scope in
+                switch scope {
+                case .allPhotos:
+                    Label("All Photos", systemImage: "square.grid.2x2")
+                        .tag(CatalogBrowseModel.Scope.allPhotos)
+                        .accessibilityIdentifier("archive-all-photos")
+                case .year(let year, let entries):
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(String(year))
+                        Text(collectionCount(entries.count))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(CatalogBrowseModel.Scope.year(year))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("archive-year-\(year)")
+                    .accessibilityLabel(String(year))
+                    .accessibilityValue(collectionCount(entries.count))
+                case .earlier(let throughYear, let years):
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Earlier")
+                        Text(earlierRange(years))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(CatalogBrowseModel.Scope.earlier(throughYear: throughYear))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("archive-earlier")
+                    .accessibilityLabel("Earlier")
+                    .accessibilityValue(earlierRange(years))
                 }
-                .tag(CatalogBrowseModel.Selection.collection(collection.identity))
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("archive-collection-\(index)")
-                .accessibilityLabel(collection.browseLabel)
-                .accessibilityValue(collectionAccessibilityValue(collection))
             }
         }
         .listStyle(.sidebar)
@@ -36,29 +47,30 @@ struct CatalogBrowseSidebar: View {
         .defaultFocus($listFocused, true)
     }
 
-    private var selection: Binding<CatalogBrowseModel.Selection?> {
+    private var selection: Binding<CatalogBrowseModel.Scope?> {
         Binding(
-            get: { model.selection },
+            get: {
+                guard case .overview = model.selection else { return nil }
+                return model.selectedScope
+            },
             set: { value in
                 guard let value else { return }
-                Task { await model.select(value) }
+                model.selectScope(value)
             }
         )
     }
 
-    private func collectionListDetail(
-        _ collection: EngineSupervisor.CatalogBrowseCollection
-    ) -> String {
-        guard let count = collection.trustedMediaCount else {
-            return "Unavailable"
-        }
-        return "\(count) \(count == 1 ? "item" : "items")"
+    private func collectionCount(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "collection" : "collections")"
     }
 
-    private func collectionAccessibilityValue(
-        _ collection: EngineSupervisor.CatalogBrowseCollection
+    private func earlierRange(
+        _ years: [EngineSupervisor.CatalogBrowseNavigationYear]
     ) -> String {
-        "\(collection.browseSubtitle), \(collectionListDetail(collection))"
+        guard let newest = years.first?.year, let oldest = years.last?.year else {
+            return "No earlier years"
+        }
+        return newest == oldest ? String(newest) : "\(oldest)–\(newest)"
     }
 }
 
@@ -80,11 +92,20 @@ struct CatalogBrowseHeader: View {
     }
 
     private var title: String {
-        guard case .collection(let identity) = model.selection else {
-            return "All Photos"
+        guard case .collection(let occurrence) = model.selection else {
+            switch model.selectedScope {
+            case .allPhotos:
+                return "All Photos"
+            case .year(let year):
+                return String(year)
+            case .earlier:
+                return "Earlier"
+            }
         }
         return model.detail?.browseLabel
-            ?? model.collections.first(where: { $0.identity == identity })?.browseLabel
+            ?? model.collections.first(where: {
+                $0.identity == occurrence.identity
+            })?.browseLabel
             ?? "Collection"
     }
 
@@ -92,18 +113,34 @@ struct CatalogBrowseHeader: View {
         switch model.selection {
         case .overview:
             guard !model.isLoadingOverview, model.errorMessage == nil else { return nil }
-            return "\(model.collections.count) "
-                + (model.collections.count == 1 ? "collection" : "collections")
-        case .collection(let identity):
+            switch model.selectedScope {
+            case .allPhotos:
+                return collectionCount(model.collections.count)
+            case .year:
+                return collectionCount(model.overviewGroups.first?.entries.count ?? 0)
+            case .earlier:
+                let groups = model.overviewGroups
+                guard let newest = groups.first?.year, let oldest = groups.last?.year else {
+                    return collectionCount(0)
+                }
+                let count = groups.reduce(0) { $0 + $1.entries.count }
+                return "\(oldest)–\(newest) · \(collectionCount(count))"
+            }
+        case .collection(let occurrence):
             let collection = model.detail
-                ?? model.collections.first(where: { $0.identity == identity })
+                ?? model.collections.first(where: { $0.identity == occurrence.identity })
             guard let collection else { return nil }
+            let collectionSubtitle = collection.browseSubtitle
             if let count = collection.trustedMediaCount {
-                return "\(collection.browseSubtitle) · \(count) "
+                return "\(collectionSubtitle) · \(count) "
                     + (count == 1 ? "item" : "items")
             }
-            return "\(collection.browseSubtitle) · Some content unavailable"
+            return "\(collectionSubtitle) · Some content unavailable"
         }
+    }
+
+    private func collectionCount(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "collection" : "collections")"
     }
 }
 
@@ -115,7 +152,7 @@ struct CatalogBrowsePane<EmptyContent: View>: View {
         Group {
             if let errorMessage = model.errorMessage {
                 browseError(errorMessage)
-            } else if model.isLoadingOverview {
+            } else if model.isLoadingOverview && model.collections.isEmpty {
                 ProgressView("Reading archive…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("archive-browse-loading")
@@ -162,24 +199,34 @@ private struct CatalogOverview: View {
 
     var body: some View {
         ScrollView {
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 14)],
-                spacing: 14
-            ) {
-                ForEach(Array(model.collections.enumerated()), id: \.element.identity) {
-                    index,
-                    collection in
-                    Button {
-                        Task {
-                            await model.select(.collection(collection.identity))
-                        }
-                    } label: {
-                        collectionCard(collection)
+            LazyVStack(alignment: .leading, spacing: 18) {
+                ForEach(Array(model.overviewGroups.enumerated()), id: \.element.id) {
+                    groupIndex,
+                    group in
+                    if let year = group.year {
+                        Text(String(year))
+                            .font(.title3.bold())
+                            .accessibilityAddTraits(.isHeader)
+                            .accessibilityIdentifier("archive-overview-year-\(year)")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("archive-cover-\(index)")
-                    .accessibilityLabel(collection.browseLabel)
-                    .accessibilityValue(accessibilityValue(collection))
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 14)
+                        ],
+                        spacing: 14
+                    ) {
+                        ForEach(Array(group.entries.enumerated()), id: \.element) {
+                            itemIndex,
+                            entry in
+                            if let collection = model.collection(for: entry) {
+                                collectionButton(
+                                    collection,
+                                    entry: entry,
+                                    identifier: "\(groupIndex)-\(itemIndex)"
+                                )
+                            }
+                        }
+                    }
                 }
             }
             .padding(18)
@@ -187,19 +234,48 @@ private struct CatalogOverview: View {
         .accessibilityIdentifier("archive-overview")
     }
 
+    private func collectionButton(
+        _ collection: EngineSupervisor.CatalogBrowseCollection,
+        entry: EngineSupervisor.CatalogBrowseNavigationEntry,
+        identifier: String
+    ) -> some View {
+        Button {
+            Task {
+                await model.select(
+                    .init(
+                        identity: entry.identity,
+                        annualPartYear: entry.annualPartYear
+                    )
+                )
+            }
+        } label: {
+            collectionCard(collection, annualPartYear: entry.annualPartYear)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("archive-cover-\(identifier)")
+        .accessibilityLabel(collection.browseLabel)
+        .accessibilityValue(
+            accessibilityValue(collection, annualPartYear: entry.annualPartYear)
+        )
+    }
+
     private func collectionCard(
-        _ collection: EngineSupervisor.CatalogBrowseCollection
+        _ collection: EngineSupervisor.CatalogBrowseCollection,
+        annualPartYear: Int?
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            ArchiveThumbnail(media: collection.trustedCoverMedia, height: 116)
+            ArchiveThumbnail(
+                media: collection.trustedCoverMedia(annualPartYear: annualPartYear),
+                height: 116
+            )
             Text(collection.browseLabel)
                 .font(.headline)
                 .lineLimit(1)
-            Text(collection.browseSubtitle)
+            Text(collection.browseSubtitle(annualPartYear: annualPartYear))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            if let count = collection.trustedMediaCount {
+            if let count = collection.trustedMediaCount(annualPartYear: annualPartYear) {
                 Text("\(count) \(count == 1 ? "item" : "items")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -219,13 +295,15 @@ private struct CatalogOverview: View {
     }
 
     private func accessibilityValue(
-        _ collection: EngineSupervisor.CatalogBrowseCollection
+        _ collection: EngineSupervisor.CatalogBrowseCollection,
+        annualPartYear: Int?
     ) -> String {
-        if let count = collection.trustedMediaCount {
-            return "\(collection.browseSubtitle), \(count) "
+        if let count = collection.trustedMediaCount(annualPartYear: annualPartYear) {
+            return "\(collection.browseSubtitle(annualPartYear: annualPartYear)), \(count) "
                 + (count == 1 ? "item" : "items")
         }
-        return "\(collection.browseSubtitle), some content unavailable"
+        let subtitle = collection.browseSubtitle(annualPartYear: annualPartYear)
+        return "\(subtitle), some content unavailable"
     }
 }
 

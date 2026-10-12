@@ -70,10 +70,21 @@ final class SouvenirsUITests: XCTestCase {
                 .waitForExistence(timeout: 5)
         )
         XCTAssertTrue(app.staticTexts["All Photos"].exists)
-        XCTAssertTrue(app.buttons["archive-cover-0"].exists)
-        XCTAssertTrue(app.buttons["archive-cover-1"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["archive-year-2025"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["archive-year-2024"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["archive-year-2022"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["archive-earlier"].exists)
+        XCTAssertTrue(app.buttons["archive-cover-0-0"].exists)
+        XCTAssertTrue(app.buttons["archive-cover-0-1"].exists)
+        XCTAssertTrue(app.buttons["archive-cover-0-2"].exists)
 
-        app.buttons["archive-cover-1"].click()
+        app.descendants(matching: .any)["archive-year-2025"].click()
+        XCTAssertTrue(app.staticTexts["archive-overview-year-2025"].exists)
+        XCTAssertEqual(
+            app.buttons["archive-cover-0-0"].value as? String,
+            "2025 annual part, some content unavailable"
+        )
+        app.buttons["archive-cover-0-0"].click()
 
         XCTAssertTrue(
             app.descendants(matching: .any)["archive-collection-detail"]
@@ -90,11 +101,14 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["untrusted.jpg"].exists)
         XCTAssertTrue(app.buttons["choose-import-folder"].isEnabled)
 
-        app.descendants(matching: .any)["archive-all-photos"].click()
+        app.descendants(matching: .any)["archive-earlier"].click()
         XCTAssertTrue(
             app.descendants(matching: .any)["archive-overview"]
                 .waitForExistence(timeout: 3)
         )
+        XCTAssertTrue(app.staticTexts["archive-overview-year-2019"].exists)
+        XCTAssertTrue(app.buttons["archive-cover-0-0"].exists)
+        XCTAssertTrue(app.buttons["archive-cover-0-1"].exists)
     }
 
     @MainActor

@@ -40,6 +40,8 @@ final class ProtocolFixtureTests: XCTestCase {
                 .event(operationID: "operation-1", event: "completed"),
                 .event(operationID: "operation-2", event: "failed"),
                 .event(operationID: "operation-3", event: "cancelled"),
+                .request(id: "request-browse-detail", method: "catalog.browse"),
+                .successResponse(id: "request-browse-detail", result: "catalog_browse"),
             ]
         )
     }
@@ -47,7 +49,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsNonCanonicalFieldName() {
         assertRejected(
             """
-            {"id":"macos-handshake-1","protocol_version":7,"method":"handshake","params":{"clientVersion":"0.2.0"}}
+            {"id":"macos-handshake-1","protocol_version":8,"method":"handshake","params":{"clientVersion":"0.2.0"}}
             """,
             containing: "keys were"
         )
@@ -56,7 +58,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsUnknownEnumValue() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":7,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
+            {"kind":"event","protocol_version":8,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
             """,
             containing: "unsupported event type"
         )
@@ -65,7 +67,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsIncompatibleMessageShape() {
         assertRejected(
             """
-            {"kind":"response","id":"request-2","protocol_version":7,"status":"success","result":[]}
+            {"kind":"response","id":"request-2","protocol_version":8,"status":"success","result":[]}
             """,
             containing: "must be an object"
         )
@@ -74,7 +76,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsJSONTypeDrift() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":7,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
+            {"kind":"event","protocol_version":8,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
             """,
             containing: "must be an integer"
         )
@@ -85,7 +87,7 @@ final class ProtocolFixtureTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v7.jsonl")
+            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v8.jsonl")
     }
 
     private func assertRejected(
@@ -137,11 +139,11 @@ final class ProtocolFixtureTests: XCTestCase {
             )
             XCTAssertEqual(response.kind, "response")
             XCTAssertEqual(response.id, "macos-handshake-1")
-            XCTAssertEqual(response.protocolVersion, 7)
+            XCTAssertEqual(response.protocolVersion, 8)
             XCTAssertEqual(response.status, "success")
             XCTAssertEqual(response.result.type, "handshake")
             XCTAssertEqual(response.result.engineVersion, "0.1.0")
-            XCTAssertEqual(response.result.protocolVersion, 7)
+            XCTAssertEqual(response.result.protocolVersion, 8)
             XCTAssertEqual(response.result.compatibleClientVersion, "0.2.0")
             XCTAssertEqual(
                 response.result.capabilities,
@@ -295,7 +297,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     method: "catalog.browse",
                     params: CatalogBrowseParameters(
                         path: "/Volumes/photos/Family Catalog",
-                        selection: .ongoing(key: "kids")
+                        selection: nil
                     )
                 )
             )
@@ -305,6 +307,13 @@ final class ProtocolFixtureTests: XCTestCase {
                 from: data
             )
             XCTAssertEqual(response.result.type, "catalog_browse")
+            XCTAssertEqual(response.result.navigation.count, 5)
+            guard case .earlier(let throughYear, let years) =
+                response.result.navigation[4] else {
+                return XCTFail("Expected Earlier navigation")
+            }
+            XCTAssertEqual(throughYear, 2019)
+            XCTAssertEqual(years.first?.entries.first?.annualPartYear, 2019)
             XCTAssertEqual(response.result.collections.count, 1)
             guard case .ongoing(
                 identity: .ongoing(key: "kids"),
@@ -314,7 +323,8 @@ final class ProtocolFixtureTests: XCTestCase {
             ) = response.result.collections[0] else {
                 return XCTFail("Expected ongoing browse collection")
             }
-            XCTAssertEqual(parts[0].dateGroups[0].date, "2019-03-02")
+            XCTAssertEqual(parts.count, 4)
+            XCTAssertEqual(parts[0].coverMedia?.filename, "2019-03-02 10-11-05 001.heic")
             XCTAssertEqual(
                 parts[1].problem,
                 "The collection manifest is damaged at line 3: expected '<sha256>  <filename>'."
@@ -418,6 +428,33 @@ final class ProtocolFixtureTests: XCTestCase {
                     payload: .cancelled(copiedCount: 1)
                 )
             )
+        case 21:
+            try assertRequest(
+                data,
+                equals: RequestEnvelope(
+                    id: "request-browse-detail",
+                    protocolVersion: EngineSupervisor.protocolVersion,
+                    method: "catalog.browse",
+                    params: CatalogBrowseParameters(
+                        path: "/Volumes/photos/Family Catalog",
+                        selection: .dated(
+                            year: "2019",
+                            directory: "2019-07-14 +6d Brittany"
+                        )
+                    )
+                )
+            )
+        case 22:
+            let response = try JSONDecoder().decode(
+                SuccessResponse<CatalogBrowseResult>.self,
+                from: data
+            )
+            XCTAssertTrue(response.result.navigation.isEmpty)
+            guard let collection = response.result.collections.first,
+                  case .dated(_, _, _, _, _, _, let groups, _) = collection else {
+                return XCTFail("Expected dated browse detail")
+            }
+            XCTAssertEqual(groups.first?.date, "2019-07-15")
         default:
             XCTFail("Unexpected fixture line \(index + 1)")
         }
@@ -505,11 +542,18 @@ private enum ProtocolFixtureValidator {
             try requireKeys(parameters, exactly: ["path"], at: "\(path).params")
             _ = try requireString(parameters, key: "path", at: "\(path).params")
         case "catalog.browse":
-            try requireKeys(parameters, exactly: ["path", "selection"], at: "\(path).params")
+            let parameterKeys = Set(parameters.keys)
+            guard parameterKeys == ["path"]
+                    || parameterKeys == ["path", "selection"] else {
+                throw ValidationError("\(path).params has invalid catalog browse keys")
+            }
             _ = try requireString(parameters, key: "path", at: "\(path).params")
-            let selection = try requireObject(parameters, key: "selection", at: "\(path).params")
-            try requireKeys(selection, exactly: ["kind", "key"], at: "\(path).params.selection")
-            _ = try requireString(selection, key: "key", at: "\(path).params.selection")
+            if parameterKeys.contains("selection") {
+                try validateCollectionIdentity(
+                    try requireObject(parameters, key: "selection", at: "\(path).params"),
+                    at: "\(path).params.selection"
+                )
+            }
         case "import.review":
             try requireKeys(
                 parameters,
@@ -679,7 +723,14 @@ private enum ProtocolFixtureValidator {
                 try validateCollection(value, at: "\(path).collections[\(index)]")
             }
         case "catalog_browse":
-            try requireKeys(result, exactly: ["type", "collections"], at: path)
+            try requireKeys(result, exactly: ["type", "navigation", "collections"], at: path)
+            let navigation = try requireArray(result, key: "navigation", at: path)
+            for (index, value) in navigation.enumerated() {
+                try validateBrowseNavigationScope(
+                    value,
+                    at: "\(path).navigation[\(index)]"
+                )
+            }
             let collections = try requireArray(result, key: "collections", at: path)
             for (index, value) in collections.enumerated() {
                 try validateBrowseCollection(value, at: "\(path).collections[\(index)]")
@@ -743,6 +794,68 @@ private enum ProtocolFixtureValidator {
             }
         default:
             throw ValidationError("\(path) has an unsupported destination kind")
+        }
+    }
+
+    private static func validateBrowseNavigationScope(_ value: Any, at path: String) throws {
+        let scope = try requireObject(value, at: path)
+        switch try requireString(scope, key: "kind", at: path) {
+        case "all_photos":
+            try requireKeys(scope, exactly: ["kind"], at: path)
+        case "year":
+            try requireKeys(scope, exactly: ["kind", "year", "entries"], at: path)
+            _ = try requireInteger(scope, key: "year", at: path)
+            try validateBrowseNavigationEntries(
+                try requireArray(scope, key: "entries", at: path),
+                at: "\(path).entries"
+            )
+        case "earlier":
+            try requireKeys(scope, exactly: ["kind", "through_year", "years"], at: path)
+            _ = try requireInteger(scope, key: "through_year", at: path)
+            for (index, value) in try requireArray(scope, key: "years", at: path).enumerated() {
+                let yearPath = "\(path).years[\(index)]"
+                let year = try requireObject(value, at: yearPath)
+                try requireKeys(year, exactly: ["year", "entries"], at: yearPath)
+                _ = try requireInteger(year, key: "year", at: yearPath)
+                try validateBrowseNavigationEntries(
+                    try requireArray(year, key: "entries", at: yearPath),
+                    at: "\(yearPath).entries"
+                )
+            }
+        default:
+            throw ValidationError("\(path) has an unsupported navigation kind")
+        }
+    }
+
+    private static func validateBrowseNavigationEntries(_ values: [Any], at path: String) throws {
+        for (index, value) in values.enumerated() {
+            let entryPath = "\(path)[\(index)]"
+            let entry = try requireObject(value, at: entryPath)
+            try requireKeys(entry, exactly: ["identity", "annual_part_year"], at: entryPath)
+            try validateCollectionIdentity(
+                try requireObject(entry, key: "identity", at: entryPath),
+                at: "\(entryPath).identity"
+            )
+            if !(entry["annual_part_year"] is NSNull) {
+                _ = try requireInteger(entry, key: "annual_part_year", at: entryPath)
+            }
+        }
+    }
+
+    private static func validateCollectionIdentity(
+        _ identity: [String: Any],
+        at path: String
+    ) throws {
+        switch try requireString(identity, key: "kind", at: path) {
+        case "dated":
+            try requireKeys(identity, exactly: ["kind", "year", "directory"], at: path)
+            _ = try requireString(identity, key: "year", at: path)
+            _ = try requireString(identity, key: "directory", at: path)
+        case "ongoing":
+            try requireKeys(identity, exactly: ["kind", "key"], at: path)
+            _ = try requireString(identity, key: "key", at: path)
+        default:
+            throw ValidationError("\(path) has an unsupported identity kind")
         }
     }
 
