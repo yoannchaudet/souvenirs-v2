@@ -10,6 +10,10 @@ protocol CatalogEngineClient: AnyObject {
     ) async throws -> EngineSupervisor.CatalogLocation
     func openCatalog(path: String) async throws -> EngineSupervisor.CatalogLocation
     func catalogCollections(path: String) async throws -> [EngineSupervisor.CatalogCollection]
+    func catalogBrowse(
+        path: String,
+        selection: EngineSupervisor.CatalogCollectionIdentity?
+    ) async throws -> [EngineSupervisor.CatalogBrowseCollection]
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan
     func reviewImport(
         catalogPath: String,
@@ -42,6 +46,13 @@ extension EngineAppModel: CatalogEngineClient {
         path: String
     ) async throws -> [EngineSupervisor.CatalogCollection] {
         try await supervisor.catalogCollections(path: path)
+    }
+
+    func catalogBrowse(
+        path: String,
+        selection: EngineSupervisor.CatalogCollectionIdentity?
+    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
+        try await supervisor.catalogBrowse(path: path, selection: selection)
     }
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
@@ -95,6 +106,7 @@ final class CatalogWelcomeModel: ObservableObject {
     @Published private(set) var importPlanning: ImportPlanningModel?
     @Published var presentedError: String?
     @Published private(set) var presentedErrorTitle = "Souvenirs couldn’t open this archive"
+    let browse: CatalogBrowseModel
 
     private let engine: CatalogEngineClient
     private let defaults: UserDefaults
@@ -106,6 +118,7 @@ final class CatalogWelcomeModel: ObservableObject {
         recents: [RecentCatalog]? = nil
     ) {
         self.engine = engine
+        browse = CatalogBrowseModel(engine: engine)
         self.defaults = defaults
         if let recents {
             self.recents = recents

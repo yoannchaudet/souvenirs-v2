@@ -81,10 +81,85 @@ fn catalog_flow_serves_collection_query_capability() {
         "kids"
     );
     assert_eq!(messages[2]["result"]["type"], "catalog_browse");
-    assert_eq!(
-        messages[2]["result"]["collections"][0]["date_groups"][0]["media"][0]["filename"],
-        "2019-07-15 10-11-12 001.jpg"
+    assert_eq!(messages[2]["result"]["collections"], json!([]));
+}
+
+#[test]
+fn catalog_browse_serves_overview_and_exact_detail() {
+    let overview = run(
+        "catalog-browse",
+        &[
+            handshake(),
+            request(
+                "request-2",
+                "catalog.browse",
+                json!({"path": "/catalog", "selection": null}),
+            ),
+        ],
     );
+    let overview_messages = messages(&overview);
+    assert_eq!(
+        overview_messages[1]["result"]["collections"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        overview_messages[1]["result"]["collections"][0]["date_groups"],
+        json!([])
+    );
+    assert_eq!(
+        overview_messages[1]["result"]["collections"][1]["parts"][2]["problem"],
+        "SHA256SUMS contains a malformed manifest line."
+    );
+    assert_eq!(
+        overview_messages[1]["result"]["collections"][1]["parts"][2]["date_groups"],
+        json!([])
+    );
+
+    let detail = run(
+        "catalog-browse",
+        &[
+            handshake(),
+            request(
+                "request-2",
+                "catalog.browse",
+                json!({
+                    "path": "/catalog",
+                    "selection": {"kind": "ongoing", "key": "kids"}
+                }),
+            ),
+        ],
+    );
+    let detail_messages = messages(&detail);
+    assert_eq!(
+        detail_messages[1]["result"]["collections"][0]["identity"]["key"],
+        "kids"
+    );
+    assert_eq!(
+        detail_messages[1]["result"]["collections"][0]["parts"][1]["date_groups"][0]["media"][1]
+            ["filename"],
+        "2024-06-08 09-10-14 002.mov"
+    );
+}
+
+#[test]
+fn catalog_browse_error_is_structured() {
+    let output = run(
+        "catalog-browse-error",
+        &[
+            handshake(),
+            request(
+                "request-2",
+                "catalog.browse",
+                json!({"path": "/catalog", "selection": null}),
+            ),
+        ],
+    );
+
+    assert!(output.status.success());
+    assert_eq!(messages(&output)[1]["error"]["code"], "catalog_io");
 }
 
 #[test]

@@ -151,6 +151,28 @@ final class CatalogVisualTests: XCTestCase {
         )
 
         if case .catalog(let catalog) = model.route {
+            engine.browseCollections = VisualCatalogEngine.browseFixture
+            await model.browse.refresh()
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 920, height: 620),
+                name: "archive-browse-overview"
+            )
+            await model.browse.select(.collection(.ongoing(key: "kids")))
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 586, height: 386),
+                name: "archive-browse-detail-problem"
+            )
+
             engine.scanSuspended = true
             model.beginImport(from: "/Volumes/EOS_DIGITAL", into: catalog)
             for _ in 0..<20 where model.importPlanning?.isLoading != true {
@@ -522,6 +544,7 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
     var validationError: Error?
     var reviewError: Error?
     var scanSuspended = false
+    var browseCollections: [EngineSupervisor.CatalogBrowseCollection] = []
     private var continuation:
         AsyncThrowingStream<EngineSupervisor.OperationEvent, any Error>.Continuation?
     private var scanContinuation: CheckedContinuation<Void, Never>?
@@ -548,6 +571,16 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
         path: String
     ) async throws -> [EngineSupervisor.CatalogCollection] {
         []
+    }
+
+    func catalogBrowse(
+        path: String,
+        selection: EngineSupervisor.CatalogCollectionIdentity?
+    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
+        guard let selection else {
+            return browseCollections.map(\.overviewOnly)
+        }
+        return browseCollections.filter { $0.identity == selection }
     }
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
@@ -627,6 +660,57 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
             displayName: "Family Archive",
             detail: "Catalog format 2"
         )
+    }
+
+    static var browseFixture: [EngineSupervisor.CatalogBrowseCollection] {
+        let datedMedia = EngineSupervisor.CatalogBrowseMedia(
+            filename: "2019-07-15 10-11-12 001.jpg",
+            path: "/unavailable/brittany.jpg"
+        )
+        let kidsMedia = EngineSupervisor.CatalogBrowseMedia(
+            filename: "2024-06-08 09-10-11 001.jpg",
+            path: "/unavailable/kids.jpg"
+        )
+        return [
+            .dated(
+                identity: .dated(
+                    year: "2019",
+                    directory: "2019-07-14 +6d Brittany"
+                ),
+                label: "Brittany",
+                startDate: "2019-07-14",
+                endDate: "2019-07-20",
+                mediaCount: 1,
+                coverMedia: datedMedia,
+                dateGroups: [.init(date: "2019-07-15", media: [datedMedia])],
+                problem: nil
+            ),
+            .ongoing(
+                identity: .ongoing(key: "kids"),
+                label: "Kids",
+                mediaCount: 2,
+                parts: [
+                    .init(
+                        year: 2024,
+                        yearDirectory: "2024",
+                        collectionDirectory: "z Kids",
+                        mediaCount: 1,
+                        coverMedia: kidsMedia,
+                        dateGroups: [.init(date: "2024-06-08", media: [kidsMedia])],
+                        problem: nil
+                    ),
+                    .init(
+                        year: 2025,
+                        yearDirectory: "2025",
+                        collectionDirectory: "z Kids",
+                        mediaCount: 1,
+                        coverMedia: kidsMedia,
+                        dateGroups: [.init(date: "2025-01-01", media: [kidsMedia])],
+                        problem: "SHA256SUMS contains a malformed manifest line."
+                    )
+                ]
+            )
+        ]
     }
 
     func startImportExecution(reviewedPlan: String) async throws -> String {

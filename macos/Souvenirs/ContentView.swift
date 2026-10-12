@@ -310,10 +310,8 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 16)
-                Label("All Photos", systemImage: "square.grid.2x2")
-                    .padding(7)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.selection.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                CatalogBrowseSidebar(model: model.browse)
+                    .frame(maxHeight: .infinity)
                 Spacer()
                 Divider()
                 Label(sidebarStatus, systemImage: "circle.fill")
@@ -331,16 +329,56 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(imports.collectionName.isEmpty ? "All Photos" : imports.collectionName)
+                    if imports.catalog?.path == catalog.path,
+                       imports.phase != .idle,
+                       imports.phase != .recoveryDeferred {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(
+                                imports.collectionName.isEmpty
+                                    ? "All Photos" : imports.collectionName
+                            )
                             .font(.headline)
-                        if !imports.collectionName.isEmpty, let review = imports.review {
-                            Text("\(review.acceptedDate) · \(review.transferCount) photos and videos")
+                            if !imports.collectionName.isEmpty, let review = imports.review {
+                                Text(
+                                    "\(review.acceptedDate) · "
+                                        + "\(review.transferCount) photos and videos"
+                                )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            }
                         }
+                    } else {
+                        CatalogBrowseHeader(model: model.browse)
                     }
                     Spacer()
+                    if imports.phase == .idle || imports.phase == .recoveryDeferred {
+                        Button {
+                            Task { await model.browse.refresh() }
+                        } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                                .labelStyle(.iconOnly)
+                        }
+                        .help("Refresh archive")
+                        .accessibilityIdentifier("archive-browse-refresh")
+
+                        Button("Import…") {
+                            chooseFolder { path in
+                                modalReturnFocus = .chooseImportFolder
+                                model.beginImport(from: path, into: catalog)
+                            }
+                        }
+                        .disabled(
+                            imports.phase == .recoveryDeferred
+                                || model.importPlanning != nil
+                        )
+                        .accessibilityIdentifier("choose-import-folder")
+                        .focusable()
+                        .focused($keyboardFocus, equals: .chooseImportFolder)
+                        .accessibilityFocused(
+                            $accessibilityFocus,
+                            equals: .chooseImportFolder
+                        )
+                    }
                 }
                 .padding(.horizontal, 18)
                 .frame(height: 44)
@@ -350,7 +388,16 @@ struct ContentView: View {
                    imports.phase != .recoveryDeferred {
                     importActivity(catalog)
                 } else {
-                    catalogReadyContent(catalog)
+                    VStack(spacing: 0) {
+                        if imports.catalog?.path == catalog.path,
+                           imports.phase == .recoveryDeferred {
+                            deferredRecovery
+                                .padding(.vertical, 12)
+                        }
+                        CatalogBrowsePane(model: model.browse) {
+                            catalogReadyContent(catalog)
+                        }
+                    }
                 }
                 HStack(spacing: 3) {
                     Image(systemName: "folder")
@@ -378,17 +425,15 @@ struct ContentView: View {
         .task(id: catalog.path) {
             await imports.inspect(catalog: catalog)
         }
+        .task(id: "browse-\(catalog.path)") {
+            await model.browse.load(catalogPath: catalog.path)
+        }
     }
 
     private func catalogReadyContent(_ catalog: RecentCatalog) -> some View {
         GeometryReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
-                    if imports.catalog?.path == catalog.path,
-                       imports.phase == .recoveryDeferred {
-                        deferredRecovery
-                            .padding(.bottom, 24)
-                    }
                     Spacer(minLength: 24)
                     Image(systemName: "square.and.arrow.down")
                         .font(.system(size: 28))
@@ -405,25 +450,6 @@ struct ContentView: View {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 560)
                         .padding(.top, 3)
-                    Button("Choose a Folder to Import…") {
-                        chooseFolder { path in
-                            modalReturnFocus = .chooseImportFolder
-                            model.beginImport(from: path, into: catalog)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(
-                        imports.catalog?.path == catalog.path
-                            && imports.phase == .recoveryDeferred
-                    )
-                    .accessibilityIdentifier("choose-import-folder")
-                    .focusable()
-                    .focused($keyboardFocus, equals: .chooseImportFolder)
-                    .accessibilityFocused(
-                        $accessibilityFocus,
-                        equals: .chooseImportFolder
-                    )
-                    .padding(.top, 10)
                     Text("Memory cards appear in the sidebar when you connect them.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
@@ -2005,6 +2031,13 @@ private final class PreviewCatalogEngine: CatalogEngineClient, ImportExecutionEn
                 ]
             )
         ]
+    }
+
+    func catalogBrowse(
+        path: String,
+        selection: EngineSupervisor.CatalogCollectionIdentity?
+    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
+        []
     }
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
