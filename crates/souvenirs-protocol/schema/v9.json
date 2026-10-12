@@ -633,6 +633,36 @@
             {
               "type": "object",
               "required": [
+                "completed_media",
+                "event",
+                "media",
+                "total_media"
+              ],
+              "properties": {
+                "completed_media": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "media_verified"
+                  ]
+                },
+                "media": {
+                  "$ref": "#/definitions/OperationMedia"
+                },
+                "total_media": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
                 "event",
                 "result"
               ],
@@ -1028,6 +1058,36 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        }
+      }
+    },
+    "OperationMedia": {
+      "type": "object",
+      "required": [
+        "accepted_date",
+        "filename",
+        "identity",
+        "path"
+      ],
+      "properties": {
+        "accepted_date": {
+          "type": "string"
+        },
+        "annual_part_year": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/definitions/CatalogCollectionIdentity"
+        },
+        "path": {
+          "type": "string"
         }
       }
     },
@@ -1724,7 +1784,8 @@
         "remaining_count",
         "source_available",
         "source_name",
-        "total_count"
+        "total_count",
+        "verified_media"
       ],
       "properties": {
         "activity_time": {
@@ -1759,6 +1820,12 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        },
+        "verified_media": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OperationMedia"
+          }
         }
       }
     }

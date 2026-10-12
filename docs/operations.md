@@ -127,7 +127,9 @@ A catalog duplicate record preserves the planned `catalog_path`.
 A source duplicate record preserves the planned `selected_source_file_id`.
 CLI recovery writes any missing retained records before it records the operation outcome.
 Repeated recovery does not duplicate an existing matching record.
-CLI progress, status, and outcomes report copied and skipped counts.
+App import progress, status, and outcomes report copied primary and companion originals.
+They do not count sidecars as copied media.
+Execution and recovery still track every file step for durability and cancellation.
 Duplicate detection uses the [index](storage.md#index) for catalog content and the copy digest for sources.
 
 ## Organize backlog

@@ -224,11 +224,12 @@ Each component fits in an unsigned 64-bit integer.
 A macOS client accepts the engine when its client version is equal to or newer than this minimum.
 A client rejects an engine that requires a newer client version.
 The protocol version remains the wire compatibility boundary.
-Protocol version 8 does not change saved import plan versions or their digest contracts.
+Protocol version 9 adds verified import media events and media-only progress counts.
+It does not change saved import plan versions or their digest contracts.
 
 The Rust types generate a committed JSON Schema.
 Swift protocol fixtures must validate against this schema.
-Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v8.json`.
+Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v9.json`.
 
 The `catalog.collections` query returns engine-owned collection identities.
 A dated identity contains the exact year directory and collection directory.
@@ -259,6 +260,14 @@ An identity-scoped query returns date groups and media for the exact selected co
 Rust groups detailed results by accepted date and returns media paths in deterministic manifest order.
 The macOS client must not reconstruct collection paths or read manifests directly.
 Published originals do not enter browse results until a manifest admits them.
+An import emits `media_verified` after verified publication and the durable `CopyPublished` journal transition.
+Each event represents one primary or companion original.
+Sidecars do not emit media events and do not increment media progress counts.
+The event carries the exact collection identity, ongoing annual-part year, accepted date, filename, and engine-resolved destination path.
+Recovery inspection returns the published-original media snapshot from the operation journal.
+Recovery replays published originals in reviewed execution order before it resumes storage work.
+The macOS client deduplicates replayed records by collection identity, annual-part year, and destination path.
+These records are transient operation state until a manifest admits the originals.
 An invalid collection manifest produces a problem on that collection part.
 That problem makes the part count and media unavailable rather than partially trusted.
 The query continues to return other collections after an invalid manifest.

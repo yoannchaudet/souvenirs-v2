@@ -37,6 +37,7 @@ final class ProtocolFixtureTests: XCTestCase {
                 .errorResponse(id: "request-5", code: "operation_not_found"),
                 .event(operationID: "operation-1", event: "started"),
                 .event(operationID: "operation-1", event: "progress"),
+                .event(operationID: "operation-1", event: "media_verified"),
                 .event(operationID: "operation-1", event: "completed"),
                 .event(operationID: "operation-2", event: "failed"),
                 .event(operationID: "operation-3", event: "cancelled"),
@@ -49,7 +50,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsNonCanonicalFieldName() {
         assertRejected(
             """
-            {"id":"macos-handshake-1","protocol_version":8,"method":"handshake","params":{"clientVersion":"0.2.0"}}
+            {"id":"macos-handshake-1","protocol_version":9,"method":"handshake","params":{"clientVersion":"0.2.0"}}
             """,
             containing: "keys were"
         )
@@ -58,7 +59,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsUnknownEnumValue() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":8,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
+            {"kind":"event","protocol_version":9,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
             """,
             containing: "unsupported event type"
         )
@@ -67,7 +68,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsIncompatibleMessageShape() {
         assertRejected(
             """
-            {"kind":"response","id":"request-2","protocol_version":8,"status":"success","result":[]}
+            {"kind":"response","id":"request-2","protocol_version":9,"status":"success","result":[]}
             """,
             containing: "must be an object"
         )
@@ -76,7 +77,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsJSONTypeDrift() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":8,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
+            {"kind":"event","protocol_version":9,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
             """,
             containing: "must be an integer"
         )
@@ -87,7 +88,7 @@ final class ProtocolFixtureTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v8.jsonl")
+            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v9.jsonl")
     }
 
     private func assertRejected(
@@ -139,11 +140,11 @@ final class ProtocolFixtureTests: XCTestCase {
             )
             XCTAssertEqual(response.kind, "response")
             XCTAssertEqual(response.id, "macos-handshake-1")
-            XCTAssertEqual(response.protocolVersion, 8)
+            XCTAssertEqual(response.protocolVersion, 9)
             XCTAssertEqual(response.status, "success")
             XCTAssertEqual(response.result.type, "handshake")
             XCTAssertEqual(response.result.engineVersion, "0.1.0")
-            XCTAssertEqual(response.result.protocolVersion, 8)
+            XCTAssertEqual(response.result.protocolVersion, 9)
             XCTAssertEqual(response.result.compatibleClientVersion, "0.2.0")
             XCTAssertEqual(
                 response.result.capabilities,
@@ -228,9 +229,21 @@ final class ProtocolFixtureTests: XCTestCase {
                     operationID: "operation-1",
                     collectionName: "Dolomites",
                     sourceName: "EOS_DIGITAL",
-                    copiedCount: 7,
-                    totalCount: 12,
-                    remainingCount: 5,
+                    copiedCount: 1,
+                    totalCount: 2,
+                    remainingCount: 1,
+                    verifiedMedia: [
+                        .init(
+                            identity: .dated(
+                                year: "2026",
+                                directory: "2026-10-10 +2d Dolomites"
+                            ),
+                            annualPartYear: nil,
+                            acceptedDate: "2026-10-10",
+                            filename: "20261010-101101-01.jpg",
+                            path: "/Volumes/photos/Family Catalog/2026/2026-10-10 +2d Dolomites/20261010-101101-01.jpg"
+                        )
+                    ],
                     sourceAvailable: false,
                     interruption: .sourceUnavailable,
                     activityTime: .init(
@@ -380,7 +393,7 @@ final class ProtocolFixtureTests: XCTestCase {
                 .init(
                     operationID: "operation-1",
                     sequence: 0,
-                    payload: .started(name: "import.scan")
+                    payload: .started(name: "import.execute")
                 )
             )
         case 17:
@@ -397,17 +410,36 @@ final class ProtocolFixtureTests: XCTestCase {
                 )
             )
         case 18:
+            XCTAssertEqual(
+                try EngineSupervisor.decodeOperationEvent(data),
+                .init(
+                    operationID: "operation-1",
+                    sequence: 2,
+                    payload: .mediaVerified(
+                        media: .init(
+                            identity: .ongoing(key: "kids"),
+                            annualPartYear: 2026,
+                            acceptedDate: "2026-10-10",
+                            filename: "20261010-101101-01.jpg",
+                            path: "/Volumes/photos/Family Catalog/2026/z Kids/20261010-101101-01.jpg"
+                        ),
+                        completedMedia: 1,
+                        totalMedia: 2
+                    )
+                )
+            )
+        case 19:
             let event = try EngineSupervisor.decodeOperationEvent(data)
             guard case .completed(let result) = event.payload else {
                 return XCTFail("Expected a completed event")
             }
             XCTAssertEqual(event.operationID, "operation-1")
-            XCTAssertEqual(event.sequence, 2)
+            XCTAssertEqual(event.sequence, 3)
             XCTAssertEqual(
                 try JSONSerialization.jsonObject(with: result) as? [String: Int],
                 ["item_count": 1]
             )
-        case 19:
+        case 20:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -419,7 +451,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     )
                 )
             )
-        case 20:
+        case 21:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -428,7 +460,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     payload: .cancelled(copiedCount: 1)
                 )
             )
-        case 21:
+        case 22:
             try assertRequest(
                 data,
                 equals: RequestEnvelope(
@@ -444,7 +476,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     )
                 )
             )
-        case 22:
+        case 23:
             let response = try JSONDecoder().decode(
                 SuccessResponse<CatalogBrowseResult>.self,
                 from: data
@@ -678,8 +710,8 @@ private enum ProtocolFixtureValidator {
                 operation,
                 exactly: [
                     "operation_id", "collection_name", "source_name", "copied_count",
-                    "total_count", "remaining_count", "source_available", "interruption",
-                    "activity_time",
+                    "total_count", "remaining_count", "verified_media", "source_available",
+                    "interruption", "activity_time",
                 ],
                 at: "\(path).operation"
             )
@@ -689,6 +721,28 @@ private enum ProtocolFixtureValidator {
             _ = try requireInteger(operation, key: "copied_count", at: "\(path).operation")
             _ = try requireInteger(operation, key: "total_count", at: "\(path).operation")
             _ = try requireInteger(operation, key: "remaining_count", at: "\(path).operation")
+            for (index, value) in try requireArray(
+                operation,
+                key: "verified_media",
+                at: "\(path).operation"
+            ).enumerated() {
+                let mediaPath = "\(path).operation.verified_media[\(index)]"
+                let media = try requireObject(value, at: mediaPath)
+                try requireKeys(
+                    media,
+                    exactly: [
+                        "identity", "annual_part_year", "accepted_date", "filename", "path",
+                    ],
+                    at: mediaPath
+                )
+                try validateCollectionIdentity(
+                    try requireObject(media, key: "identity", at: mediaPath),
+                    at: "\(mediaPath).identity"
+                )
+                _ = try requireString(media, key: "accepted_date", at: mediaPath)
+                _ = try requireString(media, key: "filename", at: mediaPath)
+                _ = try requireString(media, key: "path", at: mediaPath)
+            }
             _ = try requireBoolean(operation, key: "source_available", at: "\(path).operation")
             _ = try requireString(operation, key: "interruption", at: "\(path).operation")
             let activityTime = try requireObject(
@@ -1019,6 +1073,35 @@ private enum ProtocolFixtureValidator {
             _ = try requireInteger(object, key: "completed_units", at: path)
             _ = try requireInteger(object, key: "total_units", at: path)
             _ = try requireString(object, key: "message", at: path)
+        case "media_verified":
+            try requireKeys(
+                object,
+                exactly: [
+                    "kind", "protocol_version", "operation_id", "sequence", "event",
+                    "media", "completed_media", "total_media",
+                ],
+                at: path
+            )
+            let media = try requireObject(object, key: "media", at: path)
+            try requireKeys(
+                media,
+                exactly: [
+                    "identity", "annual_part_year", "accepted_date", "filename", "path",
+                ],
+                at: "\(path).media"
+            )
+            try validateCollectionIdentity(
+                try requireObject(media, key: "identity", at: "\(path).media"),
+                at: "\(path).media.identity"
+            )
+            if !(media["annual_part_year"] is NSNull) {
+                _ = try requireInteger(media, key: "annual_part_year", at: "\(path).media")
+            }
+            _ = try requireString(media, key: "accepted_date", at: "\(path).media")
+            _ = try requireString(media, key: "filename", at: "\(path).media")
+            _ = try requireString(media, key: "path", at: "\(path).media")
+            _ = try requireInteger(object, key: "completed_media", at: path)
+            _ = try requireInteger(object, key: "total_media", at: path)
         case "completed":
             try requireKeys(
                 object,

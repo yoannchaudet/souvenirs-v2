@@ -7,7 +7,8 @@ pub mod source_datetime;
 pub use execution::{
     ImportCancellation, ImportExecutionError, ImportExecutionOutcome, ImportExecutionRequest,
     ImportExecutionResult, ImportExecutionService, ImportRecoveryMode, ImportRecoveryService,
-    OperationProgress, PreparedImport, RecoveryOutcome,
+    OperationMedia, OperationMediaCollectionIdentity, OperationMediaVerified, OperationProgress,
+    OperationUpdate, PreparedImport, RecoveryOutcome,
 };
 pub use souvenirs_domain as domain;
 
@@ -776,6 +777,7 @@ pub struct UnfinishedOperation {
     pub copied_count: usize,
     pub total_count: usize,
     pub remaining_count: usize,
+    pub verified_media: Vec<OperationMedia>,
     pub source_available: bool,
     pub interruption: UnfinishedOperationInterruption,
     pub activity_time: UnfinishedOperationActivityTime,
@@ -872,7 +874,7 @@ impl OperationInspectionService {
             else {
                 continue;
             };
-            let copied_count = records
+            let copied_file_count = records
                 .iter()
                 .filter(|record| {
                     matches!(
@@ -883,11 +885,39 @@ impl OperationInspectionService {
                     )
                 })
                 .count();
-            let remaining_count = total_count.checked_sub(copied_count).ok_or_else(|| {
+            total_count.checked_sub(copied_file_count).ok_or_else(|| {
                 CatalogServiceError::InvalidOperationJournal {
                     path: path.clone(),
                     message: format!(
-                        "journal records {copied_count} copied files for a total of {total_count}"
+                        "journal records {copied_file_count} copied files for a total of {total_count}"
+                    ),
+                }
+            })?;
+            let media_snapshot =
+                execution::operation_media_snapshot(catalog, &records).map_err(|error| {
+                    CatalogServiceError::InvalidOperationJournal {
+                        path: path.clone(),
+                        message: error.to_string(),
+                    }
+                })?;
+            let verified_media = media_snapshot
+                .as_ref()
+                .map(|(media, _)| media.clone())
+                .unwrap_or_default();
+            let media_total_count = media_snapshot
+                .as_ref()
+                .map(|(_, total)| *total)
+                .unwrap_or(*total_count);
+            let copied_count = if media_snapshot.is_some() {
+                verified_media.len()
+            } else {
+                copied_file_count
+            };
+            let remaining_count = media_total_count.checked_sub(copied_count).ok_or_else(|| {
+                CatalogServiceError::InvalidOperationJournal {
+                    path: path.clone(),
+                    message: format!(
+                        "journal records {copied_count} copied media files for a total of {media_total_count}"
                     ),
                 }
             })?;
@@ -932,8 +962,9 @@ impl OperationInspectionService {
                     .unwrap_or("the source")
                     .to_owned(),
                 copied_count,
-                total_count: *total_count,
+                total_count: media_total_count,
                 remaining_count,
+                verified_media,
                 source_available: source_path.is_dir(),
                 interruption,
                 activity_time,
@@ -1750,7 +1781,7 @@ mod tests {
         DateResolution, ExistingCollectionIdentity, ImportCancellation, ImportDestination,
         ImportExecutionRequest, ImportExecutionResult, ImportExecutionService, ImportPlanningError,
         ImportPlanningService, ImportPreflightCheck, ImportReviewRequest,
-        OperationInspectionService,
+        OperationInspectionService, OperationMediaCollectionIdentity, OperationUpdate,
     };
 
     #[test]
@@ -2587,10 +2618,27 @@ mod tests {
             reviewed_plan: review.reviewed_plan.unwrap(),
         })
         .unwrap();
+        let mut updates = Vec::new();
         let result =
-            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
-                .unwrap();
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |update| {
+                updates.push(update)
+            })
+            .unwrap();
         assert!(matches!(result, ImportExecutionResult::Completed(_)));
+        let media = updates
+            .iter()
+            .find_map(|update| match update {
+                OperationUpdate::MediaVerified(verified) => Some(&verified.media),
+                OperationUpdate::Progress(_) => None,
+            })
+            .expect("ongoing import media");
+        assert_eq!(
+            media.identity,
+            OperationMediaCollectionIdentity::Ongoing {
+                key: "kids".to_owned()
+            }
+        );
+        assert_eq!(media.annual_part_year, Some(2026));
         assert!(catalog.join("2026/z Kids/SHA256SUMS").is_file());
     }
 

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::Read;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use souvenirs_domain::catalog::{parse_collection_directory, ParsedCollectionDirectory};
 use souvenirs_domain::plan::PlanFileRole;
 use souvenirs_storage::{
     is_operation_journal_file_name, is_source_unavailable_error, read_operation_records,
@@ -51,6 +52,35 @@ pub struct OperationProgress {
     pub completed_units: u64,
     pub total_units: u64,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum OperationMediaCollectionIdentity {
+    Dated { year: String, directory: String },
+    Ongoing { key: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct OperationMedia {
+    pub identity: OperationMediaCollectionIdentity,
+    pub annual_part_year: Option<i32>,
+    pub accepted_date: String,
+    pub filename: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationMediaVerified {
+    pub media: OperationMedia,
+    pub completed_media: u64,
+    pub total_media: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OperationUpdate {
+    Progress(OperationProgress),
+    MediaVerified(OperationMediaVerified),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -149,7 +179,7 @@ impl ImportExecutionService {
     pub fn execute(
         prepared: PreparedImport,
         cancellation: &ImportCancellation,
-        mut progress: impl FnMut(OperationProgress),
+        mut update: impl FnMut(OperationUpdate),
     ) -> Result<ImportExecutionResult, ImportExecutionError> {
         CatalogService::open(&prepared.plan.catalog_path)
             .map_err(|error| ImportExecutionError::Catalog(error.to_string()))?;
@@ -169,11 +199,12 @@ impl ImportExecutionService {
                 prepared.plan.copies.len(),
             )
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
-        progress(OperationProgress {
+        let total_media = media_count(&prepared.plan);
+        update(OperationUpdate::Progress(OperationProgress {
             completed_units: 0,
-            total_units: prepared.plan.copies.len() as u64,
+            total_units: total_media as u64,
             message: "Checking the source…".to_owned(),
-        });
+        }));
         match validate_reviewed_source_state(&prepared.plan, cancellation) {
             Ok(SourceValidation::Valid) => {}
             Ok(SourceValidation::Cancelled) => {
@@ -228,11 +259,11 @@ impl ImportExecutionService {
             }))
         }
 
-        let total_units = prepared.plan.copies.len() as u64;
-        let mut copied_count = 0;
+        let mut copied_file_count = 0;
+        let mut completed_media = 0;
         for (index, copy) in prepared.plan.copies.iter().enumerate() {
             if cancellation.is_requested() {
-                return cancel_execution(&prepared, &layout, lock, &mut journal, copied_count);
+                return cancel_execution(&prepared, &layout, lock, &mut journal, copied_file_count);
             }
             if let Err(error) = layout.copy_verified(
                 &lock,
@@ -257,19 +288,27 @@ impl ImportExecutionService {
                 }
                 return Err(error);
             }
-            copied_count = index + 1;
-            progress(OperationProgress {
-                completed_units: copied_count as u64,
-                total_units,
-                message: format!("Copied {copied_count} of {total_units}"),
-            });
+            copied_file_count = index + 1;
+            if let Some(media) = operation_media(&prepared.plan, copy)? {
+                completed_media += 1;
+                update(OperationUpdate::MediaVerified(OperationMediaVerified {
+                    media,
+                    completed_media: completed_media as u64,
+                    total_media: total_media as u64,
+                }));
+                update(OperationUpdate::Progress(OperationProgress {
+                    completed_units: completed_media as u64,
+                    total_units: total_media as u64,
+                    message: format!("Copied {completed_media} of {total_media}"),
+                }));
+            }
             if cancellation.is_requested() {
-                return cancel_execution(&prepared, &layout, lock, &mut journal, copied_count);
+                return cancel_execution(&prepared, &layout, lock, &mut journal, copied_file_count);
             }
         }
 
         if !cancellation.begin_completion() {
-            return cancel_execution(&prepared, &layout, lock, &mut journal, copied_count);
+            return cancel_execution(&prepared, &layout, lock, &mut journal, copied_file_count);
         }
 
         layout
@@ -291,11 +330,110 @@ impl ImportExecutionService {
         lock.release()
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
         Ok(ImportExecutionResult::Completed(ImportExecutionOutcome {
-            copied_count,
+            copied_count: completed_media,
             skipped_count: 0,
             left_on_source_count: prepared.plan.left_on_source_count,
         }))
     }
+}
+
+fn media_count(plan: &ExecutionPlan) -> usize {
+    plan.copies
+        .iter()
+        .filter(|copy| is_media_copy(copy))
+        .count()
+}
+
+fn media_count_for_prefix(plan: &ExecutionPlan, copied_file_count: usize) -> usize {
+    plan.copies
+        .iter()
+        .take(copied_file_count)
+        .filter(|copy| is_media_copy(copy))
+        .count()
+}
+
+fn is_media_copy(copy: &ExecutionCopy) -> bool {
+    copy.manifested && copy.role != Some(PlanFileRole::Sidecar)
+}
+
+fn operation_media(
+    plan: &ExecutionPlan,
+    copy: &ExecutionCopy,
+) -> Result<Option<OperationMedia>, ImportExecutionError> {
+    if !is_media_copy(copy) {
+        return Ok(None);
+    }
+    let mut components = copy.destination.components();
+    let year = components
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .ok_or_else(|| ImportExecutionError::InvalidSource(copy.destination.clone()))?;
+    let directory = components
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .ok_or_else(|| ImportExecutionError::InvalidSource(copy.destination.clone()))?;
+    let filename = copy
+        .destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| ImportExecutionError::InvalidSource(copy.destination.clone()))?
+        .to_owned();
+    let (identity, annual_part_year) = match parse_collection_directory(year, directory) {
+        Some(ParsedCollectionDirectory::Dated { .. }) => (
+            OperationMediaCollectionIdentity::Dated {
+                year: year.to_owned(),
+                directory: directory.to_owned(),
+            },
+            None,
+        ),
+        Some(ParsedCollectionDirectory::OngoingPart { label, year, .. }) => (
+            OperationMediaCollectionIdentity::Ongoing {
+                key: label.collision_key().as_str().to_owned(),
+            },
+            Some(year),
+        ),
+        None => {
+            return Err(ImportExecutionError::Planning(format!(
+                "media destination is not a canonical collection path: {}",
+                copy.destination.display()
+            )));
+        }
+    };
+    let accepted_datetime = copy.accepted_datetime.as_deref().ok_or_else(|| {
+        ImportExecutionError::Planning(format!(
+            "media copy has no accepted datetime: {}",
+            copy.destination.display()
+        ))
+    })?;
+    let accepted_date = accepted_datetime.get(..10).ok_or_else(|| {
+        ImportExecutionError::Planning(format!(
+            "media copy has an invalid accepted datetime: {accepted_datetime}"
+        ))
+    })?;
+    let date_format = time::format_description::parse("[year]-[month]-[day]")
+        .map_err(|error| ImportExecutionError::Planning(error.to_string()))?;
+    Date::parse(accepted_date, &date_format).map_err(|error| {
+        ImportExecutionError::Planning(format!(
+            "media copy has an invalid accepted datetime {accepted_datetime:?}: {error}"
+        ))
+    })?;
+    Ok(Some(OperationMedia {
+        identity,
+        annual_part_year,
+        accepted_date: accepted_date.to_owned(),
+        filename,
+        path: plan.catalog_path.join(&copy.destination),
+    }))
+}
+
+fn recovery_operation_media(
+    plan: &ExecutionPlan,
+    copy: &ExecutionCopy,
+) -> Result<Option<OperationMedia>, ImportExecutionError> {
+    if is_media_copy(copy) && copy.accepted_datetime.is_none() {
+        return Ok(None);
+    }
+    operation_media(plan, copy)
 }
 
 pub(crate) fn validate_reviewed_plan(reviewed_plan: &str) -> Result<(), ImportExecutionError> {
@@ -327,9 +465,9 @@ fn cancel_execution(
     layout: &CatalogLayout,
     lock: CatalogLock,
     journal: &mut OperationJournal,
-    copied_count: usize,
+    copied_file_count: usize,
 ) -> Result<ImportExecutionResult, ImportExecutionError> {
-    let manifest_contents = cancellation_manifest_for_prefix(&prepared.plan, copied_count)?;
+    let manifest_contents = cancellation_manifest_for_prefix(&prepared.plan, copied_file_count)?;
     layout
         .replace_manifest(
             &lock,
@@ -349,7 +487,7 @@ fn cancel_execution(
     lock.release()
         .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
     Ok(ImportExecutionResult::Cancelled(ImportExecutionOutcome {
-        copied_count,
+        copied_count: media_count_for_prefix(&prepared.plan, copied_file_count),
         skipped_count: 0,
         left_on_source_count: prepared.plan.left_on_source_count,
     }))
@@ -585,6 +723,45 @@ fn source_snapshot(
     }
     Ok(Some(snapshot))
 }
+
+fn emit_recovered_media(
+    plan: &ExecutionPlan,
+    destination: PathBuf,
+    total_media: usize,
+    emitted_media: &mut BTreeSet<PathBuf>,
+    completed_media: &mut usize,
+    update: &mut impl FnMut(OperationUpdate),
+) -> Result<(), ImportExecutionError> {
+    if !emitted_media.insert(destination.clone()) {
+        return Ok(());
+    }
+    let copy = plan
+        .copies
+        .iter()
+        .find(|copy| copy.destination == destination)
+        .ok_or_else(|| {
+            ImportExecutionError::Storage(format!(
+                "journal published an unplanned destination: {}",
+                destination.display()
+            ))
+        })?;
+    let Some(media) = recovery_operation_media(plan, copy)? else {
+        return Ok(());
+    };
+    *completed_media += 1;
+    update(OperationUpdate::MediaVerified(OperationMediaVerified {
+        media,
+        completed_media: *completed_media as u64,
+        total_media: total_media as u64,
+    }));
+    update(OperationUpdate::Progress(OperationProgress {
+        completed_units: *completed_media as u64,
+        total_units: total_media as u64,
+        message: format!("Recovered {completed_media} of {total_media}"),
+    }));
+    Ok(())
+}
+
 pub struct ImportRecoveryService;
 
 impl ImportRecoveryService {
@@ -592,14 +769,14 @@ impl ImportRecoveryService {
         catalog_path: impl AsRef<Path>,
         operation_id: &str,
         mode: ImportRecoveryMode,
-        progress: impl FnMut(OperationProgress),
+        update: impl FnMut(OperationUpdate),
     ) -> Result<(RecoveryOutcome, ImportExecutionOutcome), ImportExecutionError> {
         Self::recover_cancellable(
             catalog_path,
             operation_id,
             mode,
             &ImportCancellation::default(),
-            progress,
+            update,
         )
     }
 
@@ -608,7 +785,7 @@ impl ImportRecoveryService {
         operation_id: &str,
         mode: ImportRecoveryMode,
         cancellation: &ImportCancellation,
-        mut progress: impl FnMut(OperationProgress),
+        mut update: impl FnMut(OperationUpdate),
     ) -> Result<(RecoveryOutcome, ImportExecutionOutcome), ImportExecutionError> {
         let catalog_path = catalog_path.as_ref();
         CatalogService::open(catalog_path)
@@ -616,7 +793,32 @@ impl ImportRecoveryService {
         let layout = CatalogLayout::new(catalog_path);
         let lock = CatalogLock::acquire(&layout)
             .map_err(|error| ImportExecutionError::Conflict(error.to_string()))?;
-        let (journal_path, plan, published) = unfinished_plan(&layout, operation_id)?;
+        let (journal_path, mut plan, published) = unfinished_plan(&layout, operation_id)?;
+        plan.catalog_path = catalog_path.to_path_buf();
+        let total_media = media_count(&plan);
+        let mut emitted_media = BTreeSet::new();
+        let mut completed_media = 0;
+        for copy in &plan.copies {
+            if published
+                .get(&copy.destination)
+                .is_some_and(|state| state.published)
+            {
+                if let Some(media) = recovery_operation_media(&plan, copy)? {
+                    completed_media += 1;
+                    emitted_media.insert(copy.destination.clone());
+                    update(OperationUpdate::MediaVerified(OperationMediaVerified {
+                        media,
+                        completed_media: completed_media as u64,
+                        total_media: total_media as u64,
+                    }));
+                }
+            }
+        }
+        update(OperationUpdate::Progress(OperationProgress {
+            completed_units: completed_media as u64,
+            total_units: total_media as u64,
+            message: format!("Recovered {completed_media} of {total_media}"),
+        }));
         if mode == ImportRecoveryMode::Resume {
             if let Err(error) = validate_recovery_sources(&layout, &plan, &published) {
                 if matches!(error, ImportExecutionError::SourceUnavailable(_)) {
@@ -631,14 +833,11 @@ impl ImportRecoveryService {
                 return Err(error);
             }
         }
-        let total_count = plan.copies.len();
-        let (mut outcome, mut cancelled_copy_count) = match mode {
+        let (mut outcome, mut cancelled_media_count) = match mode {
             ImportRecoveryMode::Resume => {
                 let request =
                     recovery_request(&plan, RecoveryMode::Resume, plan.manifest.contents.clone());
-                let mut reported_count = published.values().filter(|state| state.published).count();
-                let mut progress_reader =
-                    RecoveryProgressReader::new(&journal_path, reported_count)?;
+                let mut progress_reader = RecoveryProgressReader::new(&journal_path)?;
                 let mut checkpoint_error = None;
                 let outcome = layout.recover_operation_cancellable(
                     &lock,
@@ -647,17 +846,21 @@ impl ImportRecoveryService {
                     |checkpoint| match checkpoint {
                         RecoveryCheckpoint::DurableBoundary => {
                             match progress_reader.refresh() {
-                                Ok(copied_count) if copied_count != reported_count => {
-                                    reported_count = copied_count;
-                                    progress(OperationProgress {
-                                        completed_units: copied_count as u64,
-                                        total_units: total_count as u64,
-                                        message: format!(
-                                            "Recovered {copied_count} of {total_count}"
-                                        ),
-                                    });
+                                Ok(destinations) => {
+                                    for destination in destinations {
+                                        if let Err(error) = emit_recovered_media(
+                                            &plan,
+                                            destination,
+                                            total_media,
+                                            &mut emitted_media,
+                                            &mut completed_media,
+                                            &mut update,
+                                        ) {
+                                            checkpoint_error = Some(error);
+                                            return true;
+                                        }
+                                    }
                                 }
-                                Ok(_) => {}
                                 Err(error) => {
                                     checkpoint_error = Some(error);
                                     return true;
@@ -675,58 +878,119 @@ impl ImportRecoveryService {
                 (outcome, 0)
             }
             ImportRecoveryMode::Cancel => {
-                let (manifest_contents, copied_count) =
+                let (manifest_contents, _, media_count) =
                     cancellation_manifest(&layout, &plan, &published)?;
                 let request = recovery_request(
                     &plan,
                     RecoveryMode::CancelRemainingCopies,
                     manifest_contents,
                 );
-                (
-                    CancellableRecoveryOutcome::Finished(recovery_result(
-                        &layout,
-                        &lock,
-                        &journal_path,
-                        layout.recover_operation(&lock, journal_path.clone(), request),
-                    )?),
-                    copied_count,
-                )
+                let mut progress_reader = RecoveryProgressReader::new(&journal_path)?;
+                let mut checkpoint_error = None;
+                let recovered = layout.recover_operation_cancellable(
+                    &lock,
+                    &journal_path,
+                    request,
+                    |checkpoint| {
+                        if checkpoint == RecoveryCheckpoint::DurableBoundary {
+                            match progress_reader.refresh() {
+                                Ok(destinations) => {
+                                    for destination in destinations {
+                                        if let Err(error) = emit_recovered_media(
+                                            &plan,
+                                            destination,
+                                            total_media,
+                                            &mut emitted_media,
+                                            &mut completed_media,
+                                            &mut update,
+                                        ) {
+                                            checkpoint_error = Some(error);
+                                            return true;
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    checkpoint_error = Some(error);
+                                    return true;
+                                }
+                            }
+                        }
+                        false
+                    },
+                );
+                let recovered = recovery_result(&layout, &lock, &journal_path, recovered)?;
+                if let Some(error) = checkpoint_error {
+                    return Err(error);
+                }
+                (recovered, media_count)
             }
         };
         if outcome == CancellableRecoveryOutcome::Interrupted {
-            let (current_journal_path, current_plan, current_published) =
+            let (current_journal_path, mut current_plan, current_published) =
                 unfinished_plan(&layout, operation_id)?;
-            let (manifest_contents, copied_count) =
+            current_plan.catalog_path = catalog_path.to_path_buf();
+            let (manifest_contents, _, media_count) =
                 cancellation_manifest(&layout, &current_plan, &current_published)?;
             let request = recovery_request(
                 &current_plan,
                 RecoveryMode::CancelRemainingCopies,
                 manifest_contents,
             );
-            outcome = CancellableRecoveryOutcome::Finished(recovery_result(
-                &layout,
+            let mut progress_reader = RecoveryProgressReader::new(&current_journal_path)?;
+            let mut checkpoint_error = None;
+            let recovered = layout.recover_operation_cancellable(
                 &lock,
                 &current_journal_path,
-                layout.recover_operation(&lock, current_journal_path.clone(), request),
-            )?);
-            cancelled_copy_count = copied_count;
+                request,
+                |checkpoint| {
+                    if checkpoint == RecoveryCheckpoint::DurableBoundary {
+                        match progress_reader.refresh() {
+                            Ok(destinations) => {
+                                for destination in destinations {
+                                    if let Err(error) = emit_recovered_media(
+                                        &current_plan,
+                                        destination,
+                                        total_media,
+                                        &mut emitted_media,
+                                        &mut completed_media,
+                                        &mut update,
+                                    ) {
+                                        checkpoint_error = Some(error);
+                                        return true;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                checkpoint_error = Some(error);
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                },
+            );
+            outcome = recovery_result(&layout, &lock, &current_journal_path, recovered)?;
+            if let Some(error) = checkpoint_error {
+                return Err(error);
+            }
+            cancelled_media_count = media_count;
         }
         lock.release()
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
         let copied_count = match outcome {
             CancellableRecoveryOutcome::Finished(souvenirs_storage::RecoveryOutcome::Completed) => {
-                plan.copies.len()
+                total_media
             }
             CancellableRecoveryOutcome::Finished(souvenirs_storage::RecoveryOutcome::Cancelled) => {
-                cancelled_copy_count
+                cancelled_media_count
             }
             CancellableRecoveryOutcome::Interrupted => {
                 unreachable!("interrupted recovery is finalized before releasing the catalog lock")
             }
         };
-        progress(OperationProgress {
+        update(OperationUpdate::Progress(OperationProgress {
             completed_units: copied_count as u64,
-            total_units: plan.copies.len() as u64,
+            total_units: total_media as u64,
             message: match outcome {
                 CancellableRecoveryOutcome::Finished(
                     souvenirs_storage::RecoveryOutcome::Completed,
@@ -740,7 +1004,7 @@ impl ImportRecoveryService {
                     )
                 }
             },
-        });
+        }));
         Ok((
             match outcome {
                 CancellableRecoveryOutcome::Finished(
@@ -822,50 +1086,33 @@ fn recovery_request(
 }
 
 struct RecoveryProgressReader {
-    reader: BufReader<File>,
-    copied_count: usize,
+    journal_path: PathBuf,
 }
 
 impl RecoveryProgressReader {
-    fn new(journal_path: &Path, copied_count: usize) -> Result<Self, ImportExecutionError> {
-        let mut file = File::open(journal_path).map_err(|source| ImportExecutionError::Io {
-            path: journal_path.to_path_buf(),
-            source,
-        })?;
-        file.seek(SeekFrom::End(0))
-            .map_err(|source| ImportExecutionError::Io {
-                path: journal_path.to_path_buf(),
-                source,
-            })?;
+    fn new(journal_path: &Path) -> Result<Self, ImportExecutionError> {
         Ok(Self {
-            reader: BufReader::new(file),
-            copied_count,
+            journal_path: journal_path.to_path_buf(),
         })
     }
 
-    fn refresh(&mut self) -> Result<usize, ImportExecutionError> {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            if self
-                .reader
-                .read_line(&mut line)
-                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?
-                == 0
-            {
-                return Ok(self.copied_count);
-            }
-            let record = serde_json::from_str::<OperationRecord>(&line)
-                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
-            if matches!(
-                record,
-                OperationRecord::Transition {
-                    transition: souvenirs_storage::DurableTransition::CopyPublished { .. }
-                }
-            ) {
-                self.copied_count += 1;
-            }
-        }
+    fn refresh(&mut self) -> Result<Vec<PathBuf>, ImportExecutionError> {
+        read_operation_records(&self.journal_path)
+            .map_err(|error| ImportExecutionError::Storage(error.to_string()))
+            .map(|records| {
+                records
+                    .into_iter()
+                    .filter_map(|record| match record {
+                        OperationRecord::Transition {
+                            transition:
+                                souvenirs_storage::DurableTransition::CopyPublished {
+                                    destination, ..
+                                },
+                        } => Some(destination),
+                        _ => None,
+                    })
+                    .collect()
+            })
     }
 }
 
@@ -1096,6 +1343,52 @@ fn unfinished_plan(
     ))
 }
 
+pub(crate) fn operation_media_snapshot(
+    catalog_path: &Path,
+    records: &[OperationRecord],
+) -> Result<Option<(Vec<OperationMedia>, usize)>, ImportExecutionError> {
+    let Some(OperationRecord::Plan { plan, .. }) = records.first() else {
+        return Err(ImportExecutionError::Storage(
+            "operation journal does not start with a plan".to_owned(),
+        ));
+    };
+    if plan.get("schema_version").is_none() {
+        return Ok(None);
+    }
+    let mut plan: ExecutionPlan = serde_json::from_value(plan.clone())
+        .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+    if plan.schema_version != 1 {
+        return Err(ImportExecutionError::Storage(format!(
+            "unsupported execution plan schema version {}",
+            plan.schema_version
+        )));
+    }
+    plan.catalog_path = catalog_path.to_path_buf();
+    if plan
+        .copies
+        .iter()
+        .any(|copy| is_media_copy(copy) && copy.accepted_datetime.is_none())
+    {
+        return Ok(None);
+    }
+    let published = records
+        .iter()
+        .filter_map(|record| match record {
+            OperationRecord::Transition {
+                transition: souvenirs_storage::DurableTransition::CopyPublished { destination, .. },
+            } => Some(destination),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let media = plan
+        .copies
+        .iter()
+        .filter(|copy| published.contains(&copy.destination))
+        .filter_map(|copy| operation_media(&plan, copy).transpose())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some((media, media_count(&plan))))
+}
+
 fn validate_recovery_sources(
     layout: &CatalogLayout,
     plan: &ExecutionPlan,
@@ -1122,9 +1415,10 @@ fn cancellation_manifest(
     layout: &CatalogLayout,
     plan: &ExecutionPlan,
     published: &BTreeMap<PathBuf, JournalCopyState>,
-) -> Result<(Vec<u8>, usize), ImportExecutionError> {
+) -> Result<(Vec<u8>, usize, usize), ImportExecutionError> {
     let mut lines = existing_manifest(&layout.root().join(&plan.manifest.path))?;
     let mut copied_count = 0;
+    let mut media_count = 0;
     for copy in &plan.copies {
         let Some(state) = published.get(&copy.destination) else {
             continue;
@@ -1161,8 +1455,11 @@ fn cancellation_manifest(
             lines.insert(filename.to_owned(), journal_digest.to_owned());
         }
         copied_count += 1;
+        if is_media_copy(copy) {
+            media_count += 1;
+        }
     }
-    Ok((encode_manifest(&lines), copied_count))
+    Ok((encode_manifest(&lines), copied_count, media_count))
 }
 
 fn verified_copy_can_publish(
@@ -1366,7 +1663,7 @@ mod tests {
     use super::{
         is_source_unavailable_error, CopyExpectation, ImportCancellation, ImportExecutionRequest,
         ImportExecutionResult, ImportExecutionService, ImportRecoveryMode, ImportRecoveryService,
-        RecoveryOutcome,
+        OperationProgress, OperationUpdate, RecoveryOutcome,
     };
     use crate::{
         CatalogService, DateResolution, DestinationMode, ExistingCollectionIdentity,
@@ -1426,7 +1723,10 @@ mod tests {
         assert_eq!(
             progress
                 .iter()
-                .map(|event| event.completed_units)
+                .filter_map(|event| match event {
+                    OperationUpdate::Progress(progress) => Some(progress.completed_units),
+                    OperationUpdate::MediaVerified(_) => None,
+                })
                 .collect::<Vec<_>>(),
             [0, 1, 2]
         );
@@ -1455,8 +1755,14 @@ mod tests {
         let cancellation = ImportCancellation::default();
         let progress_cancellation = cancellation.clone();
 
-        let result = ImportExecutionService::execute(prepared, &cancellation, |progress| {
-            if progress.completed_units == 1 {
+        let result = ImportExecutionService::execute(prepared, &cancellation, |update| {
+            if matches!(
+                update,
+                OperationUpdate::Progress(OperationProgress {
+                    completed_units: 1,
+                    ..
+                })
+            ) {
                 assert!(progress_cancellation.request());
             }
         })
@@ -1511,8 +1817,11 @@ mod tests {
         let cancellation = ImportCancellation::default();
         let progress_cancellation = cancellation.clone();
 
-        let result = ImportExecutionService::execute(prepared, &cancellation, |progress| {
-            if progress.completed_units == 0 {
+        let result = ImportExecutionService::execute(prepared, &cancellation, |update| {
+            if let OperationUpdate::Progress(progress) = update {
+                if progress.completed_units != 0 {
+                    return;
+                }
                 assert_eq!(progress.message, "Checking the source…");
                 assert!(progress_cancellation.request());
             }
@@ -1535,15 +1844,54 @@ mod tests {
     fn executes_compound_item_with_shared_stem_and_original_only_manifest() {
         let fixture = compound_fixture();
         let prepared = prep(&fixture, DestinationMode::Create);
+        let operation_id = prepared.operation_id().to_owned();
+        let manifest_path = fixture.catalog.join(&prepared.plan.manifest.path);
+        let mut updates = Vec::new();
         let outcome =
-            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |_| {})
-                .unwrap();
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |update| {
+                if let OperationUpdate::MediaVerified(verified) = &update {
+                    assert!(verified.media.path.is_file());
+                    assert!(!manifest_path.exists());
+                    let records = journal_records(&fixture, &operation_id);
+                    assert!(records.iter().any(|record| {
+                        matches!(
+                            record,
+                            OperationRecord::Transition {
+                                transition: DurableTransition::CopyPublished {
+                                    destination,
+                                    ..
+                                }
+                            } if fixture.catalog.join(destination) == verified.media.path
+                        )
+                    }));
+                }
+                updates.push(update);
+            })
+            .unwrap();
         let ImportExecutionResult::Completed(outcome) = outcome else {
             panic!("execution should complete");
         };
 
-        assert_eq!(outcome.copied_count, 3);
+        assert_eq!(outcome.copied_count, 2);
         assert_eq!(outcome.left_on_source_count, 0);
+        let media = updates
+            .iter()
+            .filter_map(|update| match update {
+                OperationUpdate::MediaVerified(verified) => Some(verified),
+                OperationUpdate::Progress(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(media.len(), 2);
+        assert_eq!(
+            media
+                .iter()
+                .map(|verified| (verified.completed_media, verified.total_media))
+                .collect::<Vec<_>>(),
+            [(1, 2), (2, 2)]
+        );
+        assert!(media
+            .iter()
+            .all(|verified| !verified.media.filename.ends_with(".xmp")));
         let collection = fixture
             .catalog
             .join("2026")
@@ -1579,7 +1927,8 @@ mod tests {
     #[test]
     fn cancellation_keeps_compound_sidecar_out_of_manifest() {
         let fixture = compound_fixture();
-        let prepared = prep(&fixture, DestinationMode::Create);
+        let mut prepared = prep(&fixture, DestinationMode::Create);
+        prepared.plan.catalog_path = PathBuf::from("/stale/catalog/path");
         let layout = CatalogLayout::new(&fixture.catalog);
         let lock = CatalogLock::acquire(&layout).unwrap();
         let mut journal =
@@ -1622,16 +1971,35 @@ mod tests {
         drop(journal);
         lock.release().unwrap();
 
+        let mut updates = Vec::new();
         let (outcome, result) = ImportRecoveryService::recover(
             &fixture.catalog,
             prepared.operation_id(),
             ImportRecoveryMode::Cancel,
-            |_| {},
+            |update| updates.push(update),
         )
         .unwrap();
 
         assert_eq!(outcome, RecoveryOutcome::Cancelled);
-        assert_eq!(result.copied_count, 3);
+        assert_eq!(result.copied_count, 2);
+        let replay = updates
+            .iter()
+            .filter_map(|update| match update {
+                OperationUpdate::MediaVerified(verified) => Some(verified),
+                OperationUpdate::Progress(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replay.len(), 2);
+        assert!(replay
+            .iter()
+            .all(|verified| verified.media.path.starts_with(&fixture.catalog)));
+        assert_eq!(
+            replay
+                .iter()
+                .map(|verified| verified.media.filename.as_str())
+                .collect::<Vec<_>>(),
+            ["2026-10-10 12-00-00 001.JPG", "2026-10-10 12-00-00 001.CR3",]
+        );
         let manifest =
             fs::read_to_string(layout.root().join(&prepared.plan.manifest.path)).unwrap();
         assert_eq!(manifest.lines().count(), 2);
@@ -1711,8 +2079,14 @@ mod tests {
         let prepared = prep(&fixture, DestinationMode::Create);
         let destination = fixture.catalog.join(&prepared.plan.copies[1].destination);
         let error =
-            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |progress| {
-                if progress.completed_units == 1 {
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |update| {
+                if matches!(
+                    update,
+                    OperationUpdate::Progress(OperationProgress {
+                        completed_units: 1,
+                        ..
+                    })
+                ) {
                     fs::write(&destination, b"late conflict").unwrap();
                 }
             })
@@ -1936,22 +2310,35 @@ mod tests {
         ];
         append_transitions(&journal_path, transitions);
 
+        let manifest_path = layout.root().join(&prepared.plan.manifest.path);
+        let mut updates = Vec::new();
         let (outcome, result) = ImportRecoveryService::recover(
             &fixture.catalog,
             prepared.operation_id(),
             ImportRecoveryMode::Cancel,
-            |_| {},
+            |update| {
+                if matches!(update, OperationUpdate::MediaVerified(_)) {
+                    assert!(!manifest_path.exists());
+                }
+                updates.push(update);
+            },
         )
         .unwrap();
 
         assert_eq!(outcome, RecoveryOutcome::Cancelled);
         assert_eq!(result.copied_count, 1);
         assert_eq!(
+            updates
+                .iter()
+                .filter(|update| matches!(update, OperationUpdate::MediaVerified(_)))
+                .count(),
+            result.copied_count
+        );
+        assert_eq!(
             fs::read(layout.root().join(&first.destination)).unwrap(),
             source_bytes
         );
-        let manifest =
-            fs::read_to_string(layout.root().join(&prepared.plan.manifest.path)).unwrap();
+        let manifest = fs::read_to_string(manifest_path).unwrap();
         assert!(manifest.contains(&first.digest));
         assert!(manifest.contains(first.destination.file_name().unwrap().to_str().unwrap()));
     }
@@ -2243,8 +2630,14 @@ mod tests {
         let detached = fixture.source.parent().unwrap().join("detached-source");
 
         let error =
-            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |progress| {
-                if progress.completed_units == 1 {
+            ImportExecutionService::execute(prepared, &ImportCancellation::default(), |update| {
+                if matches!(
+                    update,
+                    OperationUpdate::Progress(OperationProgress {
+                        completed_units: 1,
+                        ..
+                    })
+                ) {
                     fs::rename(&fixture.source, &detached).unwrap();
                 }
             })
@@ -2257,6 +2650,8 @@ mod tests {
         assert_eq!(unfinished.operation_id, operation_id);
         assert_eq!(unfinished.copied_count, 1);
         assert_eq!(unfinished.remaining_count, 1);
+        assert_eq!(unfinished.verified_media.len(), 1);
+        assert!(unfinished.verified_media[0].path.is_file());
         assert!(!unfinished.source_available);
         assert_eq!(
             unfinished.interruption,
