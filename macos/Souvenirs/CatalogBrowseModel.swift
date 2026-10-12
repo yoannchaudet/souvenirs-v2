@@ -135,6 +135,10 @@ final class CatalogBrowseModel: ObservableObject {
             && transientImport?.reconciliation != .landed
     }
 
+    var canRetryTerminalImport: Bool {
+        transientImport?.isConsistent == true
+    }
+
     var presentedImportCollection: PresentedCollection? {
         guard let transientImport,
               transientImport.reconciliation != .landed,
@@ -391,8 +395,15 @@ final class CatalogBrowseModel: ObservableObject {
     }
 
     func clearImportPresentation() {
-        guard transientImport != nil else { return }
+        guard let transient = transientImport else { return }
         importGeneration += 1
+        if let occurrence = transient.occurrence,
+           selection == .collection(occurrence),
+           detail?.identity != occurrence.identity {
+            selection = .overview
+            detail = nil
+            isLoadingDetail = false
+        }
         transientImport = nil
     }
 

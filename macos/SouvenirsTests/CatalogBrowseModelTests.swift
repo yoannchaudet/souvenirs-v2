@@ -363,6 +363,13 @@ final class CatalogBrowseModelTests: XCTestCase {
         XCTAssertTrue(message.contains("access"))
         XCTAssertTrue(model.collections.isEmpty)
         XCTAssertNotNil(model.presentedImportCollection)
+        model.clearImportPresentation()
+        XCTAssertEqual(model.selection, .overview)
+        await model.updateImportPresentation(
+            operationID: "operation-1",
+            collectionName: "Dolomites",
+            media: [media]
+        )
 
         engine.scopedError = nil
         engine.details[importedIdentity] = importedDetail

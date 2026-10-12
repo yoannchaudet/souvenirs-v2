@@ -747,7 +747,7 @@ struct ContentView: View {
                 action: imports.dismissOutcome
             )
         case .idle, .recoveryPrompt, .recoveryDeferred:
-            Spacer()
+            EmptyView()
         }
     }
 
@@ -813,7 +813,9 @@ struct ContentView: View {
                     message: message,
                     tint: .red,
                     identifier: "import-terminal-archive-error",
-                    actionTitle: "Try Again",
+                    actionTitle: model.browse.canRetryTerminalImport
+                        ? "Try Again"
+                        : nil,
                     action: {
                         Task { await model.browse.reconcileTerminalImport() }
                     },
