@@ -825,7 +825,9 @@ struct ContentView: View {
                     title: "Updating the archive…",
                     message: pendingMessage,
                     tint: .blue,
-                    identifier: "import-terminal-refreshing",
+                    identifier: model.browse.importReconciliation == .refreshing
+                        ? "import-terminal-refreshing"
+                        : "import-terminal-active",
                     actionTitle: nil
                 )
             }
