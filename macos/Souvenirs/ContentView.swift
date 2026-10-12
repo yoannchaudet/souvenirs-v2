@@ -434,6 +434,7 @@ struct ContentView: View {
                 return
             }
             Task {
+                await Task.yield()
                 await syncImportPresentation(for: catalog)
                 await model.browse.reconcileTerminalImport()
             }
