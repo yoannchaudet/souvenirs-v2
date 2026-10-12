@@ -97,6 +97,7 @@ final class ImportExecutionCoordinator: ObservableObject {
         EngineSupervisor.UnfinishedOperation.ActivityTime?
     @Published private(set) var isRetryingRecovery = false
     @Published private(set) var verifiedMedia: [EngineSupervisor.OperationMedia] = []
+    @Published private(set) var presentationRevision = 0
 
     private let engine: ImportExecutionEngine
     private var operationTask: Task<Void, Never>?
@@ -147,6 +148,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                 }
                 let operationID = try await engine.startImportExecution(reviewedPlan: reviewedPlan)
                 self.operationID = operationID
+                presentationRevision += 1
                 try await consume(operationID: operationID, recovering: false)
             } catch {
                 guard !Task.isCancelled else { return }
@@ -276,9 +278,7 @@ final class ImportExecutionCoordinator: ObservableObject {
                 progressMessage = recovering
                     ? "Checking copied files…"
                     : "Copying and checking each file…"
-            case .progress(let completed, let total, let message):
-                completedUnits = completed
-                if let total { totalUnits = max(total, 1) }
+            case .progress(_, _, let message):
                 if let message { progressMessage = message }
             case .mediaVerified(let media, let completed, let total):
                 guard recordVerifiedMedia(media) else {
@@ -332,6 +332,7 @@ final class ImportExecutionCoordinator: ObservableObject {
             operationID: recovery.operationID
         )
         self.operationID = operationID
+        presentationRevision += 1
         try await consume(operationID: operationID, recovering: true)
     }
 
@@ -407,12 +408,14 @@ final class ImportExecutionCoordinator: ObservableObject {
         }
         mediaByKey[key] = media
         verifiedMedia.append(media)
+        presentationRevision += 1
         return true
     }
 
     private func clearVerifiedMedia() {
         verifiedMedia = []
         mediaByKey = [:]
+        presentationRevision += 1
     }
 
     private func decodeOutcome(_ data: Data) throws -> ImportOutcome {

@@ -51,6 +51,7 @@ enum Scenario {
     ImportDestinationUnavailable,
     ImportError,
     ImportExecution,
+    ImportTerminalBrowseError,
     ImportSourceUnavailable,
     ImportRecovery,
     ImportRecoveryMissing,
@@ -85,6 +86,7 @@ fn parse_scenario() -> Result<Scenario, String> {
         Some("import-destination-unavailable") => Scenario::ImportDestinationUnavailable,
         Some("import-error") => Scenario::ImportError,
         Some("import-execution") => Scenario::ImportExecution,
+        Some("import-terminal-browse-error") => Scenario::ImportTerminalBrowseError,
         Some("import-source-unavailable") => Scenario::ImportSourceUnavailable,
         Some("import-recovery") => Scenario::ImportRecovery,
         Some("import-recovery-missing") => Scenario::ImportRecoveryMissing,
@@ -117,6 +119,7 @@ fn usage() -> String {
         "  import-destination-unavailable",
         "  import-error",
         "  import-execution",
+        "  import-terminal-browse-error",
         "  import-source-unavailable",
         "  import-recovery",
         "  import-recovery-missing",
@@ -475,8 +478,11 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 }
             }
         }
-        Scenario::ImportExecution | Scenario::ImportSourceUnavailable => {
+        Scenario::ImportExecution
+        | Scenario::ImportTerminalBrowseError
+        | Scenario::ImportSourceUnavailable => {
             let mut unfinished = false;
+            let mut admitted_count = 0;
             while let Some(request) = next_request(&mut input, &mut output)? {
                 match request.payload {
                     RequestPayload::OpenCatalog(parameters) => {
@@ -503,11 +509,23 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                         operation_inspection(&mut output, request.id, operation)?;
                     }
                     RequestPayload::BrowseCatalog(parameters) => {
-                        catalog_browse_empty(
-                            &mut output,
-                            request.id,
-                            parameters.selection.is_none(),
-                        )?;
+                        if admitted_count > 0
+                            && matches!(scenario, Scenario::ImportTerminalBrowseError)
+                        {
+                            write_protocol_error(
+                                &mut output,
+                                request.id,
+                                "catalog_io",
+                                "The archive volume is unavailable.",
+                            )?;
+                        } else {
+                            import_catalog_browse(
+                                &mut output,
+                                request.id,
+                                parameters.selection,
+                                admitted_count,
+                            )?;
+                        }
                     }
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
@@ -562,12 +580,19 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             }
                         };
                         write_event(&mut output, sequence, terminal)?;
+                        if matches!(
+                            scenario,
+                            Scenario::ImportExecution | Scenario::ImportTerminalBrowseError
+                        ) {
+                            admitted_count = 12;
+                        }
                     }
                     _ => reject_request(&mut output, request)?,
                 }
             }
         }
         Scenario::ImportRecovery | Scenario::ImportRecoveryMissing => {
+            let mut admitted_count = 0;
             while let Some(request) = next_request(&mut input, &mut output)? {
                 match request.payload {
                     RequestPayload::OpenCatalog(parameters) => {
@@ -602,7 +627,16 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                         }),
                     )?,
                     RequestPayload::BrowseCatalog(parameters) => {
-                        catalog_browse(&mut output, request.id, parameters.selection)?;
+                        if admitted_count == 0 {
+                            catalog_browse(&mut output, request.id, parameters.selection)?;
+                        } else {
+                            import_catalog_browse(
+                                &mut output,
+                                request.id,
+                                parameters.selection,
+                                admitted_count,
+                            )?;
+                        }
                     }
                     RequestPayload::StartOperation(
                         souvenirs_protocol::StartOperationParameters::Recover { .. },
@@ -637,6 +671,7 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                                 }),
                             },
                         )?;
+                        admitted_count = 12;
                     }
                     RequestPayload::CancelOperation(_) => {
                         write_message(
@@ -935,6 +970,88 @@ fn catalog_browse(
                 }],
             },
         ]
+    } else {
+        Vec::new()
+    };
+    write_message(
+        output,
+        &EngineMessage::success(
+            request_id,
+            ResponseResult::CatalogBrowse(CatalogBrowseResult {
+                navigation,
+                collections,
+            }),
+        ),
+    )
+}
+
+fn import_catalog_browse(
+    output: &mut impl Write,
+    request_id: String,
+    selection: Option<CatalogCollectionIdentity>,
+    admitted_count: usize,
+) -> io::Result<()> {
+    let identity = CatalogCollectionIdentity::Dated {
+        year: "2026".to_owned(),
+        directory: "2026-10-10 +2d Dolomites".to_owned(),
+    };
+    let mut date_groups = Vec::<CatalogBrowseDateGroup>::new();
+    for media in fake_operation_media(admitted_count) {
+        let browse_media = CatalogBrowseMedia {
+            filename: media.filename,
+            path: media.path,
+        };
+        if let Some(group) = date_groups
+            .iter_mut()
+            .find(|group| group.date == media.accepted_date)
+        {
+            group.media.push(browse_media);
+        } else {
+            date_groups.push(CatalogBrowseDateGroup {
+                date: media.accepted_date,
+                media: vec![browse_media],
+            });
+        }
+    }
+    let mut collections = (admitted_count > 0
+        && selection
+            .as_ref()
+            .map_or(true, |selected| selected == &identity))
+    .then(|| {
+        vec![CatalogBrowseCollection::Dated {
+            identity: identity.clone(),
+            label: "Dolomites".to_owned(),
+            start_date: "2026-10-10".to_owned(),
+            end_date: "2026-10-12".to_owned(),
+            media_count: admitted_count,
+            cover_media: date_groups
+                .first()
+                .and_then(|group| group.media.first())
+                .cloned(),
+            date_groups,
+            problem: None,
+        }]
+    })
+    .unwrap_or_default();
+    if selection.is_none() {
+        for collection in &mut collections {
+            if let CatalogBrowseCollection::Dated { date_groups, .. } = collection {
+                date_groups.clear();
+            }
+        }
+    }
+    let navigation = if selection.is_none() {
+        let mut scopes = vec![CatalogBrowseNavigationScope::AllPhotos];
+        if admitted_count > 0 {
+            scopes.push(CatalogBrowseNavigationScope::Year {
+                year: 2026,
+                entries: vec![CatalogBrowseNavigationEntry {
+                    identity,
+                    annual_part_year: None,
+                }],
+            });
+        }
+        scopes
     } else {
         Vec::new()
     };

@@ -12,13 +12,22 @@ final class ImportExecutionModelTests: XCTestCase {
         engine.send(.init(
             operationID: "operation-1",
             sequence: 0,
+            payload: .mediaVerified(
+                media: verifiedMedia(),
+                completedMedia: 7,
+                totalMedia: 12
+            )
+        ))
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 1,
             payload: .progress(
-                completedUnits: 7,
-                totalUnits: 12,
+                completedUnits: 40,
+                totalUnits: 40,
                 message: "Checking copies…"
             )
         ))
-        await waitUntil { model.completedUnits == 7 }
+        await waitUntil { model.progressMessage == "Checking copies…" }
 
         XCTAssertEqual(model.phase, .running)
         XCTAssertEqual(model.percentCompleted, 58)
@@ -26,7 +35,7 @@ final class ImportExecutionModelTests: XCTestCase {
 
         engine.send(.init(
             operationID: "operation-1",
-            sequence: 1,
+            sequence: 2,
             payload: .completed(
                 result: Data(
                     #"{"copied_count":12,"skipped_count":3,"left_on_source_count":2}"#.utf8
@@ -71,6 +80,38 @@ final class ImportExecutionModelTests: XCTestCase {
         await waitUntil { model.verifiedMedia == [media] }
         XCTAssertEqual(model.completedUnits, 1)
         XCTAssertEqual(model.totalUnits, 2)
+    }
+
+    func testStorageProgressCannotReplaceMediaOnlyProgress() async {
+        let engine = FakeImportExecutionEngine()
+        let model = ImportExecutionCoordinator(engine: engine)
+        let media = verifiedMedia()
+
+        model.start(review: review, catalog: catalog)
+        await engine.waitForStream()
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 0,
+            payload: .mediaVerified(
+                media: media,
+                completedMedia: 1,
+                totalMedia: 12
+            )
+        ))
+        engine.send(.init(
+            operationID: "operation-1",
+            sequence: 1,
+            payload: .progress(
+                completedUnits: 9,
+                totalUnits: 40,
+                message: "Updating the manifest…"
+            )
+        ))
+
+        await waitUntil { model.progressMessage == "Updating the manifest…" }
+        XCTAssertEqual(model.completedUnits, 1)
+        XCTAssertEqual(model.totalUnits, 12)
+        XCTAssertEqual(model.percentCompleted, 8)
     }
 
     func testConflictingVerifiedMediaFailsClosed() async {
@@ -152,10 +193,10 @@ final class ImportExecutionModelTests: XCTestCase {
         engine.send(.init(
             operationID: "operation-1",
             sequence: 0,
-            payload: .progress(
-                completedUnits: 4,
-                totalUnits: 12,
-                message: "Still copying…"
+            payload: .mediaVerified(
+                media: verifiedMedia(),
+                completedMedia: 4,
+                totalMedia: 12
             )
         ))
         await waitUntil { appCoordinator?.completedUnits == 4 }

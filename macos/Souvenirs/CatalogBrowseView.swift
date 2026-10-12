@@ -43,6 +43,7 @@ struct CatalogBrowseSidebar: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
+        .disabled(model.blocksBrowseNavigation)
         .focused($listFocused)
         .defaultFocus($listFocused, true)
     }
@@ -78,71 +79,30 @@ struct CatalogBrowseSidebar: View {
 
 struct CatalogBrowseHeader: View {
     @ObservedObject var model: CatalogBrowseModel
+    @FocusState private var titleFocused: Bool
+    @AccessibilityFocusState private var titleAccessibilityFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(title)
+            Text(model.displayTitle)
                 .font(.headline)
+                .focusable(model.importReconciliation == .landed)
+                .focused($titleFocused)
+                .accessibilityFocused($titleAccessibilityFocused)
+                .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier("archive-browse-title")
-            if let subtitle {
+            if let subtitle = model.displaySubtitle {
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("archive-browse-subtitle")
             }
         }
-    }
-
-    private var title: String {
-        guard case .collection(let occurrence) = model.selection else {
-            switch model.selectedScope {
-            case .allPhotos:
-                return "All Photos"
-            case .year(let year):
-                return String(year)
-            case .earlier:
-                return "Earlier"
-            }
+        .onChange(of: model.landingFocusGeneration) { oldValue, newValue in
+            guard newValue > oldValue else { return }
+            titleFocused = true
+            titleAccessibilityFocused = true
         }
-        return model.detail?.browseLabel
-            ?? model.collections.first(where: {
-                $0.identity == occurrence.identity
-            })?.browseLabel
-            ?? "Collection"
-    }
-
-    private var subtitle: String? {
-        switch model.selection {
-        case .overview:
-            guard !model.isLoadingOverview, model.errorMessage == nil else { return nil }
-            switch model.selectedScope {
-            case .allPhotos:
-                return collectionCount(model.collections.count)
-            case .year:
-                return collectionCount(model.overviewGroups.first?.entries.count ?? 0)
-            case .earlier:
-                let groups = model.overviewGroups
-                guard let newest = groups.first?.year, let oldest = groups.last?.year else {
-                    return collectionCount(0)
-                }
-                let count = groups.reduce(0) { $0 + $1.entries.count }
-                return "\(oldest)–\(newest) · \(collectionCount(count))"
-            }
-        case .collection(let occurrence):
-            let collection = model.detail
-                ?? model.collections.first(where: { $0.identity == occurrence.identity })
-            guard let collection else { return nil }
-            let collectionSubtitle = collection.browseSubtitle
-            if let count = collection.trustedMediaCount {
-                return "\(collectionSubtitle) · \(count) "
-                    + (count == 1 ? "item" : "items")
-            }
-            return "\(collectionSubtitle) · Some content unavailable"
-        }
-    }
-
-    private func collectionCount(_ count: Int) -> String {
-        "\(count) \(count == 1 ? "collection" : "collections")"
     }
 }
 
@@ -152,7 +112,9 @@ struct CatalogBrowsePane<EmptyContent: View>: View {
 
     var body: some View {
         Group {
-            if let errorMessage = model.errorMessage {
+            if let collection = model.displayedCollection {
+                CatalogCollectionDetail(collection: collection)
+            } else if let errorMessage = model.errorMessage {
                 browseError(errorMessage)
             } else if model.isLoadingOverview && model.collections.isEmpty {
                 ProgressView("Reading archive…")
@@ -169,7 +131,7 @@ struct CatalogBrowsePane<EmptyContent: View>: View {
                         ProgressView("Reading collection…")
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .accessibilityIdentifier("archive-detail-loading")
-                    } else if let detail = model.detail {
+                    } else if let detail = model.displayedCollection {
                         CatalogCollectionDetail(collection: detail)
                     } else {
                         ProgressView("Refreshing archive…")
@@ -310,7 +272,7 @@ private struct CatalogOverview: View {
 }
 
 private struct CatalogCollectionDetail: View {
-    let collection: EngineSupervisor.CatalogBrowseCollection
+    let collection: CatalogBrowseModel.PresentedCollection
 
     var body: some View {
         ScrollView {
@@ -344,7 +306,7 @@ private struct CatalogCollectionDetail: View {
     }
 
     @ViewBuilder
-    private func annualPart(_ part: EngineSupervisor.CatalogBrowsePart) -> some View {
+    private func annualPart(_ part: CatalogBrowseModel.PresentedPart) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(String(part.year))
                 .font(.title3.bold())
@@ -369,7 +331,7 @@ private struct CatalogCollectionDetail: View {
     }
 
     private func dateGroups(
-        _ groups: [EngineSupervisor.CatalogBrowseDateGroup],
+        _ groups: [CatalogBrowseModel.PresentedDateGroup],
         identifierPrefix: String
     ) -> some View {
         ForEach(Array(groups.enumerated()), id: \.offset) { groupIndex, group in
@@ -399,7 +361,11 @@ private struct CatalogCollectionDetail: View {
                             "archive-\(identifierPrefix)-media-\(groupIndex)-\(mediaIndex)"
                         )
                         .accessibilityLabel(media.filename)
-                        .accessibilityValue("Archived on \(group.date)")
+                        .accessibilityValue(
+                            media.isTransient
+                                ? "Pending archive confirmation, accepted on \(group.date)"
+                                : "Archived on \(group.date)"
+                        )
                     }
                 }
             }
@@ -444,10 +410,23 @@ private struct CatalogProblemNotice: View {
 }
 
 private struct ArchiveThumbnail: View {
-    let media: EngineSupervisor.CatalogBrowseMedia?
+    let path: String?
+    let isTransient: Bool
     let height: CGFloat
     @State private var image: NSImage?
     @State private var didFail = false
+
+    init(media: EngineSupervisor.CatalogBrowseMedia?, height: CGFloat) {
+        path = media?.path
+        isTransient = false
+        self.height = height
+    }
+
+    init(media: CatalogBrowseModel.PresentedMedia?, height: CGFloat) {
+        path = media?.path
+        isTransient = media?.isTransient ?? false
+        self.height = height
+    }
 
     var body: some View {
         ZStack {
@@ -457,7 +436,7 @@ private struct ArchiveThumbnail: View {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()
-            } else if didFail || media == nil {
+            } else if didFail || path == nil {
                 Image(systemName: "photo")
                     .font(.title2)
                     .foregroundStyle(.secondary)
@@ -466,14 +445,22 @@ private struct ArchiveThumbnail: View {
                     .controlSize(.small)
             }
         }
+        .overlay(alignment: .topTrailing) {
+            if isTransient {
+                Image(systemName: "clock.badge.checkmark")
+                    .padding(6)
+                    .background(.regularMaterial, in: Circle())
+                    .padding(6)
+            }
+        }
         .frame(maxWidth: .infinity)
         .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .accessibilityHidden(true)
-        .task(id: media?.path) {
+        .task(id: path) {
             image = nil
             didFail = false
-            guard let path = media?.path else {
+            guard let path else {
                 didFail = true
                 return
             }
