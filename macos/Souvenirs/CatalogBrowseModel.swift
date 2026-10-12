@@ -166,7 +166,7 @@ final class CatalogBrowseModel: ObservableObject {
         if let displayedCollection {
             return displayedCollection.label
         }
-        if let transientImport, transientImport.reconciliation != .landed, selection == transientImport.occurrence.map(Selection.collection) {
+        if let transientImport, transientImport.reconciliation != .landed, transientImport.occurrence.map({ selection == .collection($0) }) ?? (selection == .overview) {
             return transientImport.collectionName.isEmpty
                 ? "Importing" : transientImport.collectionName
         }
@@ -433,7 +433,7 @@ final class CatalogBrowseModel: ObservableObject {
             guard requestGeneration == importGeneration,
                   transientImport?.operationID == operationID,
                   transientImport?.occurrence == occurrence,
-                  transientImport?.reconciliation != .landed else {
+                  transientImport?.reconciliation != .landed, selection == .collection(occurrence) else {
                 return
             }
             detail = result.collections.first(where: {
