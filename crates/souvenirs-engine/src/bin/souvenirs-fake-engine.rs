@@ -44,6 +44,8 @@ enum Scenario {
     MalformedResponse,
     CatalogFlow,
     CatalogError,
+    CatalogBrowse,
+    CatalogBrowseError,
     ImportFlow,
     ImportDestinationUnavailable,
     ImportError,
@@ -76,6 +78,8 @@ fn parse_scenario() -> Result<Scenario, String> {
         Some("malformed-response") => Scenario::MalformedResponse,
         Some("catalog-flow") => Scenario::CatalogFlow,
         Some("catalog-error") => Scenario::CatalogError,
+        Some("catalog-browse") => Scenario::CatalogBrowse,
+        Some("catalog-browse-error") => Scenario::CatalogBrowseError,
         Some("import-flow") => Scenario::ImportFlow,
         Some("import-destination-unavailable") => Scenario::ImportDestinationUnavailable,
         Some("import-error") => Scenario::ImportError,
@@ -106,6 +110,8 @@ fn usage() -> String {
         "  malformed-response",
         "  catalog-flow",
         "  catalog-error",
+        "  catalog-browse",
+        "  catalog-browse-error",
         "  import-flow",
         "  import-destination-unavailable",
         "  import-error",
@@ -315,8 +321,8 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::ListCatalogCollections(_) => {
                         catalog_collections(&mut output, request.id)?;
                     }
-                    RequestPayload::BrowseCatalog(parameters) => {
-                        catalog_browse(&mut output, request.id, parameters.selection)?;
+                    RequestPayload::BrowseCatalog(_) => {
+                        catalog_browse_empty(&mut output, request.id)?;
                     }
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
@@ -338,6 +344,29 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                 }
             }
         }
+        Scenario::CatalogBrowse | Scenario::CatalogBrowseError => {
+            let browse_error = matches!(scenario, Scenario::CatalogBrowseError);
+            while let Some(request) = next_request(&mut input, &mut output)? {
+                match request.payload {
+                    RequestPayload::OpenCatalog(parameters) => {
+                        catalog_result(&mut output, request.id, parameters.path)?;
+                    }
+                    RequestPayload::BrowseCatalog(parameters) if !browse_error => {
+                        catalog_browse(&mut output, request.id, parameters.selection)?;
+                    }
+                    RequestPayload::BrowseCatalog(_) => write_protocol_error(
+                        &mut output,
+                        request.id,
+                        "catalog_io",
+                        "The archive volume is unavailable.",
+                    )?,
+                    RequestPayload::InspectOperation(_) => {
+                        operation_inspection(&mut output, request.id, None)?;
+                    }
+                    _ => reject_request(&mut output, request)?,
+                }
+            }
+        }
         Scenario::ImportFlow | Scenario::ImportDestinationUnavailable => {
             let unavailable = matches!(scenario, Scenario::ImportDestinationUnavailable);
             while let Some(request) = next_request(&mut input, &mut output)? {
@@ -348,14 +377,14 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
                     }
+                    RequestPayload::BrowseCatalog(_) => {
+                        catalog_browse_empty(&mut output, request.id)?;
+                    }
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
                     }
                     RequestPayload::ListCatalogCollections(_) => {
                         catalog_collections(&mut output, request.id)?;
-                    }
-                    RequestPayload::BrowseCatalog(parameters) => {
-                        catalog_browse(&mut output, request.id, parameters.selection)?;
                     }
                     RequestPayload::ReviewImport(parameters) => {
                         if unavailable
@@ -410,6 +439,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
                     }
+                    RequestPayload::BrowseCatalog(_) => {
+                        catalog_browse_empty(&mut output, request.id)?;
+                    }
                     RequestPayload::ScanImport(parameters) => {
                         scan_attempts += 1;
                         if scan_attempts == 1 {
@@ -455,6 +487,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             },
                         });
                         operation_inspection(&mut output, request.id, operation)?;
+                    }
+                    RequestPayload::BrowseCatalog(_) => {
+                        catalog_browse_empty(&mut output, request.id)?;
                     }
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
@@ -538,6 +573,9 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                             },
                         }),
                     )?,
+                    RequestPayload::BrowseCatalog(parameters) => {
+                        catalog_browse(&mut output, request.id, parameters.selection)?;
+                    }
                     RequestPayload::StartOperation(
                         souvenirs_protocol::StartOperationParameters::Recover { .. },
                     ) => {
@@ -665,6 +703,21 @@ fn catalog_browse(
                 .to_owned(),
         }],
     };
+    let ongoing_recent_group = CatalogBrowseDateGroup {
+        date: "2024-06-08".to_owned(),
+        media: vec![
+            CatalogBrowseMedia {
+                filename: "2024-06-08 09-10-11 001.jpg".to_owned(),
+                path: "/Volumes/photos/Family Catalog/2024/z Kids/2024-06-08 09-10-11 001.jpg"
+                    .to_owned(),
+            },
+            CatalogBrowseMedia {
+                filename: "2024-06-08 09-10-14 002.mov".to_owned(),
+                path: "/Volumes/photos/Family Catalog/2024/z Kids/2024-06-08 09-10-14 002.mov"
+                    .to_owned(),
+            },
+        ],
+    };
     let mut collections = vec![
         CatalogBrowseCollection::Dated {
             identity: CatalogCollectionIdentity::Dated {
@@ -684,16 +737,46 @@ fn catalog_browse(
                 key: "kids".to_owned(),
             },
             label: "Kids".to_owned(),
-            media_count: 1,
-            parts: vec![CatalogBrowsePart {
-                year: 2019,
-                year_directory: "2019".to_owned(),
-                collection_directory: "z Kids".to_owned(),
-                media_count: 1,
-                cover_media: ongoing_group.media.first().cloned(),
-                date_groups: vec![ongoing_group],
-                problem: None,
-            }],
+            media_count: 3,
+            parts: vec![
+                CatalogBrowsePart {
+                    year: 2019,
+                    year_directory: "2019".to_owned(),
+                    collection_directory: "z Kids".to_owned(),
+                    media_count: 1,
+                    cover_media: ongoing_group.media.first().cloned(),
+                    date_groups: vec![ongoing_group],
+                    problem: None,
+                },
+                CatalogBrowsePart {
+                    year: 2024,
+                    year_directory: "2024".to_owned(),
+                    collection_directory: "z Kids".to_owned(),
+                    media_count: 2,
+                    cover_media: ongoing_recent_group.media.first().cloned(),
+                    date_groups: vec![ongoing_recent_group],
+                    problem: None,
+                },
+                CatalogBrowsePart {
+                    year: 2025,
+                    year_directory: "2025".to_owned(),
+                    collection_directory: "z Kids".to_owned(),
+                    media_count: 99,
+                    cover_media: Some(CatalogBrowseMedia {
+                        filename: "untrusted.jpg".to_owned(),
+                        path: "/Volumes/photos/Family Catalog/2025/z Kids/untrusted.jpg".to_owned(),
+                    }),
+                    date_groups: vec![CatalogBrowseDateGroup {
+                        date: "2025-01-01".to_owned(),
+                        media: vec![CatalogBrowseMedia {
+                            filename: "untrusted.jpg".to_owned(),
+                            path: "/Volumes/photos/Family Catalog/2025/z Kids/untrusted.jpg"
+                                .to_owned(),
+                        }],
+                    }],
+                    problem: Some("SHA256SUMS contains a malformed manifest line.".to_owned()),
+                },
+            ],
         },
     ];
     match selection {
@@ -725,6 +808,18 @@ fn catalog_browse(
         &EngineMessage::success(
             request_id,
             ResponseResult::CatalogBrowse(CatalogBrowseResult { collections }),
+        ),
+    )
+}
+
+fn catalog_browse_empty(output: &mut impl Write, request_id: String) -> io::Result<()> {
+    write_message(
+        output,
+        &EngineMessage::success(
+            request_id,
+            ResponseResult::CatalogBrowse(CatalogBrowseResult {
+                collections: Vec::new(),
+            }),
         ),
     )
 }

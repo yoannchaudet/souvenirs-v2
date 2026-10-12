@@ -258,6 +258,13 @@ private final class FakeCatalogEngine: CatalogEngineClient {
         throw TestError(message: "Not implemented in catalog tests.")
     }
 
+    func catalogBrowse(
+        path: String,
+        selection: EngineSupervisor.CatalogCollectionIdentity?
+    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
+        []
+    }
+
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
         throw TestError(message: "Not implemented in catalog tests.")
     }

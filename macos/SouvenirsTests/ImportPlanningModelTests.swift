@@ -297,6 +297,13 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
         ]
     }
 
+    func catalogBrowse(
+        path: String,
+        selection: EngineSupervisor.CatalogCollectionIdentity?
+    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
+        []
+    }
+
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
         scannedSourcePaths.append(sourcePath)
         if !scanErrors.isEmpty {

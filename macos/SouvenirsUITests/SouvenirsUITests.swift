@@ -60,6 +60,68 @@ final class SouvenirsUITests: XCTestCase {
     }
 
     @MainActor
+    func testBrowsesArchiveCollectionsAndProblemParts() throws {
+        let app = launch(scenario: "catalog-browse")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-overview"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(app.staticTexts["All Photos"].exists)
+        XCTAssertTrue(app.buttons["archive-cover-0"].exists)
+        XCTAssertTrue(app.buttons["archive-cover-1"].exists)
+
+        app.buttons["archive-cover-1"].click()
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-collection-detail"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(app.staticTexts["Kids"].exists)
+        XCTAssertTrue(app.staticTexts["archive-part-2019-date-group-0"].exists)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-part-2019-media-0-0"].exists
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-problem-part-2025"].exists
+        )
+        XCTAssertFalse(app.staticTexts["untrusted.jpg"].exists)
+        XCTAssertTrue(app.buttons["choose-import-folder"].isEnabled)
+
+        app.descendants(matching: .any)["archive-all-photos"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-overview"]
+                .waitForExistence(timeout: 3)
+        )
+    }
+
+    @MainActor
+    func testArchiveBrowseFailureRetriesWithoutStaleContent() throws {
+        let app = launch(scenario: "catalog-browse-error")
+
+        XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
+        app.buttons["open-catalog"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-browse-error"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)["archive-overview"].exists
+        )
+
+        app.buttons["Try Again"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-browse-error"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)["archive-overview"].exists
+        )
+    }
+
+    @MainActor
     func testStartupFailureDisablesCatalogActionsAndSupportsRetry() throws {
         let app = launch(scenario: "startup-failure-once")
 
@@ -304,7 +366,7 @@ final class SouvenirsUITests: XCTestCase {
                 .waitForExistence(timeout: 5)
         )
         XCTAssertEqual(app.sheets.count, 1)
-        XCTAssertFalse(launcher.isHittable)
+        XCTAssertFalse(launcher.isEnabled)
         let collectionName = app.textFields["import-collection-name"]
         XCTAssertTrue(collectionName.waitForExistence(timeout: 5))
         expectation(
@@ -452,6 +514,9 @@ final class SouvenirsUITests: XCTestCase {
         sheet.buttons["defer-recovery"].click()
         XCTAssertTrue(
             app.staticTexts["import-recovery-deferred"].waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["archive-overview"].exists
         )
         XCTAssertTrue(app.buttons["retry-deferred-recovery"].exists)
         XCTAssertTrue(app.buttons["cancel-deferred-recovery"].exists)
