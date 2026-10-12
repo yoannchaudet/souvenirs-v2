@@ -202,6 +202,24 @@ final class ImportPlanningModelTests: XCTestCase {
         XCTAssertEqual(engine.scannedSourcePaths.count, 2)
     }
 
+    func testCancellationSuppressesLateScanResult() async {
+        let engine = FakeImportPlanningEngine()
+        engine.pauseNextScan = true
+        let model = makeModel(engine: engine)
+
+        let loading = Task { await model.load() }
+        await Task.yield()
+        XCTAssertTrue(model.isLoading)
+
+        loading.cancel()
+        engine.resumeScan()
+        await loading.value
+
+        XCTAssertFalse(model.isLoading)
+        XCTAssertNil(model.scan)
+        XCTAssertNil(model.errorMessage)
+    }
+
     func testClocklessItemsRemainDisclosedWithoutInterpretationButtons() async {
         let engine = FakeImportPlanningEngine()
         engine.includesDeferredDate = true

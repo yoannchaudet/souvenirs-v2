@@ -175,7 +175,12 @@ private struct EngineRootView: View {
     init(engine: EngineAppModel, imports: ImportExecutionCoordinator) {
         self.engine = engine
         self.imports = imports
-        _welcome = StateObject(wrappedValue: CatalogWelcomeModel(engine: engine))
+        _welcome = StateObject(
+            wrappedValue: CatalogWelcomeModel(
+                engine: engine,
+                sourceDiscovery: SourceDiscoveryFactory.make()
+            )
+        )
     }
 
     var body: some View {

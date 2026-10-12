@@ -5,6 +5,8 @@ struct ContentView: View {
     private enum ModalReturnFocus: Hashable {
         case createCatalog
         case chooseImportFolder
+        case connectedSource
+        case sourceStatus
         case retryDeferredRecovery
         case stopImport
     }
@@ -14,6 +16,7 @@ struct ContentView: View {
     @ObservedObject var imports: ImportExecutionCoordinator
     let onRetryEngine: (() -> Void)?
     @State private var modalReturnFocus: ModalReturnFocus?
+    @State private var connectedReviewRequestID: UUID?
     @FocusState private var keyboardFocus: ModalReturnFocus?
     @AccessibilityFocusState private var accessibilityFocus: ModalReturnFocus?
 
@@ -160,10 +163,13 @@ struct ContentView: View {
     }
 
     private func restoreModalFocus() {
-        guard let target = modalReturnFocus else { return }
+        guard var target = modalReturnFocus else { return }
         modalReturnFocus = nil
         if target == .createCatalog, model.route != .welcome {
             return
+        }
+        if target == .connectedSource, model.selectedConnectedSource == nil {
+            target = .sourceStatus
         }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(150))
@@ -312,7 +318,11 @@ struct ContentView: View {
                     .padding(.top, 16)
                 CatalogBrowseSidebar(model: model.browse)
                     .frame(maxHeight: .infinity)
-                Spacer()
+                Text("Import from")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+                connectedSourceSidebar
                 Divider()
                 Label(sidebarStatus, systemImage: "circle.fill")
                     .font(.caption)
@@ -353,12 +363,16 @@ struct ContentView: View {
                     Spacer()
                     if imports.phase == .idle || imports.phase == .recoveryDeferred {
                         Button {
-                            Task { await model.browse.refresh() }
+                            Task {
+                                async let browseRefresh: Void = model.browse.refresh()
+                                model.refreshConnectedSources()
+                                await browseRefresh
+                            }
                         } label: {
                             Label("Refresh", systemImage: "arrow.clockwise")
                                 .labelStyle(.iconOnly)
                         }
-                        .help("Refresh archive")
+                        .help("Refresh archive and connected sources")
                         .accessibilityIdentifier("archive-browse-refresh")
 
                         Button("Import…") {
@@ -392,6 +406,11 @@ struct ContentView: View {
                         if imports.catalog?.path == catalog.path,
                            imports.phase == .recoveryDeferred {
                             deferredRecovery
+                                .padding(.vertical, 12)
+                        }
+                        if let source = model.selectedConnectedSource {
+                            connectedSourceBanner(source, catalog: catalog)
+                                .padding(.horizontal, 18)
                                 .padding(.vertical, 12)
                         }
                         CatalogBrowsePane(model: model.browse) {
@@ -430,6 +449,173 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private var connectedSourceSidebar: some View {
+        if let source = model.selectedConnectedSource {
+            HStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "externaldrive.fill")
+                        .foregroundStyle(.blue)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(source.name)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                        Text("Ready to review")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("connected-source-card")
+                .accessibilityLabel(source.name)
+                .accessibilityValue("Connected, ready to review")
+                Spacer(minLength: 0)
+                if model.connectedSources.count > 1 {
+                    Menu {
+                        ForEach(model.connectedSources) { candidate in
+                            Button {
+                                model.selectConnectedSource(id: candidate.id)
+                            } label: {
+                                if candidate.id == source.id {
+                                    Label(candidate.name, systemImage: "checkmark")
+                                } else {
+                                    Text(candidate.name)
+                                }
+                            }
+                            .accessibilityIdentifier(
+                                "connected-source-option-\(candidate.id)"
+                            )
+                        }
+                    } label: {
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .accessibilityLabel("Choose connected source")
+                    .accessibilityIdentifier("connected-source-selector")
+                }
+            }
+            .padding(8)
+            .contentShape(Rectangle())
+            .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.separator.opacity(0.55))
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(sourceStatusLine)
+                    .font(.caption2)
+                    .foregroundStyle(
+                        model.sourceDiscoveryError == nil ? Color.secondary : Color.red
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("connected-source-status")
+                    .accessibilityLabel("Connected source status")
+                    .accessibilityValue(sourceStatusLine)
+                Button(
+                    model.sourceDiscoveryError == nil ? "Refresh" : "Try Again"
+                ) {
+                    model.retrySourceDiscovery()
+                }
+                .font(.caption)
+                .disabled(model.isDiscoveringSources)
+                .accessibilityIdentifier("connected-source-retry")
+                .focusable()
+                .focused($keyboardFocus, equals: .sourceStatus)
+                .accessibilityFocused($accessibilityFocus, equals: .sourceStatus)
+            }
+            .padding(.vertical, 5)
+        }
+    }
+
+    private var sourceStatusLine: String {
+        if model.isDiscoveringSources {
+            return "Checking connected sources…"
+        }
+        if let sourceDiscoveryError = model.sourceDiscoveryError {
+            return sourceDiscoveryError
+        }
+        return "No readable removable source connected"
+    }
+
+    private func connectedSourceBanner(
+        _ source: ConnectedSource,
+        catalog: RecentCatalog
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "externaldrive.badge.checkmark")
+                .font(.title2)
+                .foregroundStyle(.blue)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(sourceSummary(source))
+                    .font(.callout.weight(.semibold))
+                Text("Souvenirs scans this source only after you review the import.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("connected-source-summary")
+            .accessibilityLabel("Connected source")
+            .accessibilityValue(sourceSummary(source))
+            .accessibilityHint(
+                "Souvenirs scans this source only after you review the import."
+            )
+            Spacer(minLength: 8)
+            Button("Review Import…") {
+                let requestID = UUID()
+                connectedReviewRequestID = requestID
+                modalReturnFocus = .connectedSource
+                Task {
+                    let started = await model.reviewConnectedSource(
+                        id: source.id,
+                        into: catalog
+                    )
+                    guard connectedReviewRequestID == requestID else { return }
+                    connectedReviewRequestID = nil
+                    guard !started else { return }
+                    if modalReturnFocus == .connectedSource {
+                        modalReturnFocus = nil
+                    }
+                    await Task.yield()
+                    try? await Task.sleep(for: .milliseconds(150))
+                    let target: ModalReturnFocus =
+                        model.selectedConnectedSource == nil
+                        ? .sourceStatus : .connectedSource
+                    keyboardFocus = target
+                    accessibilityFocus = target
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(
+                imports.phase != .idle
+                    || model.importPlanning != nil
+                    || model.isDiscoveringSources
+            )
+            .accessibilityIdentifier("review-connected-source")
+            .focusable()
+            .focused($keyboardFocus, equals: .connectedSource)
+            .accessibilityFocused($accessibilityFocus, equals: .connectedSource)
+        }
+        .padding(12)
+        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.blue.opacity(0.28))
+        }
+    }
+
+    private func sourceSummary(_ source: ConnectedSource) -> String {
+        let count = model.connectedSources.count
+        if count == 1 {
+            return "1 removable source connected · \(source.name)"
+        }
+        return "\(count) removable sources connected · \(source.name) selected"
+    }
+
     private func catalogReadyContent(_ catalog: RecentCatalog) -> some View {
         GeometryReader { proxy in
             ScrollView {
@@ -445,12 +631,12 @@ struct ContentView: View {
                         .font(.title2.bold())
                         .padding(.top, 18)
                         .accessibilityIdentifier("catalog-ready")
-                    Text("Insert a memory card, or choose a folder of photos. Souvenirs will show you exactly what it plans to copy before anything happens.")
+                    Text("Connect a mounted memory card, or choose a folder of photos. Souvenirs will show you exactly what it plans to copy before anything happens.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 560)
                         .padding(.top, 3)
-                    Text("Memory cards appear in the sidebar when you connect them.")
+                    Text("Readable removable volumes appear in the sidebar when they mount.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .padding(.top, 4)
