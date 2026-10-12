@@ -237,8 +237,10 @@ Rust groups detailed results by accepted date and returns media paths in determi
 The macOS client must not reconstruct collection paths or read manifests directly.
 Published originals do not enter browse results until a manifest admits them.
 An invalid collection manifest produces a problem on that collection part.
+That problem makes the part count and media unavailable rather than partially trusted.
 The query continues to return other collections after an invalid manifest.
 Catalog I/O errors fail the complete query.
+This failure prevents the client from presenting a partial snapshot during storage unavailability.
 
 ### Engine
 

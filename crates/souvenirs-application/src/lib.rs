@@ -421,11 +421,17 @@ fn browse_collection_content(
             });
         }
         Err(error @ (ManifestReadError::Invalid { .. } | ManifestReadError::NotRegular { .. })) => {
+            let line = error
+                .line()
+                .map_or_else(String::new, |line| format!(" at line {line}"));
             return Ok(CatalogBrowseContent {
                 media_count: 0,
                 cover_media: None,
                 date_groups: Vec::new(),
-                problem: Some(error.to_string()),
+                problem: Some(format!(
+                    "The collection manifest is damaged{line}: {}.",
+                    error.reason()
+                )),
             });
         }
         Err(ManifestReadError::Io { path, source }) => {
@@ -443,8 +449,7 @@ fn browse_collection_content(
                 cover_media: None,
                 date_groups: Vec::new(),
                 problem: Some(format!(
-                    "Manifest {} contains noncanonical original filename {filename:?}.",
-                    collection_path.display()
+                    "The collection manifest contains noncanonical original filename {filename:?}."
                 )),
             });
         };
