@@ -112,7 +112,7 @@ final class CatalogBrowseModel: ObservableObject {
     private let engine: CatalogEngineClient
     private var catalogPath: String?
     private var generation = 0
-    private var transientImport: TransientImport?
+    @Published private var transientImport: TransientImport?
     private var importGeneration = 0
 
     init(engine: CatalogEngineClient) {

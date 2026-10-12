@@ -13,6 +13,7 @@ struct ContentView: View {
 
     let engineStatus: EngineAppModel.Status
     @ObservedObject var model: CatalogWelcomeModel
+    @ObservedObject private var browse: CatalogBrowseModel
     @ObservedObject var imports: ImportExecutionCoordinator
     let onRetryEngine: (() -> Void)?
     @State private var modalReturnFocus: ModalReturnFocus?
@@ -28,6 +29,7 @@ struct ContentView: View {
     ) {
         self.engineStatus = engineStatus
         self.model = model
+        self.browse = model.browse
         self.imports = imports
         self.onRetryEngine = onRetryEngine
     }
