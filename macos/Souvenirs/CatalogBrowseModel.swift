@@ -131,8 +131,7 @@ final class CatalogBrowseModel: ObservableObject {
     }
 
     var blocksBrowseNavigation: Bool {
-        transientImport?.reconciliation != nil
-            && transientImport?.reconciliation != .landed
+        transientImport?.reconciliation == .refreshing
     }
 
     var canRetryTerminalImport: Bool {

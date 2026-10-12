@@ -695,7 +695,7 @@ struct ContentView: View {
             return
         }
         await model.browse.updateImportPresentation(
-            operationID: imports.phase == .recoveryDeferred ? nil : imports.operationID,
+            operationID: imports.operationID,
             collectionName: imports.collectionName,
             media: imports.verifiedMedia,
             loadDetail: loadDetail

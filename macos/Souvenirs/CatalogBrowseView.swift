@@ -100,8 +100,10 @@ struct CatalogBrowseHeader: View {
         }
         .onChange(of: model.landingFocusGeneration) { oldValue, newValue in
             guard newValue > oldValue else { return }
-            titleFocused = true
-            titleAccessibilityFocused = true
+            Task { @MainActor in
+                titleFocused = true
+                titleAccessibilityFocused = true
+            }
         }
     }
 }
