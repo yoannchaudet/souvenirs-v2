@@ -217,7 +217,7 @@ final class ImportExecutionCoordinator: ObservableObject {
         guard recovery != nil else { return }
         operationTask?.cancel()
         isRetryingRecovery = false
-        phase = .recoveryDeferred
+        phase = .recoveryDeferred; presentationRevision += 1
     }
 
     func stop() {

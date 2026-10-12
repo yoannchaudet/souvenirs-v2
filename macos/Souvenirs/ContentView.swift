@@ -695,7 +695,7 @@ struct ContentView: View {
             return
         }
         await model.browse.updateImportPresentation(
-            operationID: imports.operationID,
+            operationID: imports.phase == .recoveryDeferred ? nil : imports.operationID,
             collectionName: imports.collectionName,
             media: imports.verifiedMedia,
             loadDetail: loadDetail
@@ -830,9 +830,7 @@ struct ContentView: View {
                     title: "Updating the archive…",
                     message: pendingMessage,
                     tint: .blue,
-                    identifier: model.browse.importReconciliation == .refreshing
-                        ? "import-terminal-refreshing"
-                        : "import-terminal-active",
+                    identifier: "import-terminal-refreshing",
                     actionTitle: nil
                 )
             }
