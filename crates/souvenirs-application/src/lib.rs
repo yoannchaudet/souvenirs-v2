@@ -449,7 +449,7 @@ fn browse_collection_content(
                 cover_media: None,
                 date_groups: Vec::new(),
                 problem: Some(format!(
-                    "The collection manifest contains noncanonical original filename {filename:?}."
+                    "The collection manifest contains noncanonical original filename \"{filename}\"."
                 )),
             });
         };

@@ -315,7 +315,10 @@ final class ProtocolFixtureTests: XCTestCase {
                 return XCTFail("Expected ongoing browse collection")
             }
             XCTAssertEqual(parts[0].dateGroups[0].date, "2019-03-02")
-            XCTAssertEqual(parts[1].problem, "invalid catalog manifest")
+            XCTAssertEqual(
+                parts[1].problem,
+                "The collection manifest is damaged at line 3: expected '<sha256>  <filename>'."
+            )
         case 13:
             try assertRequest(
                 data,
