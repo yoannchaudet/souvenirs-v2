@@ -193,7 +193,7 @@ final class CatalogBrowseModel: ObservableObject {
             }
             return "\(subtitle) · Some content unavailable"
         }
-        guard presentedImportCollection == nil else { return nil }
+        guard presentedImportCollection == nil, transientImport?.occurrence != nil || transientImport == nil else { return nil }
         switch selection {
         case .overview:
             guard !isLoadingOverview, errorMessage == nil else { return nil }
