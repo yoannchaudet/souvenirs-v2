@@ -6,6 +6,7 @@ final class CatalogBrowseModelTests: XCTestCase {
     func testLoadsOverviewThenExactSelectedCollection() async {
         let engine = FakeBrowseEngine()
         engine.overview = [datedOverview, ongoingOverview]
+        engine.navigation = navigation
         engine.details[datedIdentity] = datedDetail
         let model = CatalogBrowseModel(engine: engine)
 
@@ -15,7 +16,7 @@ final class CatalogBrowseModelTests: XCTestCase {
         XCTAssertEqual(model.collections.map(\.identity), [datedIdentity, ongoingIdentity])
         XCTAssertEqual(model.selection, .overview)
 
-        await model.select(.collection(datedIdentity))
+        await model.select(datedOccurrence)
 
         XCTAssertEqual(engine.requests, [nil, datedIdentity])
         XCTAssertEqual(model.detail?.identity, datedIdentity)
@@ -25,6 +26,7 @@ final class CatalogBrowseModelTests: XCTestCase {
     func testCompleteFailureClearsPreviouslyLoadedSnapshot() async {
         let engine = FakeBrowseEngine()
         engine.overview = [datedOverview]
+        engine.navigation = [.allPhotos]
         let model = CatalogBrowseModel(engine: engine)
         await model.load(catalogPath: "/catalog")
         XCTAssertFalse(model.collections.isEmpty)
@@ -69,37 +71,147 @@ final class CatalogBrowseModelTests: XCTestCase {
 
         XCTAssertNil(problemCollection.trustedMediaCount)
         XCTAssertNil(problemCollection.trustedCoverMedia)
+        XCTAssertNil(problemCollection.trustedMediaCount(annualPartYear: 2025))
+        XCTAssertNil(problemCollection.trustedCoverMedia(annualPartYear: 2025))
         XCTAssertEqual(problemCollection.browseProblem, "Malformed manifest.")
+    }
+
+    func testSelectsRustOwnedScopeWithoutAnotherRequest() async {
+        let engine = FakeBrowseEngine()
+        engine.overview = [datedOverview, ongoingOverview]
+        engine.navigation = navigation
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+
+        model.selectScope(.year(2024))
+
+        XCTAssertEqual(engine.requests, [nil])
+        XCTAssertEqual(model.selectedScope, .year(2024))
+        XCTAssertEqual(model.overviewGroups.first?.entries, [
+            .init(identity: ongoingIdentity, annualPartYear: 2024)
+        ])
+    }
+
+    func testRefreshPreservesOccurrenceWhenYearMovesUnderEarlier() async {
+        let engine = FakeBrowseEngine()
+        engine.overview = [datedOverview, ongoingOverview]
+        engine.navigation = navigation
+        engine.details[ongoingIdentity] = ongoingDetail
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+        model.selectScope(.year(2024))
+        await model.select(ongoingOccurrence)
+
+        engine.suspendOverview = true
+        let refresh = Task { await model.refresh() }
+        await engine.waitUntilSuspended()
+        XCTAssertEqual(model.selectedScope, .year(2024))
+        XCTAssertEqual(model.selection, .collection(ongoingOccurrence))
+        XCTAssertEqual(model.detail?.identity, ongoingIdentity)
+
+        engine.navigation = [
+            .allPhotos,
+            .earlier(
+                throughYear: 2024,
+                years: [
+                    .init(
+                        year: 2024,
+                        entries: [
+                            .init(identity: ongoingIdentity, annualPartYear: 2024)
+                        ]
+                    )
+                ]
+            ),
+        ]
+        engine.resumeSuspended()
+        await refresh.value
+
+        XCTAssertEqual(model.selectedScope, .allPhotos)
+        XCTAssertEqual(model.selection, .collection(ongoingOccurrence))
+        XCTAssertEqual(model.detail?.identity, ongoingIdentity)
+    }
+
+    func testRefreshFallsBackWhenOccurrenceDisappears() async {
+        let engine = FakeBrowseEngine()
+        engine.overview = [datedOverview, ongoingOverview]
+        engine.navigation = navigation
+        engine.details[ongoingIdentity] = ongoingDetail
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+        await model.select(ongoingOccurrence)
+
+        engine.overview = [datedOverview]
+        engine.navigation = [.allPhotos]
+        await model.refresh()
+
+        XCTAssertEqual(model.selectedScope, .allPhotos)
+        XCTAssertEqual(model.selection, .overview)
+        XCTAssertNil(model.detail)
+    }
+
+    func testRefreshKeepsLiveEarlierSelectionWhenBoundaryChanges() async {
+        let engine = FakeBrowseEngine()
+        engine.overview = [datedOverview]
+        engine.navigation = [
+            .allPhotos,
+            .earlier(
+                throughYear: 2019,
+                years: [.init(
+                    year: 2019,
+                    entries: [.init(identity: datedIdentity, annualPartYear: nil)]
+                )]
+            ),
+        ]
+        let model = CatalogBrowseModel(engine: engine)
+        await model.load(catalogPath: "/catalog")
+        model.selectScope(.earlier(throughYear: 2019))
+
+        engine.suspendOverview = true
+        let refresh = Task { await model.refresh() }
+        await engine.waitUntilSuspended()
+        model.selectScope(.allPhotos)
+        model.selectScope(.earlier(throughYear: 2019))
+        engine.navigation = [
+            .allPhotos,
+            .earlier(throughYear: 2020, years: [])
+        ]
+        engine.resumeSuspended()
+        await refresh.value
+
+        XCTAssertEqual(model.selectedScope, .earlier(throughYear: 2020))
+        XCTAssertEqual(model.selection, .overview)
     }
 
     func testLateDetailResponseCannotReplaceNewerSelection() async {
         let engine = FakeBrowseEngine()
         engine.overview = [datedOverview, ongoingOverview]
+        engine.navigation = navigation
         engine.details[datedIdentity] = datedDetail
         engine.details[ongoingIdentity] = ongoingDetail
         engine.suspendedIdentity = datedIdentity
         let model = CatalogBrowseModel(engine: engine)
         await model.load(catalogPath: "/catalog")
 
-        let stale = Task { await model.select(.collection(datedIdentity)) }
+        let stale = Task { await model.select(datedOccurrence) }
         await engine.waitUntilSuspended()
-        await model.select(.collection(ongoingIdentity))
+        await model.select(ongoingOccurrence)
         engine.resumeSuspended()
         await stale.value
 
-        XCTAssertEqual(model.selection, .collection(ongoingIdentity))
+        XCTAssertEqual(model.selection, .collection(ongoingOccurrence))
         XCTAssertEqual(model.detail?.identity, ongoingIdentity)
     }
 
     func testSelectionIsIgnoredWhileOverviewLoads() async {
         let engine = FakeBrowseEngine()
         engine.overview = [datedOverview]
+        engine.navigation = [.allPhotos]
         engine.suspendOverview = true
         let model = CatalogBrowseModel(engine: engine)
 
         let load = Task { await model.load(catalogPath: "/catalog") }
         await engine.waitUntilSuspended()
-        await model.select(.collection(datedIdentity))
+        await model.select(datedOccurrence)
 
         XCTAssertEqual(model.selection, .overview)
         engine.resumeSuspended()
@@ -111,10 +223,11 @@ final class CatalogBrowseModelTests: XCTestCase {
     func testMissingScopedIdentityRefreshesOverview() async {
         let engine = FakeBrowseEngine()
         engine.overview = [datedOverview]
+        engine.navigation = [.allPhotos]
         let model = CatalogBrowseModel(engine: engine)
         await model.load(catalogPath: "/catalog")
 
-        await model.select(.collection(datedIdentity))
+        await model.select(datedOccurrence)
 
         XCTAssertEqual(engine.requests, [nil, datedIdentity, nil])
         XCTAssertEqual(model.selection, .overview)
@@ -127,6 +240,37 @@ final class CatalogBrowseModelTests: XCTestCase {
 
     private var ongoingIdentity: EngineSupervisor.CatalogCollectionIdentity {
         .ongoing(key: "kids")
+    }
+
+    private var datedOccurrence: CatalogBrowseModel.CollectionOccurrence {
+        .init(identity: datedIdentity, annualPartYear: nil)
+    }
+
+    private var ongoingOccurrence: CatalogBrowseModel.CollectionOccurrence {
+        .init(identity: ongoingIdentity, annualPartYear: 2024)
+    }
+
+    private var navigation: [EngineSupervisor.CatalogBrowseNavigationScope] {
+        [
+            .allPhotos,
+            .year(
+                year: 2024,
+                entries: [
+                    .init(identity: ongoingIdentity, annualPartYear: 2024)
+                ]
+            ),
+            .earlier(
+                throughYear: 2019,
+                years: [
+                    .init(
+                        year: 2019,
+                        entries: [
+                            .init(identity: datedIdentity, annualPartYear: nil)
+                        ]
+                    )
+                ]
+            ),
+        ]
     }
 
     private var datedOverview: EngineSupervisor.CatalogBrowseCollection {
@@ -200,6 +344,7 @@ final class CatalogBrowseModelTests: XCTestCase {
 
 @MainActor
 private final class FakeBrowseEngine: CatalogEngineClient {
+    var navigation: [EngineSupervisor.CatalogBrowseNavigationScope] = []
     var overview: [EngineSupervisor.CatalogBrowseCollection] = []
     var details:
         [EngineSupervisor.CatalogCollectionIdentity: EngineSupervisor.CatalogBrowseCollection] = [:]
@@ -208,20 +353,25 @@ private final class FakeBrowseEngine: CatalogEngineClient {
     var suspendOverview = false
     private(set) var requests: [EngineSupervisor.CatalogCollectionIdentity?] = []
     private var continuation:
-        CheckedContinuation<[EngineSupervisor.CatalogBrowseCollection], Never>?
+        CheckedContinuation<EngineSupervisor.CatalogBrowseSnapshot, Never>?
 
     func catalogBrowse(
         path: String,
         selection: EngineSupervisor.CatalogCollectionIdentity?
-    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
+    ) async throws -> EngineSupervisor.CatalogBrowseSnapshot {
         requests.append(selection)
         if let error { throw error }
         if (suspendOverview && selection == nil)
             || suspendedIdentity.map({ selection == $0 }) == true {
             return await withCheckedContinuation { continuation = $0 }
         }
-        guard let selection else { return overview }
-        return details[selection].map { [$0] } ?? []
+        guard let selection else {
+            return .init(navigation: navigation, collections: overview)
+        }
+        return .init(
+            navigation: [],
+            collections: details[selection].map { [$0] } ?? []
+        )
     }
 
     func waitUntilSuspended() async {
@@ -231,14 +381,17 @@ private final class FakeBrowseEngine: CatalogEngineClient {
     }
 
     func resumeSuspended() {
-        let response: [EngineSupervisor.CatalogBrowseCollection]
+        let response: EngineSupervisor.CatalogBrowseSnapshot
         if suspendOverview {
             suspendOverview = false
-            response = overview
+            response = .init(navigation: navigation, collections: overview)
         } else if let suspendedIdentity {
-            response = details[suspendedIdentity].map { [$0] } ?? []
+            response = .init(
+                navigation: [],
+                collections: details[suspendedIdentity].map { [$0] } ?? []
+            )
         } else {
-            response = []
+            response = .init(navigation: [], collections: [])
         }
         continuation?.resume(returning: response)
         continuation = nil

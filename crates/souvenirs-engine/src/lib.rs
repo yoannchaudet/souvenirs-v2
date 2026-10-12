@@ -12,6 +12,10 @@ use souvenirs_application::{
     CatalogBrowseCollection as ApplicationBrowseCollection,
     CatalogBrowseDateGroup as ApplicationBrowseDateGroup,
     CatalogBrowseMedia as ApplicationBrowseMedia,
+    CatalogBrowseNavigationEntry as ApplicationBrowseNavigationEntry,
+    CatalogBrowseNavigationScope as ApplicationBrowseNavigationScope,
+    CatalogBrowseNavigationYear as ApplicationBrowseNavigationYear,
+    CatalogBrowseResult as ApplicationBrowseResult,
     CatalogBrowseSelection as ApplicationBrowseSelection,
     CatalogCollection as ApplicationCollection, CatalogIntent as ApplicationIntent, CatalogService,
     DateResolution, ExistingCollectionIdentity, ImportCancellation,
@@ -22,16 +26,17 @@ use souvenirs_application::{
     RecoveryOutcome,
 };
 use souvenirs_protocol::{
-    CatalogBrowseCollection, CatalogBrowseDateGroup, CatalogBrowseMedia, CatalogBrowsePart,
-    CatalogBrowseResult, CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart,
-    CatalogCollectionsResult, CatalogIntent, CatalogResult, ClientVersion, EngineMessage,
-    HandshakeResult, ImportDateResolution, ImportDateSource, ImportDateSourceSummary,
-    ImportDateState, ImportDestination, ImportPreflightCheck, ImportPreflightEvidence,
-    ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
-    OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
-    StartOperationParameters, UnfinishedOperationActivityTime, UnfinishedOperationActivityTimeKind,
-    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_BROWSE_METHOD,
-    CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
+    CatalogBrowseCollection, CatalogBrowseDateGroup, CatalogBrowseMedia,
+    CatalogBrowseNavigationEntry, CatalogBrowseNavigationScope, CatalogBrowseNavigationYear,
+    CatalogBrowsePart, CatalogBrowseResult, CatalogCollection, CatalogCollectionIdentity,
+    CatalogCollectionPart, CatalogCollectionsResult, CatalogIntent, CatalogResult, ClientVersion,
+    EngineMessage, HandshakeResult, ImportDateResolution, ImportDateSource,
+    ImportDateSourceSummary, ImportDateState, ImportDestination, ImportPreflightCheck,
+    ImportPreflightEvidence, ImportReviewResult, ImportScanResult, OperationAccepted,
+    OperationEvent, OperationEventPayload, OperationInspectionResult, ProtocolError, Request,
+    RequestPayload, ResponseResult, StartOperationParameters, UnfinishedOperationActivityTime,
+    UnfinishedOperationActivityTimeKind, UnfinishedOperationResult, CANCEL_OPERATION_METHOD,
+    CATALOG_BROWSE_METHOD, CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
     CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
     OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
@@ -530,13 +535,19 @@ impl Connection {
 
 fn catalog_browse_response(
     request_id: String,
-    result: Result<Vec<ApplicationBrowseCollection>, souvenirs_application::CatalogServiceError>,
+    result: Result<ApplicationBrowseResult, souvenirs_application::CatalogServiceError>,
 ) -> EngineMessage {
     match result {
-        Ok(collections) => EngineMessage::success(
+        Ok(result) => EngineMessage::success(
             request_id,
             ResponseResult::CatalogBrowse(CatalogBrowseResult {
-                collections: collections
+                navigation: result
+                    .navigation
+                    .into_iter()
+                    .map(protocol_browse_navigation_scope)
+                    .collect(),
+                collections: result
+                    .collections
                     .into_iter()
                     .map(protocol_browse_collection)
                     .collect(),
@@ -546,6 +557,55 @@ fn catalog_browse_response(
             Some(request_id),
             ProtocolError::new(error.code(), error.to_string()),
         ),
+    }
+}
+
+fn protocol_browse_navigation_scope(
+    scope: ApplicationBrowseNavigationScope,
+) -> CatalogBrowseNavigationScope {
+    match scope {
+        ApplicationBrowseNavigationScope::AllPhotos => CatalogBrowseNavigationScope::AllPhotos,
+        ApplicationBrowseNavigationScope::Year { year, entries } => {
+            CatalogBrowseNavigationScope::Year {
+                year,
+                entries: entries
+                    .into_iter()
+                    .map(protocol_browse_navigation_entry)
+                    .collect(),
+            }
+        }
+        ApplicationBrowseNavigationScope::Earlier {
+            through_year,
+            years,
+        } => CatalogBrowseNavigationScope::Earlier {
+            through_year,
+            years: years
+                .into_iter()
+                .map(protocol_browse_navigation_year)
+                .collect(),
+        },
+    }
+}
+
+fn protocol_browse_navigation_year(
+    year: ApplicationBrowseNavigationYear,
+) -> CatalogBrowseNavigationYear {
+    CatalogBrowseNavigationYear {
+        year: year.year,
+        entries: year
+            .entries
+            .into_iter()
+            .map(protocol_browse_navigation_entry)
+            .collect(),
+    }
+}
+
+fn protocol_browse_navigation_entry(
+    entry: ApplicationBrowseNavigationEntry,
+) -> CatalogBrowseNavigationEntry {
+    CatalogBrowseNavigationEntry {
+        identity: protocol_identity(entry.identity),
+        annual_part_year: entry.annual_part_year,
     }
 }
 

@@ -300,8 +300,8 @@ private final class FakeImportPlanningEngine: CatalogEngineClient {
     func catalogBrowse(
         path: String,
         selection: EngineSupervisor.CatalogCollectionIdentity?
-    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
-        []
+    ) async throws -> EngineSupervisor.CatalogBrowseSnapshot {
+        .init(navigation: [.allPhotos], collections: [])
     }
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {

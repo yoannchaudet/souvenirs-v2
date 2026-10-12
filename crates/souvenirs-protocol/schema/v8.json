@@ -153,6 +153,113 @@
         }
       }
     },
+    "CatalogBrowseNavigationEntry": {
+      "type": "object",
+      "required": [
+        "identity"
+      ],
+      "properties": {
+        "annual_part_year": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "identity": {
+          "$ref": "#/definitions/CatalogCollectionIdentity"
+        }
+      }
+    },
+    "CatalogBrowseNavigationScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "all_photos"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "entries",
+            "kind",
+            "year"
+          ],
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CatalogBrowseNavigationEntry"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "year"
+              ]
+            },
+            "year": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "through_year",
+            "years"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "earlier"
+              ]
+            },
+            "through_year": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "years": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CatalogBrowseNavigationYear"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CatalogBrowseNavigationYear": {
+      "type": "object",
+      "required": [
+        "entries",
+        "year"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CatalogBrowseNavigationEntry"
+          }
+        },
+        "year": {
+          "type": "integer",
+          "format": "int32"
+        }
+      }
+    },
     "CatalogBrowseParameters": {
       "type": "object",
       "required": [
@@ -1287,6 +1394,7 @@
           "type": "object",
           "required": [
             "collections",
+            "navigation",
             "type"
           ],
           "properties": {
@@ -1294,6 +1402,12 @@
               "type": "array",
               "items": {
                 "$ref": "#/definitions/CatalogBrowseCollection"
+              }
+            },
+            "navigation": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CatalogBrowseNavigationScope"
               }
             },
             "type": {

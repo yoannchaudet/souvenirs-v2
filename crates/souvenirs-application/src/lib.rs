@@ -120,6 +120,37 @@ pub enum CatalogBrowseCollection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogBrowseResult {
+    pub navigation: Vec<CatalogBrowseNavigationScope>,
+    pub collections: Vec<CatalogBrowseCollection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogBrowseNavigationScope {
+    AllPhotos,
+    Year {
+        year: i32,
+        entries: Vec<CatalogBrowseNavigationEntry>,
+    },
+    Earlier {
+        through_year: i32,
+        years: Vec<CatalogBrowseNavigationYear>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogBrowseNavigationYear {
+    pub year: i32,
+    pub entries: Vec<CatalogBrowseNavigationEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogBrowseNavigationEntry {
+    pub identity: CollectionIdentity,
+    pub annual_part_year: Option<i32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogBrowseSelection {
     Dated { year: String, directory: String },
     Ongoing { key: String },
@@ -301,10 +332,10 @@ impl CatalogService {
     pub fn browse(
         path: impl AsRef<Path>,
         selection: Option<&CatalogBrowseSelection>,
-    ) -> Result<Vec<CatalogBrowseCollection>, CatalogServiceError> {
+    ) -> Result<CatalogBrowseResult, CatalogServiceError> {
         let path = path.as_ref();
         let collections = Self::collections(path)?;
-        collections
+        let collections = collections
             .into_iter()
             .filter(|collection| browse_collection_matches(collection, selection))
             .map(|collection| match collection {
@@ -367,8 +398,77 @@ impl CatalogService {
                     })
                 }
             })
-            .collect()
+            .collect::<Result<Vec<_>, CatalogServiceError>>()?;
+        let navigation = selection
+            .is_none()
+            .then(|| browse_navigation(&collections))
+            .unwrap_or_default();
+        Ok(CatalogBrowseResult {
+            navigation,
+            collections,
+        })
     }
+}
+
+fn browse_navigation(collections: &[CatalogBrowseCollection]) -> Vec<CatalogBrowseNavigationScope> {
+    let mut by_year = BTreeMap::<i32, Vec<CatalogBrowseNavigationEntry>>::new();
+    for collection in collections {
+        match collection {
+            CatalogBrowseCollection::Dated { identity, .. } => {
+                let CollectionIdentity::Dated { year, .. } = identity else {
+                    unreachable!("dated browse collection has dated identity");
+                };
+                let year = parse_year_directory(year.as_str())
+                    .expect("dated collection identity has canonical year");
+                by_year
+                    .entry(year)
+                    .or_default()
+                    .push(CatalogBrowseNavigationEntry {
+                        identity: identity.clone(),
+                        annual_part_year: None,
+                    });
+            }
+            CatalogBrowseCollection::Ongoing {
+                identity, parts, ..
+            } => {
+                for part in parts {
+                    by_year
+                        .entry(part.year)
+                        .or_default()
+                        .push(CatalogBrowseNavigationEntry {
+                            identity: identity.clone(),
+                            annual_part_year: Some(part.year),
+                        });
+                }
+            }
+        }
+    }
+
+    let mut years = by_year
+        .into_iter()
+        .rev()
+        .map(|(year, entries)| CatalogBrowseNavigationYear { year, entries })
+        .collect::<Vec<_>>();
+    let earlier = (years.len() > 3).then(|| years.split_off(3));
+    let mut navigation = vec![CatalogBrowseNavigationScope::AllPhotos];
+    navigation.extend(
+        years
+            .into_iter()
+            .map(|year| CatalogBrowseNavigationScope::Year {
+                year: year.year,
+                entries: year.entries,
+            }),
+    );
+    if let Some(earlier) = earlier {
+        navigation.push(CatalogBrowseNavigationScope::Earlier {
+            through_year: earlier
+                .first()
+                .expect("earlier contains at least one year")
+                .year,
+            years: earlier,
+        });
+    }
+    navigation
 }
 
 fn browse_collection_matches(
@@ -1815,7 +1915,7 @@ mod tests {
 
         let summary = CatalogService::browse(directory.path(), None).unwrap();
         assert!(matches!(
-            &summary[0],
+            &summary.collections[0],
             super::CatalogBrowseCollection::Dated {
                 media_count: 2,
                 cover_media: Some(_),
@@ -1833,10 +1933,11 @@ mod tests {
             media_count,
             date_groups,
             ..
-        } = &browse[0]
+        } = &browse.collections[0]
         else {
             panic!("expected dated collection");
         };
+        assert!(browse.navigation.is_empty());
         assert_eq!(*media_count, 2);
         assert_eq!(
             date_groups
@@ -1859,7 +1960,7 @@ mod tests {
         let browse = CatalogService::browse(directory.path(), Some(&selection)).unwrap();
         let super::CatalogBrowseCollection::Ongoing {
             media_count, parts, ..
-        } = &browse[0]
+        } = &browse.collections[0]
         else {
             panic!("expected ongoing collection");
         };
@@ -1892,9 +1993,9 @@ mod tests {
 
         let browse = CatalogService::browse(directory.path(), None).unwrap();
 
-        assert_eq!(browse.len(), 2);
+        assert_eq!(browse.collections.len(), 2);
         assert!(matches!(
-            &browse[0],
+            &browse.collections[0],
             super::CatalogBrowseCollection::Dated {
                 media_count: 0,
                 problem: Some(problem),
@@ -1902,8 +2003,78 @@ mod tests {
             } if problem.contains("noncanonical original filename")
         ));
         assert!(matches!(
-            &browse[1],
+            &browse.collections[1],
             super::CatalogBrowseCollection::Dated { problem: None, .. }
+        ));
+    }
+
+    #[test]
+    fn browse_navigation_keeps_three_recent_years_and_groups_earlier_years() {
+        let directory = tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Family Catalog").unwrap();
+        for relative in [
+            "2019/2019-07-14 Brittany",
+            "2019/z Kids",
+            "2022/2022-01-01 Empty",
+            "2023/z Kids",
+            "2024/2024-06-08 Coast",
+            "2025/z Kids",
+        ] {
+            fs::create_dir_all(directory.path().join(relative)).unwrap();
+        }
+        fs::write(
+            directory.path().join("2025/z Kids/SHA256SUMS"),
+            "not a manifest\n",
+        )
+        .unwrap();
+
+        let browse = CatalogService::browse(directory.path(), None).unwrap();
+
+        assert_eq!(browse.navigation.len(), 5);
+        assert!(matches!(
+            browse.navigation[0],
+            super::CatalogBrowseNavigationScope::AllPhotos
+        ));
+        assert!(matches!(
+            &browse.navigation[1],
+            super::CatalogBrowseNavigationScope::Year { year: 2025, entries }
+                if entries.len() == 1 && entries[0].annual_part_year == Some(2025)
+        ));
+        assert!(matches!(
+            &browse.navigation[2],
+            super::CatalogBrowseNavigationScope::Year { year: 2024, entries }
+                if entries.len() == 1 && entries[0].annual_part_year.is_none()
+        ));
+        assert!(matches!(
+            &browse.navigation[3],
+            super::CatalogBrowseNavigationScope::Year { year: 2023, entries }
+                if entries.len() == 1 && entries[0].annual_part_year == Some(2023)
+        ));
+        let super::CatalogBrowseNavigationScope::Earlier {
+            through_year,
+            years,
+        } = &browse.navigation[4]
+        else {
+            panic!("expected earlier navigation");
+        };
+        assert_eq!(*through_year, 2022);
+        assert_eq!(
+            years.iter().map(|year| year.year).collect::<Vec<_>>(),
+            vec![2022, 2019]
+        );
+        assert_eq!(years[1].entries.len(), 2);
+        assert!(matches!(
+            &years[1].entries[0].identity,
+            super::CollectionIdentity::Dated { .. }
+        ));
+        assert!(matches!(
+            &years[1].entries[1].identity,
+            super::CollectionIdentity::Ongoing { .. }
+        ));
+        assert!(matches!(
+            browse.collections.last().expect("ongoing collection"),
+            super::CatalogBrowseCollection::Ongoing { parts, .. }
+                if parts[2].problem.is_some()
         ));
     }
 

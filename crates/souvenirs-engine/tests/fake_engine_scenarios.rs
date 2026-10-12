@@ -50,18 +50,7 @@ fn catalog_flow_serves_collection_query_capability() {
                 "catalog.collections",
                 json!({"path": "/catalog"}),
             ),
-            request(
-                "request-3",
-                "catalog.browse",
-                json!({
-                    "path": "/catalog",
-                    "selection": {
-                        "kind": "dated",
-                        "year": "2019",
-                        "directory": "2019-07-14 +6d Brittany"
-                    }
-                }),
-            ),
+            request("request-3", "catalog.browse", json!({"path": "/catalog"})),
         ],
     );
 
@@ -81,6 +70,10 @@ fn catalog_flow_serves_collection_query_capability() {
         "kids"
     );
     assert_eq!(messages[2]["result"]["type"], "catalog_browse");
+    assert_eq!(
+        messages[2]["result"]["navigation"],
+        json!([{"kind": "all_photos"}])
+    );
     assert_eq!(messages[2]["result"]["collections"], json!([]));
 }
 
@@ -103,18 +96,31 @@ fn catalog_browse_serves_overview_and_exact_detail() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        3
+    );
+    assert_eq!(
+        overview_messages[1]["result"]["navigation"][1]["year"],
+        2025
+    );
+    assert_eq!(
+        overview_messages[1]["result"]["navigation"][4]["kind"],
+        "earlier"
+    );
+    assert_eq!(
+        overview_messages[1]["result"]["navigation"][4]["years"][0]["entries"][1]
+            ["annual_part_year"],
+        2019
     );
     assert_eq!(
         overview_messages[1]["result"]["collections"][0]["date_groups"],
         json!([])
     );
     assert_eq!(
-        overview_messages[1]["result"]["collections"][1]["parts"][2]["problem"],
+        overview_messages[1]["result"]["collections"][2]["parts"][2]["problem"],
         "SHA256SUMS contains a malformed manifest line."
     );
     assert_eq!(
-        overview_messages[1]["result"]["collections"][1]["parts"][2]["date_groups"],
+        overview_messages[1]["result"]["collections"][2]["parts"][2]["date_groups"],
         json!([])
     );
 
@@ -137,6 +143,7 @@ fn catalog_browse_serves_overview_and_exact_detail() {
         detail_messages[1]["result"]["collections"][0]["identity"]["key"],
         "kids"
     );
+    assert_eq!(detail_messages[1]["result"]["navigation"], json!([]));
     assert_eq!(
         detail_messages[1]["result"]["collections"][0]["parts"][1]["date_groups"][0]["media"][1]
             ["filename"],

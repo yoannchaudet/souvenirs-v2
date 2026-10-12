@@ -162,7 +162,29 @@ final class CatalogVisualTests: XCTestCase {
                 size: NSSize(width: 920, height: 620),
                 name: "archive-browse-overview"
             )
-            await model.browse.select(.collection(.ongoing(key: "kids")))
+            model.browse.selectScope(.year(2025))
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 920, height: 620),
+                name: "archive-browse-year"
+            )
+            model.browse.selectScope(.earlier(throughYear: 2019))
+            try capture(
+                ContentView(
+                    engineStatus: .ready(engineVersion: "0.1.0"),
+                    model: model,
+                    imports: imports
+                ),
+                size: NSSize(width: 920, height: 620),
+                name: "archive-browse-earlier"
+            )
+            await model.browse.select(
+                .init(identity: .ongoing(key: "kids"), annualPartYear: 2025)
+            )
             try capture(
                 ContentView(
                     engineStatus: .ready(engineVersion: "0.1.0"),
@@ -576,11 +598,17 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
     func catalogBrowse(
         path: String,
         selection: EngineSupervisor.CatalogCollectionIdentity?
-    ) async throws -> [EngineSupervisor.CatalogBrowseCollection] {
+    ) async throws -> EngineSupervisor.CatalogBrowseSnapshot {
         guard let selection else {
-            return browseCollections.map(\.overviewOnly)
+            return .init(
+                navigation: Self.browseNavigation,
+                collections: browseCollections.map(\.overviewOnly)
+            )
         }
-        return browseCollections.filter { $0.identity == selection }
+        return .init(
+            navigation: [],
+            collections: browseCollections.filter { $0.identity == selection }
+        )
     }
 
     func scanImport(sourcePath: String) async throws -> EngineSupervisor.ImportScan {
@@ -685,6 +713,16 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
                 dateGroups: [.init(date: "2019-07-15", media: [datedMedia])],
                 problem: nil
             ),
+            .dated(
+                identity: .dated(year: "2022", directory: "2022-01-01 Empty"),
+                label: "Empty",
+                startDate: "2022-01-01",
+                endDate: "2022-01-01",
+                mediaCount: 0,
+                coverMedia: nil,
+                dateGroups: [],
+                problem: nil
+            ),
             .ongoing(
                 identity: .ongoing(key: "kids"),
                 label: "Kids",
@@ -710,6 +748,50 @@ private final class VisualCatalogEngine: CatalogEngineClient, ImportExecutionEng
                     )
                 ]
             )
+        ]
+    }
+
+    static var browseNavigation: [EngineSupervisor.CatalogBrowseNavigationScope] {
+        [
+            .allPhotos,
+            .year(
+                year: 2025,
+                entries: [
+                    .init(identity: .ongoing(key: "kids"), annualPartYear: 2025)
+                ]
+            ),
+            .year(
+                year: 2024,
+                entries: [
+                    .init(identity: .ongoing(key: "kids"), annualPartYear: 2024)
+                ]
+            ),
+            .year(
+                year: 2022,
+                entries: [
+                    .init(
+                        identity: .dated(year: "2022", directory: "2022-01-01 Empty"),
+                        annualPartYear: nil
+                    )
+                ]
+            ),
+            .earlier(
+                throughYear: 2019,
+                years: [
+                    .init(
+                        year: 2019,
+                        entries: [
+                            .init(
+                                identity: .dated(
+                                    year: "2019",
+                                    directory: "2019-07-14 +6d Brittany"
+                                ),
+                                annualPartYear: nil
+                            )
+                        ]
+                    )
+                ]
+            ),
         ]
     }
 

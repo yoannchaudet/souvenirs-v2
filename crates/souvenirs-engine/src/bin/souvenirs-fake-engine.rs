@@ -5,6 +5,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 use souvenirs_protocol::{
     CancellationAccepted, CatalogBrowseCollection, CatalogBrowseDateGroup, CatalogBrowseMedia,
+    CatalogBrowseNavigationEntry, CatalogBrowseNavigationScope, CatalogBrowseNavigationYear,
     CatalogBrowsePart, CatalogBrowseResult, CatalogCollection, CatalogCollectionIdentity,
     CatalogCollectionPart, CatalogCollectionsResult, CatalogResult, ClientVersion, EngineMessage,
     HandshakeResult, ImportDateSource, ImportDateSourceSummary, ImportDateState, ImportDestination,
@@ -321,8 +322,12 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::ListCatalogCollections(_) => {
                         catalog_collections(&mut output, request.id)?;
                     }
-                    RequestPayload::BrowseCatalog(_) => {
-                        catalog_browse_empty(&mut output, request.id)?;
+                    RequestPayload::BrowseCatalog(parameters) => {
+                        catalog_browse_empty(
+                            &mut output,
+                            request.id,
+                            parameters.selection.is_none(),
+                        )?;
                     }
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
@@ -377,8 +382,12 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
                     }
-                    RequestPayload::BrowseCatalog(_) => {
-                        catalog_browse_empty(&mut output, request.id)?;
+                    RequestPayload::BrowseCatalog(parameters) => {
+                        catalog_browse_empty(
+                            &mut output,
+                            request.id,
+                            parameters.selection.is_none(),
+                        )?;
                     }
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
@@ -439,8 +448,12 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                     RequestPayload::InspectOperation(_) => {
                         operation_inspection(&mut output, request.id, None)?;
                     }
-                    RequestPayload::BrowseCatalog(_) => {
-                        catalog_browse_empty(&mut output, request.id)?;
+                    RequestPayload::BrowseCatalog(parameters) => {
+                        catalog_browse_empty(
+                            &mut output,
+                            request.id,
+                            parameters.selection.is_none(),
+                        )?;
                     }
                     RequestPayload::ScanImport(parameters) => {
                         scan_attempts += 1;
@@ -488,8 +501,12 @@ fn run(scenario: Scenario, mut input: impl BufRead, mut output: impl Write) -> i
                         });
                         operation_inspection(&mut output, request.id, operation)?;
                     }
-                    RequestPayload::BrowseCatalog(_) => {
-                        catalog_browse_empty(&mut output, request.id)?;
+                    RequestPayload::BrowseCatalog(parameters) => {
+                        catalog_browse_empty(
+                            &mut output,
+                            request.id,
+                            parameters.selection.is_none(),
+                        )?;
                     }
                     RequestPayload::ScanImport(parameters) => {
                         import_scan_result(&mut output, request.id, parameters.source_path)?;
@@ -732,6 +749,19 @@ fn catalog_browse(
             date_groups: vec![dated_group],
             problem: None,
         },
+        CatalogBrowseCollection::Dated {
+            identity: CatalogCollectionIdentity::Dated {
+                year: "2022".to_owned(),
+                directory: "2022-01-01 Empty".to_owned(),
+            },
+            label: "Empty".to_owned(),
+            start_date: "2022-01-01".to_owned(),
+            end_date: "2022-01-01".to_owned(),
+            media_count: 0,
+            cover_media: None,
+            date_groups: Vec::new(),
+            problem: None,
+        },
         CatalogBrowseCollection::Ongoing {
             identity: CatalogCollectionIdentity::Ongoing {
                 key: "kids".to_owned(),
@@ -779,7 +809,7 @@ fn catalog_browse(
             ],
         },
     ];
-    match selection {
+    match selection.as_ref() {
         Some(identity) => collections.retain(|collection| match collection {
             CatalogBrowseCollection::Dated {
                 identity: candidate,
@@ -788,7 +818,7 @@ fn catalog_browse(
             | CatalogBrowseCollection::Ongoing {
                 identity: candidate,
                 ..
-            } => candidate == &identity,
+            } => candidate == identity,
         }),
         None => {
             for collection in &mut collections {
@@ -802,22 +832,87 @@ fn catalog_browse(
                 }
             }
         }
-    }
-    write_message(
-        output,
-        &EngineMessage::success(
-            request_id,
-            ResponseResult::CatalogBrowse(CatalogBrowseResult { collections }),
-        ),
-    )
-}
-
-fn catalog_browse_empty(output: &mut impl Write, request_id: String) -> io::Result<()> {
+    };
+    let navigation = if selection.is_none() {
+        let dated_2019 = CatalogCollectionIdentity::Dated {
+            year: "2019".to_owned(),
+            directory: "2019-07-14 +6d Brittany".to_owned(),
+        };
+        let dated_2022 = CatalogCollectionIdentity::Dated {
+            year: "2022".to_owned(),
+            directory: "2022-01-01 Empty".to_owned(),
+        };
+        let ongoing = CatalogCollectionIdentity::Ongoing {
+            key: "kids".to_owned(),
+        };
+        vec![
+            CatalogBrowseNavigationScope::AllPhotos,
+            CatalogBrowseNavigationScope::Year {
+                year: 2025,
+                entries: vec![CatalogBrowseNavigationEntry {
+                    identity: ongoing.clone(),
+                    annual_part_year: Some(2025),
+                }],
+            },
+            CatalogBrowseNavigationScope::Year {
+                year: 2024,
+                entries: vec![CatalogBrowseNavigationEntry {
+                    identity: ongoing.clone(),
+                    annual_part_year: Some(2024),
+                }],
+            },
+            CatalogBrowseNavigationScope::Year {
+                year: 2022,
+                entries: vec![CatalogBrowseNavigationEntry {
+                    identity: dated_2022,
+                    annual_part_year: None,
+                }],
+            },
+            CatalogBrowseNavigationScope::Earlier {
+                through_year: 2019,
+                years: vec![CatalogBrowseNavigationYear {
+                    year: 2019,
+                    entries: vec![
+                        CatalogBrowseNavigationEntry {
+                            identity: dated_2019,
+                            annual_part_year: None,
+                        },
+                        CatalogBrowseNavigationEntry {
+                            identity: ongoing,
+                            annual_part_year: Some(2019),
+                        },
+                    ],
+                }],
+            },
+        ]
+    } else {
+        Vec::new()
+    };
     write_message(
         output,
         &EngineMessage::success(
             request_id,
             ResponseResult::CatalogBrowse(CatalogBrowseResult {
+                navigation,
+                collections,
+            }),
+        ),
+    )
+}
+
+fn catalog_browse_empty(
+    output: &mut impl Write,
+    request_id: String,
+    unscoped: bool,
+) -> io::Result<()> {
+    write_message(
+        output,
+        &EngineMessage::success(
+            request_id,
+            ResponseResult::CatalogBrowse(CatalogBrowseResult {
+                navigation: unscoped
+                    .then_some(vec![CatalogBrowseNavigationScope::AllPhotos])
+                    .unwrap_or_default(),
                 collections: Vec::new(),
             }),
         ),

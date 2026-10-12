@@ -64,6 +64,14 @@ The application uses system materials, controls, focus behavior, and reduced-mot
 
 Text can increase the height of progress cards and recovery sheets when accessibility settings require more space.
 
+Archive navigation uses one system sidebar selection.
+The sidebar contains **All Photos**, the recent year scopes, and **Earlier**.
+Arrow keys move the sidebar selection when the sidebar has keyboard focus.
+Selecting a scope replaces the overview without moving keyboard or accessibility focus.
+An asynchronous archive refresh preserves a valid selection.
+It falls back to **All Photos** when the selected scope no longer exists.
+The refresh must not move keyboard or accessibility focus.
+
 The recovery sheet keeps the primary action visible but disabled while the source is unavailable.
 This behavior preserves the mockup hierarchy and exposes the unavailable action to assistive technology.
 
@@ -216,10 +224,11 @@ Each component fits in an unsigned 64-bit integer.
 A macOS client accepts the engine when its client version is equal to or newer than this minimum.
 A client rejects an engine that requires a newer client version.
 The protocol version remains the wire compatibility boundary.
+Protocol version 8 does not change saved import plan versions or their digest contracts.
 
 The Rust types generate a committed JSON Schema.
 Swift protocol fixtures must validate against this schema.
-Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v7.json`.
+Run `just protocol-schema` to regenerate `crates/souvenirs-protocol/schema/v8.json`.
 
 The `catalog.collections` query returns engine-owned collection identities.
 A dated identity contains the exact year directory and collection directory.
@@ -229,9 +238,23 @@ The earliest annual part supplies the ongoing display label.
 Dated collections sort by date range, label, and exact identity.
 Ongoing collections follow dated collections and sort by collision key.
 
-The `catalog.browse` query returns manifest-admitted originals for archive presentation.
-It preserves the same collection identities, ranges, ongoing grouping, and annual part directories.
-An unscoped query returns all collection counts and one cover item per collection part.
+The `catalog.browse` query returns manifest-admitted originals and archive navigation.
+It preserves collection identities, ranges, ongoing grouping, and annual part directories.
+An unscoped query returns ordered navigation scopes and collection summaries.
+The first navigation scope is **All Photos**.
+Rust returns the three greatest represented years as descending year scopes.
+Rust returns older represented years under one **Earlier** scope.
+The **Earlier** scope keeps its year groups in descending order.
+A represented year contains a dated collection or an ongoing annual part.
+Empty and unavailable collections still represent their year.
+A dated collection uses its accepted start year.
+An ongoing collection contributes one entry for each annual part year.
+Each navigation entry contains an exact collection identity.
+An ongoing navigation entry also contains its annual part year.
+Navigation entries preserve Rust collection order within each year.
+Swift must render these scopes without regrouping collections.
+Swift uses the unscoped collection list for the **All Photos** overview.
+An identity-scoped query returns no navigation scopes.
 An identity-scoped query returns date groups and media for the exact selected collection.
 Rust groups detailed results by accepted date and returns media paths in deterministic manifest order.
 The macOS client must not reconstruct collection paths or read manifests directly.
