@@ -278,6 +278,8 @@ final class CatalogBrowseModelTests: XCTestCase {
         )
         XCTAssertFalse(groups[0].media[0].isTransient)
         XCTAssertTrue(groups[1].media[0].isTransient)
+        model.selectScope(.allPhotos)
+        XCTAssertNil(model.presentedImportCollection)
     }
 
     func testTerminalRefreshCommitsDurableLandingAndFocusAtomically() async {

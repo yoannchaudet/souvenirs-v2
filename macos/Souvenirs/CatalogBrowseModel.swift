@@ -141,7 +141,8 @@ final class CatalogBrowseModel: ObservableObject {
     var presentedImportCollection: PresentedCollection? {
         guard let transientImport,
               transientImport.reconciliation != .landed,
-              let occurrence = transientImport.occurrence else {
+              let occurrence = transientImport.occurrence,
+              selection == .collection(occurrence) else {
             return nil
         }
         let durable = detail?.identity == occurrence.identity
