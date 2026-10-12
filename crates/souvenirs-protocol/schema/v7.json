@@ -22,6 +22,208 @@
       },
       "additionalProperties": false
     },
+    "CatalogBrowseCollection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "date_groups",
+            "end_date",
+            "identity",
+            "kind",
+            "label",
+            "media_count",
+            "start_date"
+          ],
+          "properties": {
+            "cover_media": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CatalogBrowseMedia"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "date_groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CatalogBrowseDateGroup"
+              }
+            },
+            "end_date": {
+              "type": "string"
+            },
+            "identity": {
+              "$ref": "#/definitions/CatalogCollectionIdentity"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "dated"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "media_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "problem": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "start_date": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "identity",
+            "kind",
+            "label",
+            "media_count",
+            "parts"
+          ],
+          "properties": {
+            "identity": {
+              "$ref": "#/definitions/CatalogCollectionIdentity"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "ongoing"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "media_count": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "parts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CatalogBrowsePart"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CatalogBrowseDateGroup": {
+      "type": "object",
+      "required": [
+        "date",
+        "media"
+      ],
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "media": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CatalogBrowseMedia"
+          }
+        }
+      }
+    },
+    "CatalogBrowseMedia": {
+      "type": "object",
+      "required": [
+        "filename",
+        "path"
+      ],
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "CatalogBrowseParameters": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CatalogCollectionIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CatalogBrowsePart": {
+      "type": "object",
+      "required": [
+        "collection_directory",
+        "date_groups",
+        "media_count",
+        "year",
+        "year_directory"
+      ],
+      "properties": {
+        "collection_directory": {
+          "type": "string"
+        },
+        "cover_media": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CatalogBrowseMedia"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "date_groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CatalogBrowseDateGroup"
+          }
+        },
+        "media_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "problem": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "year": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "year_directory": {
+          "type": "string"
+        }
+      }
+    },
     "CatalogCollection": {
       "oneOf": [
         {
@@ -877,6 +1079,24 @@
             "method": {
               "type": "string",
               "enum": [
+                "catalog.browse"
+              ]
+            },
+            "params": {
+              "$ref": "#/definitions/CatalogBrowseParameters"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "params"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
                 "import.scan"
               ]
             },
@@ -1059,6 +1279,27 @@
               "type": "string",
               "enum": [
                 "catalog_collections"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "collections",
+            "type"
+          ],
+          "properties": {
+            "collections": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/CatalogBrowseCollection"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "catalog_browse"
               ]
             }
           }

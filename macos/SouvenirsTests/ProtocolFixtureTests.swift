@@ -30,6 +30,8 @@ final class ProtocolFixtureTests: XCTestCase {
                 .successResponse(id: "request-4", result: "operation_inspection"),
                 .request(id: "request-collections", method: "catalog.collections"),
                 .successResponse(id: "request-collections", result: "catalog_collections"),
+                .request(id: "request-browse", method: "catalog.browse"),
+                .successResponse(id: "request-browse", result: "catalog_browse"),
                 .request(id: "request-review", method: "import.review"),
                 .successResponse(id: "request-review", result: "import_review"),
                 .errorResponse(id: "request-5", code: "operation_not_found"),
@@ -45,7 +47,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsNonCanonicalFieldName() {
         assertRejected(
             """
-            {"id":"macos-handshake-1","protocol_version":6,"method":"handshake","params":{"clientVersion":"0.2.0"}}
+            {"id":"macos-handshake-1","protocol_version":7,"method":"handshake","params":{"clientVersion":"0.2.0"}}
             """,
             containing: "keys were"
         )
@@ -54,7 +56,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsUnknownEnumValue() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":6,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
+            {"kind":"event","protocol_version":7,"operation_id":"operation-1","sequence":0,"event":"advanced","name":"import.scan"}
             """,
             containing: "unsupported event type"
         )
@@ -63,7 +65,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsIncompatibleMessageShape() {
         assertRejected(
             """
-            {"kind":"response","id":"request-2","protocol_version":6,"status":"success","result":[]}
+            {"kind":"response","id":"request-2","protocol_version":7,"status":"success","result":[]}
             """,
             containing: "must be an object"
         )
@@ -72,7 +74,7 @@ final class ProtocolFixtureTests: XCTestCase {
     func testFixtureValidationRejectsJSONTypeDrift() {
         assertRejected(
             """
-            {"kind":"event","protocol_version":6,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
+            {"kind":"event","protocol_version":7,"operation_id":"operation-1","sequence":true,"event":"started","name":"import.scan"}
             """,
             containing: "must be an integer"
         )
@@ -83,7 +85,7 @@ final class ProtocolFixtureTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v6.jsonl")
+            .appendingPathComponent("crates/souvenirs-protocol/fixtures/protocol-v7.jsonl")
     }
 
     private func assertRejected(
@@ -135,15 +137,20 @@ final class ProtocolFixtureTests: XCTestCase {
             )
             XCTAssertEqual(response.kind, "response")
             XCTAssertEqual(response.id, "macos-handshake-1")
-            XCTAssertEqual(response.protocolVersion, 6)
+            XCTAssertEqual(response.protocolVersion, 7)
             XCTAssertEqual(response.status, "success")
             XCTAssertEqual(response.result.type, "handshake")
             XCTAssertEqual(response.result.engineVersion, "0.1.0")
-            XCTAssertEqual(response.result.protocolVersion, 6)
+            XCTAssertEqual(response.result.protocolVersion, 7)
             XCTAssertEqual(response.result.compatibleClientVersion, "0.2.0")
             XCTAssertEqual(
                 response.result.capabilities,
-                ["operation.cancel", "catalog.collections", "import.review"]
+                [
+                    "operation.cancel",
+                    "catalog.browse",
+                    "catalog.collections",
+                    "import.review",
+                ]
             )
         case 2:
             try assertRequest(
@@ -283,6 +290,39 @@ final class ProtocolFixtureTests: XCTestCase {
             try assertRequest(
                 data,
                 equals: RequestEnvelope(
+                    id: "request-browse",
+                    protocolVersion: EngineSupervisor.protocolVersion,
+                    method: "catalog.browse",
+                    params: CatalogBrowseParameters(
+                        path: "/Volumes/photos/Family Catalog",
+                        selection: .ongoing(key: "kids")
+                    )
+                )
+            )
+        case 12:
+            let response = try JSONDecoder().decode(
+                SuccessResponse<CatalogBrowseResult>.self,
+                from: data
+            )
+            XCTAssertEqual(response.result.type, "catalog_browse")
+            XCTAssertEqual(response.result.collections.count, 1)
+            guard case .ongoing(
+                identity: .ongoing(key: "kids"),
+                label: "Kids",
+                mediaCount: 1,
+                parts: let parts
+            ) = response.result.collections[0] else {
+                return XCTFail("Expected ongoing browse collection")
+            }
+            XCTAssertEqual(parts[0].dateGroups[0].date, "2019-03-02")
+            XCTAssertEqual(
+                parts[1].problem,
+                "The collection manifest is damaged at line 3: expected '<sha256>  <filename>'."
+            )
+        case 13:
+            try assertRequest(
+                data,
+                equals: RequestEnvelope(
                     id: "request-review",
                     protocolVersion: EngineSupervisor.protocolVersion,
                     method: "import.review",
@@ -300,7 +340,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     )
                 )
             )
-        case 12:
+        case 14:
             let response = try JSONDecoder().decode(
                 SuccessResponse<ImportReviewResult>.self,
                 from: data
@@ -320,11 +360,11 @@ final class ProtocolFixtureTests: XCTestCase {
                 response.result.review.destinationPath,
                 "/Volumes/photos/Family Catalog/2019/2019-07-14 +6d Brittany"
             )
-        case 13:
+        case 15:
             let response = try JSONDecoder().decode(ErrorResponse.self, from: data)
             XCTAssertEqual(response.error.code, "operation_not_found")
             XCTAssertEqual(response.error.message, "The operation was not found.")
-        case 14:
+        case 16:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -333,7 +373,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     payload: .started(name: "import.scan")
                 )
             )
-        case 15:
+        case 17:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -346,7 +386,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     )
                 )
             )
-        case 16:
+        case 18:
             let event = try EngineSupervisor.decodeOperationEvent(data)
             guard case .completed(let result) = event.payload else {
                 return XCTFail("Expected a completed event")
@@ -357,7 +397,7 @@ final class ProtocolFixtureTests: XCTestCase {
                 try JSONSerialization.jsonObject(with: result) as? [String: Int],
                 ["item_count": 1]
             )
-        case 17:
+        case 19:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -369,7 +409,7 @@ final class ProtocolFixtureTests: XCTestCase {
                     )
                 )
             )
-        case 18:
+        case 20:
             XCTAssertEqual(
                 try EngineSupervisor.decodeOperationEvent(data),
                 .init(
@@ -464,6 +504,12 @@ private enum ProtocolFixtureValidator {
         case "catalog.collections":
             try requireKeys(parameters, exactly: ["path"], at: "\(path).params")
             _ = try requireString(parameters, key: "path", at: "\(path).params")
+        case "catalog.browse":
+            try requireKeys(parameters, exactly: ["path", "selection"], at: "\(path).params")
+            _ = try requireString(parameters, key: "path", at: "\(path).params")
+            let selection = try requireObject(parameters, key: "selection", at: "\(path).params")
+            try requireKeys(selection, exactly: ["kind", "key"], at: "\(path).params.selection")
+            _ = try requireString(selection, key: "key", at: "\(path).params.selection")
         case "import.review":
             try requireKeys(
                 parameters,
@@ -632,6 +678,12 @@ private enum ProtocolFixtureValidator {
             for (index, value) in collections.enumerated() {
                 try validateCollection(value, at: "\(path).collections[\(index)]")
             }
+        case "catalog_browse":
+            try requireKeys(result, exactly: ["type", "collections"], at: path)
+            let collections = try requireArray(result, key: "collections", at: path)
+            for (index, value) in collections.enumerated() {
+                try validateBrowseCollection(value, at: "\(path).collections[\(index)]")
+            }
         case "import_review":
             try requireKeys(
                 result,
@@ -740,6 +792,88 @@ private enum ProtocolFixtureValidator {
             }
         default:
             throw ValidationError("\(path) has an unsupported collection kind")
+        }
+    }
+
+    private static func validateBrowseCollection(_ value: Any, at path: String) throws {
+        let collection = try requireObject(value, at: path)
+        let kind = try requireString(collection, key: "kind", at: path)
+        let identity = try requireObject(collection, key: "identity", at: path)
+        _ = try requireString(collection, key: "label", at: path)
+        _ = try requireInteger(collection, key: "media_count", at: path)
+        switch kind {
+        case "dated":
+            try requireKeys(
+                collection,
+                exactly: [
+                    "kind", "identity", "label", "start_date", "end_date",
+                    "media_count", "cover_media", "date_groups", "problem",
+                ],
+                at: path
+            )
+            try requireKeys(identity, exactly: ["kind", "year", "directory"], at: "\(path).identity")
+            guard try requireString(identity, key: "kind", at: "\(path).identity") == "dated" else {
+                throw ValidationError("\(path).identity must be dated")
+            }
+            _ = try requireString(collection, key: "start_date", at: path)
+            _ = try requireString(collection, key: "end_date", at: path)
+            try validateDateGroups(
+                try requireArray(collection, key: "date_groups", at: path),
+                at: "\(path).date_groups"
+            )
+        case "ongoing":
+            try requireKeys(
+                collection,
+                exactly: ["kind", "identity", "label", "media_count", "parts"],
+                at: path
+            )
+            try requireKeys(identity, exactly: ["kind", "key"], at: "\(path).identity")
+            guard try requireString(identity, key: "kind", at: "\(path).identity") == "ongoing" else {
+                throw ValidationError("\(path).identity must be ongoing")
+            }
+            let parts = try requireArray(collection, key: "parts", at: path)
+            for (index, value) in parts.enumerated() {
+                let partPath = "\(path).parts[\(index)]"
+                let part = try requireObject(value, at: partPath)
+                try requireKeys(
+                    part,
+                    exactly: [
+                        "year", "year_directory", "collection_directory",
+                        "media_count", "cover_media", "date_groups", "problem",
+                    ],
+                    at: partPath
+                )
+                _ = try requireInteger(part, key: "year", at: partPath)
+                _ = try requireString(part, key: "year_directory", at: partPath)
+                _ = try requireString(part, key: "collection_directory", at: partPath)
+                _ = try requireInteger(part, key: "media_count", at: partPath)
+                try validateDateGroups(
+                    try requireArray(part, key: "date_groups", at: partPath),
+                    at: "\(partPath).date_groups"
+                )
+            }
+        default:
+            throw ValidationError("\(path) has an unsupported browse collection kind")
+        }
+    }
+
+    private static func validateDateGroups(_ groups: [Any], at path: String) throws {
+        for (index, value) in groups.enumerated() {
+            let groupPath = "\(path)[\(index)]"
+            let group = try requireObject(value, at: groupPath)
+            try requireKeys(group, exactly: ["date", "media"], at: groupPath)
+            _ = try requireString(group, key: "date", at: groupPath)
+            for (mediaIndex, mediaValue) in try requireArray(
+                group,
+                key: "media",
+                at: groupPath
+            ).enumerated() {
+                let mediaPath = "\(groupPath).media[\(mediaIndex)]"
+                let media = try requireObject(mediaValue, at: mediaPath)
+                try requireKeys(media, exactly: ["filename", "path"], at: mediaPath)
+                _ = try requireString(media, key: "filename", at: mediaPath)
+                _ = try requireString(media, key: "path", at: mediaPath)
+            }
         }
     }
 

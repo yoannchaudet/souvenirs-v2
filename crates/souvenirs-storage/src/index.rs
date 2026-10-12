@@ -1,8 +1,7 @@
-use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OpenFlags};
@@ -10,6 +9,7 @@ use souvenirs_domain::names::PortableComponent;
 use souvenirs_domain::plan::{ContentDigest, ManifestFingerprint};
 
 use crate::durability::{sync_directory, sync_file};
+use crate::{read_manifest_entries, ManifestReadError, COLLECTION_MANIFEST_FILE_NAME};
 
 const INDEX_SCHEMA_VERSION: i64 = 2;
 
@@ -333,65 +333,36 @@ fn read_manifest(
     year: &str,
     collection: &str,
 ) -> Result<Vec<IndexedOriginal>, CatalogIndexError> {
-    let file = File::open(manifest_path).map_err(|source| CatalogIndexError::Io {
-        action: "open catalog manifest",
-        path: manifest_path.to_path_buf(),
-        source,
-    })?;
-    let mut filenames = BTreeSet::new();
-    let mut previous_filename: Option<String> = None;
-    let mut originals = Vec::new();
-    for (line_index, line) in BufReader::new(file).lines().enumerate() {
-        let line_number = line_index + 1;
-        let line = line.map_err(|source| CatalogIndexError::Io {
-            action: "read catalog manifest",
-            path: manifest_path.to_path_buf(),
-            source,
-        })?;
-        let Some((digest, filename)) = line.split_once("  ") else {
-            return Err(invalid_manifest(
-                manifest_path,
-                line_number,
-                "expected '<sha256>  <filename>'",
-            ));
-        };
-        let digest = ContentDigest::parse(digest.to_owned())
-            .map_err(|_| invalid_manifest(manifest_path, line_number, "invalid SHA-256 digest"))?;
-        let filename = PortableComponent::new(filename).map_err(|error| {
-            invalid_manifest(
-                manifest_path,
-                line_number,
-                format!("invalid filename: {error}"),
-            )
-        })?;
-        if !filenames.insert(filename.as_str().to_owned()) {
-            return Err(invalid_manifest(
-                manifest_path,
-                line_number,
-                "duplicate filename",
-            ));
-        }
-        if previous_filename
-            .as_deref()
-            .is_some_and(|previous| previous.as_bytes() >= filename.as_str().as_bytes())
-        {
-            return Err(invalid_manifest(
-                manifest_path,
-                line_number,
-                "filenames are not in strict byte order",
-            ));
-        }
-        previous_filename = Some(filename.as_str().to_owned());
-        originals.push(IndexedOriginal {
-            digest,
+    Ok(read_manifest_entries(manifest_path)
+        .map_err(|error| match error {
+            ManifestReadError::Invalid { path, line, reason } => {
+                CatalogIndexError::InvalidManifest {
+                    path,
+                    line: Some(line),
+                    reason,
+                }
+            }
+            ManifestReadError::Io { path, source } => CatalogIndexError::Io {
+                action: "read catalog manifest",
+                path,
+                source,
+            },
+            ManifestReadError::NotRegular { path } => CatalogIndexError::InvalidManifest {
+                path,
+                line: None,
+                reason: format!("{COLLECTION_MANIFEST_FILE_NAME} is not a regular file"),
+            },
+        })?
+        .into_iter()
+        .map(|entry| IndexedOriginal {
+            digest: entry.digest,
             path: vec![
                 year.to_owned(),
                 collection.to_owned(),
-                filename.as_str().to_owned(),
+                entry.filename.as_str().to_owned(),
             ],
-        });
-    }
-    Ok(originals)
+        })
+        .collect())
 }
 
 fn sorted_directories(
@@ -477,14 +448,6 @@ fn remove_if_present(path: &Path) -> Result<(), CatalogIndexError> {
             path: path.to_path_buf(),
             source,
         }),
-    }
-}
-
-fn invalid_manifest(path: &Path, line: usize, reason: impl Into<String>) -> CatalogIndexError {
-    CatalogIndexError::InvalidManifest {
-        path: path.to_path_buf(),
-        line: Some(line),
-        reason: reason.into(),
     }
 }
 

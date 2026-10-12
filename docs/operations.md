@@ -13,10 +13,15 @@ These are proposed operations, not command names.
 
 | Operation | Purpose |
 | --- | --- |
-| Browse catalog | List collections, items, and findings from the [filesystem](catalog.md). |
+| Browse catalog | List collections and manifest-admitted originals from the [filesystem](catalog.md). |
 | Check integrity | Verify collection directories against their [manifests](storage.md#integrity-checks). |
 | Report duplicates | List byte-identical originals inside the catalog or between a source and the catalog. |
 | Read history | Read completed and unfinished [journals](storage.md#journal). |
+
+The browse operation returns counts and cover items before it loads one selected collection.
+Each returned media path represents a manifest record.
+The file can be missing when external changes make the catalog inconsistent.
+The application must show a missing-file state when it cannot load a returned path.
 
 ### Change
 

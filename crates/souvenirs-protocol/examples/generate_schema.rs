@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/v6.json");
+    let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema/v7.json");
     let schema = serde_json::to_string_pretty(&souvenirs_protocol::protocol_schema())
         .expect("protocol schema should serialize");
     fs::create_dir_all(output.parent().expect("schema path should have a parent"))

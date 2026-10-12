@@ -9,6 +9,10 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use souvenirs_application::{
+    CatalogBrowseCollection as ApplicationBrowseCollection,
+    CatalogBrowseDateGroup as ApplicationBrowseDateGroup,
+    CatalogBrowseMedia as ApplicationBrowseMedia,
+    CatalogBrowseSelection as ApplicationBrowseSelection,
     CatalogCollection as ApplicationCollection, CatalogIntent as ApplicationIntent, CatalogService,
     DateResolution, ExistingCollectionIdentity, ImportCancellation,
     ImportDateSource as ApplicationDateSource, ImportDateState as ApplicationDateState,
@@ -18,17 +22,18 @@ use souvenirs_application::{
     RecoveryOutcome,
 };
 use souvenirs_protocol::{
-    CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart, CatalogCollectionsResult,
-    CatalogIntent, CatalogResult, ClientVersion, EngineMessage, HandshakeResult,
-    ImportDateResolution, ImportDateSource, ImportDateSourceSummary, ImportDateState,
-    ImportDestination, ImportPreflightCheck, ImportPreflightEvidence, ImportReviewResult,
-    ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
+    CatalogBrowseCollection, CatalogBrowseDateGroup, CatalogBrowseMedia, CatalogBrowsePart,
+    CatalogBrowseResult, CatalogCollection, CatalogCollectionIdentity, CatalogCollectionPart,
+    CatalogCollectionsResult, CatalogIntent, CatalogResult, ClientVersion, EngineMessage,
+    HandshakeResult, ImportDateResolution, ImportDateSource, ImportDateSourceSummary,
+    ImportDateState, ImportDestination, ImportPreflightCheck, ImportPreflightEvidence,
+    ImportReviewResult, ImportScanResult, OperationAccepted, OperationEvent, OperationEventPayload,
     OperationInspectionResult, ProtocolError, Request, RequestPayload, ResponseResult,
     StartOperationParameters, UnfinishedOperationActivityTime, UnfinishedOperationActivityTimeKind,
-    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_COLLECTIONS_METHOD,
-    CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD, CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD,
-    IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION, OPERATION_INSPECT_METHOD, PROTOCOL_VERSION,
-    START_OPERATION_METHOD,
+    UnfinishedOperationResult, CANCEL_OPERATION_METHOD, CATALOG_BROWSE_METHOD,
+    CATALOG_COLLECTIONS_METHOD, CATALOG_CREATE_METHOD, CATALOG_OPEN_METHOD,
+    CATALOG_VALIDATE_METHOD, IMPORT_REVIEW_METHOD, IMPORT_SCAN_METHOD, MINIMUM_CLIENT_VERSION,
+    OPERATION_INSPECT_METHOD, PROTOCOL_VERSION, START_OPERATION_METHOD,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -348,6 +353,7 @@ impl Connection {
                         compatible_client_version: MINIMUM_CLIENT_VERSION.to_owned(),
                         capabilities: vec![
                             CANCEL_OPERATION_METHOD.to_owned(),
+                            CATALOG_BROWSE_METHOD.to_owned(),
                             CATALOG_COLLECTIONS_METHOD.to_owned(),
                             CATALOG_VALIDATE_METHOD.to_owned(),
                             CATALOG_CREATE_METHOD.to_owned(),
@@ -390,6 +396,13 @@ impl Connection {
                 request.id,
                 CatalogService::collections(parameters.path),
             ),
+            RequestPayload::BrowseCatalog(parameters) => {
+                let selection = parameters.selection.map(application_browse_selection);
+                catalog_browse_response(
+                    request.id,
+                    CatalogService::browse(parameters.path, selection.as_ref()),
+                )
+            }
             RequestPayload::ScanImport(parameters) => import_scan_response(
                 request.id,
                 ImportPlanningService::scan_with_utc_offset(
@@ -515,6 +528,27 @@ impl Connection {
     }
 }
 
+fn catalog_browse_response(
+    request_id: String,
+    result: Result<Vec<ApplicationBrowseCollection>, souvenirs_application::CatalogServiceError>,
+) -> EngineMessage {
+    match result {
+        Ok(collections) => EngineMessage::success(
+            request_id,
+            ResponseResult::CatalogBrowse(CatalogBrowseResult {
+                collections: collections
+                    .into_iter()
+                    .map(protocol_browse_collection)
+                    .collect(),
+            }),
+        ),
+        Err(error) => EngineMessage::error(
+            Some(request_id),
+            ProtocolError::new(error.code(), error.to_string()),
+        ),
+    }
+}
+
 fn catalog_collections_response(
     request_id: String,
     result: Result<Vec<ApplicationCollection>, souvenirs_application::CatalogServiceError>,
@@ -530,6 +564,79 @@ fn catalog_collections_response(
             Some(request_id),
             ProtocolError::new(error.code(), error.to_string()),
         ),
+    }
+}
+
+fn protocol_browse_collection(collection: ApplicationBrowseCollection) -> CatalogBrowseCollection {
+    match collection {
+        ApplicationBrowseCollection::Dated {
+            identity,
+            label,
+            start_date,
+            end_date,
+            media_count,
+            cover_media,
+            date_groups,
+            problem,
+        } => CatalogBrowseCollection::Dated {
+            identity: protocol_identity(identity),
+            label,
+            start_date: start_date.to_string(),
+            end_date: end_date.to_string(),
+            media_count,
+            cover_media: cover_media.map(protocol_browse_media),
+            date_groups: date_groups.into_iter().map(protocol_date_group).collect(),
+            problem,
+        },
+        ApplicationBrowseCollection::Ongoing {
+            identity,
+            label,
+            media_count,
+            parts,
+        } => CatalogBrowseCollection::Ongoing {
+            identity: protocol_identity(identity),
+            label,
+            media_count,
+            parts: parts
+                .into_iter()
+                .map(|part| CatalogBrowsePart {
+                    year: part.year,
+                    year_directory: part.year_directory,
+                    collection_directory: part.collection_directory,
+                    media_count: part.media_count,
+                    cover_media: part.cover_media.map(protocol_browse_media),
+                    date_groups: part
+                        .date_groups
+                        .into_iter()
+                        .map(protocol_date_group)
+                        .collect(),
+                    problem: part.problem,
+                })
+                .collect(),
+        },
+    }
+}
+
+fn protocol_date_group(group: ApplicationBrowseDateGroup) -> CatalogBrowseDateGroup {
+    CatalogBrowseDateGroup {
+        date: group.date.to_string(),
+        media: group.media.into_iter().map(protocol_browse_media).collect(),
+    }
+}
+
+fn protocol_browse_media(media: ApplicationBrowseMedia) -> CatalogBrowseMedia {
+    CatalogBrowseMedia {
+        filename: media.filename,
+        path: media.path,
+    }
+}
+
+fn application_browse_selection(identity: CatalogCollectionIdentity) -> ApplicationBrowseSelection {
+    match identity {
+        CatalogCollectionIdentity::Dated { year, directory } => {
+            ApplicationBrowseSelection::Dated { year, directory }
+        }
+        CatalogCollectionIdentity::Ongoing { key } => ApplicationBrowseSelection::Ongoing { key },
     }
 }
 
@@ -1116,6 +1223,7 @@ mod tests {
                 "compatible_client_version": "0.2.0",
                 "capabilities": [
                     "operation.cancel",
+                    "catalog.browse",
                     "catalog.collections",
                     "catalog.validate",
                     "catalog.create",
@@ -1461,6 +1569,50 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn catalog_browse_query_returns_admitted_media_paths() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        CatalogService::create(directory.path(), "Catalog").unwrap();
+        let collection = directory.path().join("2024/2024-07-14 Brittany");
+        fs::create_dir_all(&collection).unwrap();
+        fs::write(
+            collection.join("SHA256SUMS"),
+            concat!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
+                "2024-07-14 10-11-12 001.jpg\n"
+            ),
+        )
+        .unwrap();
+        let input = format!(
+            "{}{}",
+            request("request-1", "handshake", json!({"client_version": "0.2.0"})),
+            request(
+                "request-2",
+                "catalog.browse",
+                json!({
+                    "path": directory.path().to_string_lossy(),
+                    "selection": {
+                        "kind": "dated",
+                        "year": "2024",
+                        "directory": "2024-07-14 Brittany"
+                    }
+                })
+            )
+        );
+
+        let responses = run_lines(input);
+
+        assert_eq!(responses[1]["result"]["type"], "catalog_browse");
+        assert_eq!(responses[1]["result"]["collections"][0]["media_count"], 1);
+        assert_eq!(
+            responses[1]["result"]["collections"][0]["date_groups"][0]["media"][0]["path"],
+            collection
+                .join("2024-07-14 10-11-12 001.jpg")
+                .to_string_lossy()
+                .as_ref()
         );
     }
 

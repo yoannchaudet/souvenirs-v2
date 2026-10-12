@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public actor EngineSupervisor {
-    public static let protocolVersion: UInt32 = 6
+    public static let protocolVersion: UInt32 = 7
     public static let protocolClientVersion = "0.2.0"
 
     public struct Handshake: Equatable, Sendable {
@@ -187,6 +187,162 @@ public actor EngineSupervisor {
                 try container.encode(Kind.ongoing, forKey: .kind)
                 try container.encode(identity, forKey: .identity)
                 try container.encode(label, forKey: .label)
+                try container.encode(parts, forKey: .parts)
+            }
+        }
+    }
+
+    public struct CatalogBrowseMedia: Codable, Equatable, Sendable {
+        public let filename: String
+        public let path: String
+    }
+
+    public struct CatalogBrowseDateGroup: Codable, Equatable, Sendable {
+        public let date: String
+        public let media: [CatalogBrowseMedia]
+    }
+
+    public struct CatalogBrowsePart: Codable, Equatable, Sendable {
+        public let year: Int
+        public let yearDirectory: String
+        public let collectionDirectory: String
+        public let mediaCount: Int
+        public let coverMedia: CatalogBrowseMedia?
+        public let dateGroups: [CatalogBrowseDateGroup]
+        public let problem: String?
+
+        enum CodingKeys: String, CodingKey {
+            case year
+            case yearDirectory = "year_directory"
+            case collectionDirectory = "collection_directory"
+            case mediaCount = "media_count"
+            case coverMedia = "cover_media"
+            case dateGroups = "date_groups"
+            case problem
+        }
+    }
+
+    public enum CatalogBrowseCollection: Codable, Equatable, Sendable {
+        case dated(
+            identity: CatalogCollectionIdentity,
+            label: String,
+            startDate: String,
+            endDate: String,
+            mediaCount: Int,
+            coverMedia: CatalogBrowseMedia?,
+            dateGroups: [CatalogBrowseDateGroup],
+            problem: String?
+        )
+        case ongoing(
+            identity: CatalogCollectionIdentity,
+            label: String,
+            mediaCount: Int,
+            parts: [CatalogBrowsePart]
+        )
+
+        public var identity: CatalogCollectionIdentity {
+            switch self {
+            case .dated(let identity, _, _, _, _, _, _, _),
+                 .ongoing(let identity, _, _, _):
+                return identity
+            }
+        }
+
+        private enum Kind: String, Codable {
+            case dated
+            case ongoing
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case identity
+            case label
+            case startDate = "start_date"
+            case endDate = "end_date"
+            case mediaCount = "media_count"
+            case coverMedia = "cover_media"
+            case dateGroups = "date_groups"
+            case problem
+            case parts
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let identity = try container.decode(
+                CatalogCollectionIdentity.self,
+                forKey: .identity
+            )
+            let label = try container.decode(String.self, forKey: .label)
+            let mediaCount = try container.decode(Int.self, forKey: .mediaCount)
+            switch try container.decode(Kind.self, forKey: .kind) {
+            case .dated:
+                guard case .dated = identity else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .identity,
+                        in: container,
+                        debugDescription: "A dated browse collection requires a dated identity"
+                    )
+                }
+                self = try .dated(
+                    identity: identity,
+                    label: label,
+                    startDate: container.decode(String.self, forKey: .startDate),
+                    endDate: container.decode(String.self, forKey: .endDate),
+                    mediaCount: mediaCount,
+                    coverMedia: container.decodeIfPresent(
+                        CatalogBrowseMedia.self,
+                        forKey: .coverMedia
+                    ),
+                    dateGroups: container.decode(
+                        [CatalogBrowseDateGroup].self,
+                        forKey: .dateGroups
+                    ),
+                    problem: container.decodeIfPresent(String.self, forKey: .problem)
+                )
+            case .ongoing:
+                guard case .ongoing = identity else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .identity,
+                        in: container,
+                        debugDescription: "An ongoing browse collection requires an ongoing identity"
+                    )
+                }
+                self = try .ongoing(
+                    identity: identity,
+                    label: label,
+                    mediaCount: mediaCount,
+                    parts: container.decode([CatalogBrowsePart].self, forKey: .parts)
+                )
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .dated(
+                let identity,
+                let label,
+                let startDate,
+                let endDate,
+                let mediaCount,
+                let coverMedia,
+                let dateGroups,
+                let problem
+            ):
+                try container.encode(Kind.dated, forKey: .kind)
+                try container.encode(identity, forKey: .identity)
+                try container.encode(label, forKey: .label)
+                try container.encode(startDate, forKey: .startDate)
+                try container.encode(endDate, forKey: .endDate)
+                try container.encode(mediaCount, forKey: .mediaCount)
+                try container.encodeIfPresent(coverMedia, forKey: .coverMedia)
+                try container.encode(dateGroups, forKey: .dateGroups)
+                try container.encodeIfPresent(problem, forKey: .problem)
+            case .ongoing(let identity, let label, let mediaCount, let parts):
+                try container.encode(Kind.ongoing, forKey: .kind)
+                try container.encode(identity, forKey: .identity)
+                try container.encode(label, forKey: .label)
+                try container.encode(mediaCount, forKey: .mediaCount)
                 try container.encode(parts, forKey: .parts)
             }
         }
@@ -895,6 +1051,23 @@ public actor EngineSupervisor {
         guard result.type == "catalog_collections" else {
             throw SupervisorError.malformedResponse(
                 "The response result type is not catalog_collections"
+            )
+        }
+        return result.collections
+    }
+
+    public func catalogBrowse(
+        path: String,
+        selection: CatalogCollectionIdentity? = nil
+    ) async throws -> [CatalogBrowseCollection] {
+        let result: CatalogBrowseResult = try await sendRequest(
+            method: "catalog.browse",
+            parameters: CatalogBrowseParameters(path: path, selection: selection),
+            timeout: .seconds(120)
+        )
+        guard result.type == "catalog_browse" else {
+            throw SupervisorError.malformedResponse(
+                "The response result type is not catalog_browse"
             )
         }
         return result.collections
@@ -1980,6 +2153,11 @@ struct CatalogPathParameters: Encodable, Sendable {
     let path: String
 }
 
+struct CatalogBrowseParameters: Encodable, Sendable {
+    let path: String
+    let selection: EngineSupervisor.CatalogCollectionIdentity?
+}
+
 private struct CreateCatalogParameters: Encodable, Sendable {
     let path: String
     let displayName: String
@@ -2091,6 +2269,11 @@ private struct CatalogResult: Decodable, Sendable {
 struct CatalogCollectionsResult: Decodable, Sendable {
     let type: String
     let collections: [EngineSupervisor.CatalogCollection]
+}
+
+struct CatalogBrowseResult: Decodable, Sendable {
+    let type: String
+    let collections: [EngineSupervisor.CatalogBrowseCollection]
 }
 
 private struct ImportScanResult: Decodable, Sendable {
