@@ -611,11 +611,11 @@ final class SouvenirsUITests: XCTestCase {
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         XCTAssertEqual(card.label, "EOS_DIGITAL")
         XCTAssertEqual(card.value as? String, "Connected, ready to review")
-        XCTAssertTrue(
-            app.descendants(matching: .any)["connected-source-summary"].exists
-        )
-        XCTAssertTrue(
-            app.staticTexts["1 removable source connected · EOS_DIGITAL"].exists
+        let summary = app.descendants(matching: .any)["connected-source-summary"]
+        XCTAssertTrue(summary.exists)
+        XCTAssertEqual(
+            summary.value as? String,
+            "1 removable source connected · EOS_DIGITAL"
         )
         XCTAssertTrue(app.buttons["choose-import-folder"].isEnabled)
 
@@ -643,20 +643,24 @@ final class SouvenirsUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["souvenirs-welcome"].waitForExistence(timeout: 5))
         app.buttons["open-catalog"].click()
-        XCTAssertTrue(
-            app.staticTexts[
-                "2 removable sources connected · BACKUP_CARD selected"
-            ].waitForExistence(timeout: 5)
+        let summary = app.descendants(matching: .any)["connected-source-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            summary.value as? String,
+            "2 removable sources connected · BACKUP_CARD selected"
         )
 
         app.menuButtons["connected-source-selector"].click()
         app.menuItems["EOS_DIGITAL"].click()
 
-        XCTAssertTrue(
-            app.staticTexts[
+        expectation(
+            for: NSPredicate(
+                format: "value == %@",
                 "2 removable sources connected · EOS_DIGITAL selected"
-            ].waitForExistence(timeout: 5)
+            ),
+            evaluatedWith: summary
         )
+        waitForExpectations(timeout: 5)
     }
 
     @MainActor
@@ -679,7 +683,7 @@ final class SouvenirsUITests: XCTestCase {
             app.staticTexts["connected-source-status"].waitForExistence(timeout: 5)
         )
         XCTAssertEqual(
-            app.staticTexts["connected-source-status"].label,
+            app.descendants(matching: .any)["connected-source-status"].value as? String,
             "No readable removable source connected"
         )
         XCTAssertFalse(app.sheets.firstMatch.exists)

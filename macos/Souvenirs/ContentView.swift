@@ -453,17 +453,23 @@ struct ContentView: View {
     private var connectedSourceSidebar: some View {
         if let source = model.selectedConnectedSource {
             HStack(spacing: 8) {
-                Image(systemName: "externaldrive.fill")
-                    .foregroundStyle(.blue)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(source.name)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
-                    Text("Ready to review")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                HStack(spacing: 8) {
+                    Image(systemName: "externaldrive.fill")
+                        .foregroundStyle(.blue)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(source.name)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                        Text("Ready to review")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("connected-source-card")
+                .accessibilityLabel(source.name)
+                .accessibilityValue("Connected, ready to review")
                 Spacer(minLength: 0)
                 if model.connectedSources.count > 1 {
                     Menu {
@@ -498,10 +504,6 @@ struct ContentView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(.separator.opacity(0.55))
             }
-            .accessibilityIdentifier("connected-source-card")
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(source.name)
-            .accessibilityValue("Connected, ready to review")
         } else {
             VStack(alignment: .leading, spacing: 5) {
                 Text(sourceStatusLine)
@@ -511,6 +513,8 @@ struct ContentView: View {
                     )
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("connected-source-status")
+                    .accessibilityLabel("Connected source status")
+                    .accessibilityValue(sourceStatusLine)
                 Button(
                     model.sourceDiscoveryError == nil ? "Refresh" : "Try Again"
                 ) {
@@ -555,6 +559,8 @@ struct ContentView: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("connected-source-summary")
+            .accessibilityLabel("Connected source")
+            .accessibilityValue(sourceSummary(source))
             Spacer(minLength: 8)
             Button("Review Import…") {
                 let requestID = UUID()
