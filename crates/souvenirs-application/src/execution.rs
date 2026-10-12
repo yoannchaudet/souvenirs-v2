@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -727,9 +727,12 @@ fn source_snapshot(
 fn emit_recovered_media(
     plan: &ExecutionPlan,
     destination: PathBuf,
+    legacy_file_progress: bool,
     total_media: usize,
+    total_units: usize,
     emitted_media: &mut BTreeSet<PathBuf>,
     completed_media: &mut usize,
+    completed_units: &mut usize,
     update: &mut impl FnMut(OperationUpdate),
 ) -> Result<(), ImportExecutionError> {
     if !emitted_media.insert(destination.clone()) {
@@ -745,19 +748,29 @@ fn emit_recovered_media(
                 destination.display()
             ))
         })?;
+    if legacy_file_progress {
+        *completed_units += 1;
+        update(OperationUpdate::Progress(OperationProgress {
+            completed_units: *completed_units as u64,
+            total_units: total_units as u64,
+            message: format!("Recovered {completed_units} of {total_units}"),
+        }));
+        return Ok(());
+    }
     let Some(media) = recovery_operation_media(plan, copy)? else {
         return Ok(());
     };
     *completed_media += 1;
+    *completed_units += 1;
     update(OperationUpdate::MediaVerified(OperationMediaVerified {
         media,
         completed_media: *completed_media as u64,
         total_media: total_media as u64,
     }));
     update(OperationUpdate::Progress(OperationProgress {
-        completed_units: *completed_media as u64,
-        total_units: total_media as u64,
-        message: format!("Recovered {completed_media} of {total_media}"),
+        completed_units: *completed_units as u64,
+        total_units: total_units as u64,
+        message: format!("Recovered {completed_units} of {total_units}"),
     }));
     Ok(())
 }
@@ -796,16 +809,29 @@ impl ImportRecoveryService {
         let (journal_path, mut plan, published) = unfinished_plan(&layout, operation_id)?;
         plan.catalog_path = catalog_path.to_path_buf();
         let total_media = media_count(&plan);
+        let legacy_file_progress = plan
+            .copies
+            .iter()
+            .any(|copy| is_media_copy(copy) && copy.accepted_datetime.is_none());
+        let total_units = if legacy_file_progress {
+            plan.copies.len()
+        } else {
+            total_media
+        };
         let mut emitted_media = BTreeSet::new();
         let mut completed_media = 0;
+        let mut completed_units = 0;
         for copy in &plan.copies {
             if published
                 .get(&copy.destination)
                 .is_some_and(|state| state.published)
             {
-                if let Some(media) = recovery_operation_media(&plan, copy)? {
+                emitted_media.insert(copy.destination.clone());
+                if legacy_file_progress {
+                    completed_units += 1;
+                } else if let Some(media) = recovery_operation_media(&plan, copy)? {
                     completed_media += 1;
-                    emitted_media.insert(copy.destination.clone());
+                    completed_units += 1;
                     update(OperationUpdate::MediaVerified(OperationMediaVerified {
                         media,
                         completed_media: completed_media as u64,
@@ -815,9 +841,9 @@ impl ImportRecoveryService {
             }
         }
         update(OperationUpdate::Progress(OperationProgress {
-            completed_units: completed_media as u64,
-            total_units: total_media as u64,
-            message: format!("Recovered {completed_media} of {total_media}"),
+            completed_units: completed_units as u64,
+            total_units: total_units as u64,
+            message: format!("Recovered {completed_units} of {total_units}"),
         }));
         if mode == ImportRecoveryMode::Resume {
             if let Err(error) = validate_recovery_sources(&layout, &plan, &published) {
@@ -833,7 +859,7 @@ impl ImportRecoveryService {
                 return Err(error);
             }
         }
-        let (mut outcome, mut cancelled_media_count) = match mode {
+        let (mut outcome, mut cancelled_unit_count) = match mode {
             ImportRecoveryMode::Resume => {
                 let request =
                     recovery_request(&plan, RecoveryMode::Resume, plan.manifest.contents.clone());
@@ -851,9 +877,12 @@ impl ImportRecoveryService {
                                         if let Err(error) = emit_recovered_media(
                                             &plan,
                                             destination,
+                                            legacy_file_progress,
                                             total_media,
+                                            total_units,
                                             &mut emitted_media,
                                             &mut completed_media,
+                                            &mut completed_units,
                                             &mut update,
                                         ) {
                                             checkpoint_error = Some(error);
@@ -878,7 +907,7 @@ impl ImportRecoveryService {
                 (outcome, 0)
             }
             ImportRecoveryMode::Cancel => {
-                let (manifest_contents, _, media_count) =
+                let (manifest_contents, copied_file_count, media_count) =
                     cancellation_manifest(&layout, &plan, &published)?;
                 let request = recovery_request(
                     &plan,
@@ -899,9 +928,12 @@ impl ImportRecoveryService {
                                         if let Err(error) = emit_recovered_media(
                                             &plan,
                                             destination,
+                                            legacy_file_progress,
                                             total_media,
+                                            total_units,
                                             &mut emitted_media,
                                             &mut completed_media,
+                                            &mut completed_units,
                                             &mut update,
                                         ) {
                                             checkpoint_error = Some(error);
@@ -922,14 +954,21 @@ impl ImportRecoveryService {
                 if let Some(error) = checkpoint_error {
                     return Err(error);
                 }
-                (recovered, media_count)
+                (
+                    recovered,
+                    if legacy_file_progress {
+                        copied_file_count
+                    } else {
+                        media_count
+                    },
+                )
             }
         };
         if outcome == CancellableRecoveryOutcome::Interrupted {
             let (current_journal_path, mut current_plan, current_published) =
                 unfinished_plan(&layout, operation_id)?;
             current_plan.catalog_path = catalog_path.to_path_buf();
-            let (manifest_contents, _, media_count) =
+            let (manifest_contents, copied_file_count, media_count) =
                 cancellation_manifest(&layout, &current_plan, &current_published)?;
             let request = recovery_request(
                 &current_plan,
@@ -950,9 +989,12 @@ impl ImportRecoveryService {
                                     if let Err(error) = emit_recovered_media(
                                         &current_plan,
                                         destination,
+                                        legacy_file_progress,
                                         total_media,
+                                        total_units,
                                         &mut emitted_media,
                                         &mut completed_media,
+                                        &mut completed_units,
                                         &mut update,
                                     ) {
                                         checkpoint_error = Some(error);
@@ -973,16 +1015,20 @@ impl ImportRecoveryService {
             if let Some(error) = checkpoint_error {
                 return Err(error);
             }
-            cancelled_media_count = media_count;
+            cancelled_unit_count = if legacy_file_progress {
+                copied_file_count
+            } else {
+                media_count
+            };
         }
         lock.release()
             .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
         let copied_count = match outcome {
             CancellableRecoveryOutcome::Finished(souvenirs_storage::RecoveryOutcome::Completed) => {
-                total_media
+                total_units
             }
             CancellableRecoveryOutcome::Finished(souvenirs_storage::RecoveryOutcome::Cancelled) => {
-                cancelled_media_count
+                cancelled_unit_count
             }
             CancellableRecoveryOutcome::Interrupted => {
                 unreachable!("interrupted recovery is finalized before releasing the catalog lock")
@@ -990,7 +1036,7 @@ impl ImportRecoveryService {
         };
         update(OperationUpdate::Progress(OperationProgress {
             completed_units: copied_count as u64,
-            total_units: total_media as u64,
+            total_units: total_units as u64,
             message: match outcome {
                 CancellableRecoveryOutcome::Finished(
                     souvenirs_storage::RecoveryOutcome::Completed,
@@ -1086,33 +1132,47 @@ fn recovery_request(
 }
 
 struct RecoveryProgressReader {
-    journal_path: PathBuf,
+    reader: BufReader<File>,
 }
 
 impl RecoveryProgressReader {
     fn new(journal_path: &Path) -> Result<Self, ImportExecutionError> {
+        let mut file = File::open(journal_path).map_err(|source| ImportExecutionError::Io {
+            path: journal_path.to_path_buf(),
+            source,
+        })?;
+        file.seek(SeekFrom::End(0))
+            .map_err(|source| ImportExecutionError::Io {
+                path: journal_path.to_path_buf(),
+                source,
+            })?;
         Ok(Self {
-            journal_path: journal_path.to_path_buf(),
+            reader: BufReader::new(file),
         })
     }
 
     fn refresh(&mut self) -> Result<Vec<PathBuf>, ImportExecutionError> {
-        read_operation_records(&self.journal_path)
-            .map_err(|error| ImportExecutionError::Storage(error.to_string()))
-            .map(|records| {
-                records
-                    .into_iter()
-                    .filter_map(|record| match record {
-                        OperationRecord::Transition {
-                            transition:
-                                souvenirs_storage::DurableTransition::CopyPublished {
-                                    destination, ..
-                                },
-                        } => Some(destination),
-                        _ => None,
-                    })
-                    .collect()
-            })
+        let mut destinations = Vec::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if self
+                .reader
+                .read_line(&mut line)
+                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?
+                == 0
+            {
+                return Ok(destinations);
+            }
+            let record = serde_json::from_str::<OperationRecord>(&line)
+                .map_err(|error| ImportExecutionError::Storage(error.to_string()))?;
+            if let OperationRecord::Transition {
+                transition: souvenirs_storage::DurableTransition::CopyPublished { destination, .. },
+            } = record
+            {
+                destinations.push(destination);
+            }
+        }
     }
 }
 
@@ -2168,16 +2228,33 @@ mod tests {
         )
         .unwrap();
 
+        let mut updates = Vec::new();
         let (outcome, result) = ImportRecoveryService::recover(
             &fixture.catalog,
             prepared.operation_id(),
             ImportRecoveryMode::Resume,
-            |_| {},
+            |update| updates.push(update),
         )
         .unwrap();
 
         assert_eq!(outcome, RecoveryOutcome::Completed);
         assert_eq!(result.copied_count, 2);
+        let media = updates
+            .iter()
+            .filter_map(|update| match update {
+                OperationUpdate::MediaVerified(verified) => Some(verified),
+                OperationUpdate::Progress(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(media.len(), 2);
+        assert_eq!(
+            media
+                .iter()
+                .map(|verified| (verified.completed_media, verified.total_media))
+                .collect::<Vec<_>>(),
+            [(1, 2), (2, 2)]
+        );
+        assert_ne!(media[0].media.path, media[1].media.path);
         let collection = fixture
             .catalog
             .join("2026")
@@ -2189,6 +2266,80 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn legacy_recovery_uses_file_counts_without_media_events() {
+        let fixture = fixture();
+        let mut prepared = prep(&fixture, DestinationMode::Create);
+        for copy in &mut prepared.plan.copies {
+            copy.accepted_datetime = None;
+        }
+        let layout = CatalogLayout::new(&fixture.catalog);
+        let lock = CatalogLock::acquire(&layout).unwrap();
+        let mut journal =
+            OperationJournal::create(&layout, &lock, prepared.operation_id(), &prepared.plan)
+                .unwrap();
+        journal
+            .record_metadata(
+                &layout,
+                &lock,
+                prepared.plan.collection_name.clone(),
+                prepared.plan.source_path.clone(),
+                prepared.plan.copies.len(),
+            )
+            .unwrap();
+        for directory in prepared
+            .plan
+            .directories
+            .iter()
+            .filter(|directory| directory.create)
+        {
+            journal
+                .create_destination_directory(&layout, &lock, &directory.step_id, &directory.path)
+                .unwrap();
+        }
+        let first = &prepared.plan.copies[0];
+        layout
+            .copy_verified(
+                &lock,
+                &mut journal,
+                &first.source,
+                &first.destination,
+                &first.step_id,
+                CopyExpectation {
+                    sha256: first.digest.clone(),
+                    size_bytes: first.size_bytes,
+                },
+            )
+            .unwrap();
+        drop(journal);
+        lock.release().unwrap();
+
+        let mut updates = Vec::new();
+        let (_, result) = ImportRecoveryService::recover(
+            &fixture.catalog,
+            prepared.operation_id(),
+            ImportRecoveryMode::Resume,
+            |update| updates.push(update),
+        )
+        .unwrap();
+
+        assert_eq!(result.copied_count, prepared.plan.copies.len());
+        assert!(!updates
+            .iter()
+            .any(|update| matches!(update, OperationUpdate::MediaVerified(_))));
+        let progress = updates
+            .iter()
+            .filter_map(|update| match update {
+                OperationUpdate::Progress(progress) => {
+                    Some((progress.completed_units, progress.total_units))
+                }
+                OperationUpdate::MediaVerified(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(progress.first(), Some(&(1, 2)));
+        assert_eq!(progress.last(), Some(&(2, 2)));
     }
 
     #[test]
