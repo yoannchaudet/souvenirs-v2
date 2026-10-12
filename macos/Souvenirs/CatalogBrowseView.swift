@@ -216,6 +216,7 @@ private struct CatalogOverview: View {
             collectionCard(collection, annualPartYear: entry.annualPartYear)
         }
         .buttonStyle(.plain)
+        .disabled(model.blocksBrowseNavigation)
         .accessibilityIdentifier("archive-cover-\(identifier)")
         .accessibilityLabel(collection.browseLabel)
         .accessibilityValue(
